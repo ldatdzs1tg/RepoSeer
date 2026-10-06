@@ -1,0 +1,16 @@
+schemas:
+  repository_record:
+    version: "1.0.0"
+    format: "parquet"
+  commit_record:
+    version: "1.0.0"
+    format: "parquet"
+  technology_record:
+    version: "1.0.0"
+    format: "parquet"
+  article_record:
+    version: "1.0.0"
+    format: "parquet"
+  features_record:
+    version: "1.0.0"
+    format: "parquet"
