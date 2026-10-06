@@ -1,0 +1,25 @@
+github:
+  api_base_url: "https://api.github.com"
+  user_agent: "RepoSeer/0.1.0"
+  per_page: 100
+  rate_limit_buffer: 10
+
+pypi:
+  api_base_url: "https://pypi.org/pypi"
+  stats_url: "https://api.pepy.tech"
+
+deps_dev:
+  api_base_url: "https://api.deps.dev/v3"
+
+osv:
+  api_base_url: "https://api.osv.dev/v1"
+
+external:
+  providers:
+    - name: "hackernews"
+      api_base_url: "https://hn.algolia.com/api/v1"
+      enabled: true
+    - name: "rss"
+      enabled: true
+    - name: "news"
+      enabled: false

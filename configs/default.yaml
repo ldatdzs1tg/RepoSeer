@@ -1,0 +1,25 @@
+app:
+  name: "RepoSeer"
+  version: "0.1.0"
+  env: "development"
+
+storage:
+  base_dir: "data"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  features_dir: "data/features"
+  reports_dir: "data/reports"
+  metadata_dir: "data/metadata"
+
+collection:
+  timeout_seconds: 30
+  max_retries: 3
+  backoff_factor: 2.0
+  rate_limit_pause_seconds: 60
+  max_workers: 4
+  checkpoint_interval: 50
+
+processing:
+  batch_size: 100
+  deduplication_strategy: "url_and_hash"
+  similarity_threshold: 0.85
