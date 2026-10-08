@@ -1,0 +1,2657 @@
+{
+  "$defs": {
+    "Article": {
+      "additionalProperties": false,
+      "properties": {
+        "article_id": {
+          "pattern": "^article:sha256:[a-f0-9]{64}$",
+          "title": "Article Id",
+          "type": "string"
+        },
+        "article_kind": {
+          "enum": [
+            "announcement",
+            "documentation",
+            "blog",
+            "changelog",
+            "security",
+            "news",
+            "other"
+          ],
+          "title": "Article Kind",
+          "type": "string"
+        },
+        "authors": {
+          "anyOf": [
+            {
+              "items": {
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Authors"
+        },
+        "canonical_url": {
+          "format": "uri",
+          "pattern": "^https?://\\S+$",
+          "title": "Canonical Url",
+          "type": "string"
+        },
+        "content_available_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Content Available At"
+        },
+        "content_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Content Sha256"
+        },
+        "content_status": {
+          "enum": [
+            "full",
+            "snippet",
+            "unavailable"
+          ],
+          "title": "Content Status",
+          "type": "string"
+        },
+        "content_text": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Content Text"
+        },
+        "language_code": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Language Code"
+        },
+        "original_url": {
+          "format": "uri",
+          "pattern": "^https?://\\S+$",
+          "title": "Original Url",
+          "type": "string"
+        },
+        "package_ids": {
+          "items": {
+            "pattern": "^pypi:[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "title": "Package Ids",
+          "type": "array"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "published_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Published At"
+        },
+        "published_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Published Date"
+        },
+        "published_precision": {
+          "enum": [
+            "timestamp",
+            "date",
+            "unknown"
+          ],
+          "title": "Published Precision",
+          "type": "string"
+        },
+        "record_type": {
+          "const": "article",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "repo_ids": {
+          "items": {
+            "pattern": "^github:repository:[1-9][0-9]*$",
+            "type": "string"
+          },
+          "title": "Repo Ids",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "technology_mentions": {
+          "items": {
+            "$ref": "#/$defs/TechnologyMention"
+          },
+          "title": "Technology Mentions",
+          "type": "array"
+        },
+        "title": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Title",
+          "type": "string"
+        },
+        "updated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Updated At"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "article_id",
+        "original_url",
+        "canonical_url",
+        "title",
+        "article_kind",
+        "authors",
+        "language_code",
+        "published_at",
+        "published_date",
+        "published_precision",
+        "updated_at",
+        "content_status",
+        "content_text",
+        "content_sha256",
+        "content_available_at",
+        "technology_mentions",
+        "repo_ids",
+        "package_ids",
+        "provenance"
+      ],
+      "title": "Article",
+      "type": "object"
+    },
+    "CollectionMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "collector_name": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Collector Name",
+          "type": "string"
+        },
+        "collector_version": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Collector Version",
+          "type": "string"
+        },
+        "coverage": {
+          "items": {
+            "$ref": "#/$defs/Coverage"
+          },
+          "minItems": 1,
+          "title": "Coverage",
+          "type": "array"
+        },
+        "finished_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "Finished At",
+          "type": "string"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        },
+        "pages_fetched": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Pages Fetched",
+          "type": "integer"
+        },
+        "pagination_complete": {
+          "title": "Pagination Complete",
+          "type": "boolean"
+        },
+        "rate_limit_remaining": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Rate Limit Remaining"
+        },
+        "rate_limit_reset_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Rate Limit Reset At"
+        },
+        "records_emitted": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Records Emitted",
+          "type": "integer"
+        },
+        "records_rejected": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Records Rejected",
+          "type": "integer"
+        },
+        "requested_time_range": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimeRange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "started_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "Started At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "collector_name",
+        "collector_version",
+        "started_at",
+        "finished_at",
+        "requested_time_range",
+        "pages_fetched",
+        "records_emitted",
+        "records_rejected",
+        "pagination_complete",
+        "next_cursor",
+        "coverage",
+        "rate_limit_remaining",
+        "rate_limit_reset_at"
+      ],
+      "title": "CollectionMetadata",
+      "type": "object"
+    },
+    "CollectionRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "collector_name": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Collector Name",
+          "type": "string"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cursor"
+        },
+        "cutoff_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cutoff At"
+        },
+        "max_pages": {
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Max Pages",
+          "type": "integer"
+        },
+        "max_records": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Max Records",
+          "type": "integer"
+        },
+        "record_kinds": {
+          "items": {
+            "enum": [
+              "github_repository",
+              "package_release",
+              "repository_activity",
+              "dependency_metadata",
+              "article",
+              "technology_entity",
+              "security_advisory"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Record Kinds",
+          "type": "array"
+        },
+        "record_type": {
+          "const": "collection_request",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "github_rest",
+            "github_graphql",
+            "pypi_json",
+            "pypi_index",
+            "pypi_bigquery",
+            "gh_archive",
+            "deps_dev",
+            "osv",
+            "project_docs",
+            "web_article",
+            "source_archive",
+            "technology_catalog"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "subjects": {
+          "items": {
+            "$ref": "#/$defs/CollectionSubject"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "title": "Subjects",
+          "type": "array"
+        },
+        "time_range": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimeRange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "request_id",
+        "run_id",
+        "collector_name",
+        "source",
+        "subjects",
+        "record_kinds",
+        "time_range",
+        "cutoff_at",
+        "cursor",
+        "max_pages",
+        "max_records"
+      ],
+      "title": "CollectionRequest",
+      "type": "object"
+    },
+    "CollectionResult": {
+      "additionalProperties": false,
+      "properties": {
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/DataError"
+          },
+          "title": "Errors",
+          "type": "array"
+        },
+        "metadata": {
+          "$ref": "#/$defs/CollectionMetadata"
+        },
+        "record_type": {
+          "const": "collection_result",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "records": {
+          "items": {
+            "$ref": "#/$defs/RawRecord"
+          },
+          "title": "Records",
+          "type": "array"
+        },
+        "request_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "github_rest",
+            "github_graphql",
+            "pypi_json",
+            "pypi_index",
+            "pypi_bigquery",
+            "gh_archive",
+            "deps_dev",
+            "osv",
+            "project_docs",
+            "web_article",
+            "source_archive",
+            "technology_catalog"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "request_id",
+        "run_id",
+        "source",
+        "status",
+        "records",
+        "errors",
+        "metadata"
+      ],
+      "title": "CollectionResult",
+      "type": "object"
+    },
+    "CollectionSubject": {
+      "additionalProperties": false,
+      "properties": {
+        "package_id": {
+          "anyOf": [
+            {
+              "pattern": "^pypi:[a-z0-9]+(?:-[a-z0-9]+)*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Package Id"
+        },
+        "repo_full_name": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Repo Full Name"
+        },
+        "repo_id": {
+          "anyOf": [
+            {
+              "pattern": "^github:repository:[1-9][0-9]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Repo Id"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "format": "uri",
+              "pattern": "^https?://\\S+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Url"
+        }
+      },
+      "required": [
+        "repo_id",
+        "repo_full_name",
+        "package_id",
+        "url"
+      ],
+      "title": "CollectionSubject",
+      "type": "object"
+    },
+    "Coverage": {
+      "additionalProperties": false,
+      "properties": {
+        "data_group": {
+          "enum": [
+            "repo_identity",
+            "releases",
+            "commits",
+            "contributors",
+            "issues",
+            "pull_requests",
+            "dependencies",
+            "articles",
+            "technologies",
+            "security_advisories"
+          ],
+          "title": "Data Group",
+          "type": "string"
+        },
+        "missing_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "not_in_source",
+                "not_collected",
+                "unavailable",
+                "parse_error",
+                "not_applicable",
+                "ambiguous",
+                "historical_unavailable"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Missing Reason"
+        },
+        "records_observed": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Records Observed",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial",
+            "unavailable",
+            "not_applicable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "time_range": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimeRange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "data_group",
+        "status",
+        "time_range",
+        "records_observed",
+        "missing_reason"
+      ],
+      "title": "Coverage",
+      "type": "object"
+    },
+    "DataError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "network_error",
+            "http_error",
+            "rate_limited",
+            "not_found",
+            "not_mapped",
+            "unsupported_record_type",
+            "validation_error",
+            "parse_error",
+            "insufficient_history",
+            "schema_version_mismatch"
+          ],
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Message",
+          "type": "string"
+        },
+        "raw_record_id": {
+          "anyOf": [
+            {
+              "pattern": "^raw:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Raw Record Id"
+        },
+        "retryable": {
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "source_record_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Record Id"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "source_record_id",
+        "raw_record_id"
+      ],
+      "title": "DataError",
+      "type": "object"
+    },
+    "DependencyRequirement": {
+      "additionalProperties": false,
+      "properties": {
+        "dependency_kind": {
+          "enum": [
+            "runtime",
+            "optional",
+            "build",
+            "development"
+          ],
+          "title": "Dependency Kind",
+          "type": "string"
+        },
+        "environment_marker": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Environment Marker"
+        },
+        "extras": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Extras",
+          "type": "array"
+        },
+        "package_id": {
+          "pattern": "^pypi:[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "title": "Package Id",
+          "type": "string"
+        },
+        "version_specifier": {
+          "title": "Version Specifier",
+          "type": "string"
+        }
+      },
+      "required": [
+        "package_id",
+        "version_specifier",
+        "environment_marker",
+        "extras",
+        "dependency_kind"
+      ],
+      "title": "DependencyRequirement",
+      "type": "object"
+    },
+    "GitHubRepository": {
+      "additionalProperties": false,
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "Created At",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Description"
+        },
+        "forks_count": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Forks Count"
+        },
+        "identity": {
+          "$ref": "#/$defs/RepoIdentity"
+        },
+        "is_archived": {
+          "title": "Is Archived",
+          "type": "boolean"
+        },
+        "is_fork": {
+          "title": "Is Fork",
+          "type": "boolean"
+        },
+        "is_template": {
+          "title": "Is Template",
+          "type": "boolean"
+        },
+        "language_bytes": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/LanguageBytes"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Language Bytes"
+        },
+        "mirror_url": {
+          "anyOf": [
+            {
+              "format": "uri",
+              "pattern": "^https?://\\S+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Mirror Url"
+        },
+        "open_issues_and_prs_count": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Open Issues And Prs Count"
+        },
+        "primary_language": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Primary Language"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "pushed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Pushed At"
+        },
+        "record_type": {
+          "const": "github_repository",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "stargazers_count": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Stargazers Count"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "Updated At",
+          "type": "string"
+        },
+        "visibility": {
+          "enum": [
+            "public",
+            "private",
+            "internal"
+          ],
+          "title": "Visibility",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "identity",
+        "description",
+        "visibility",
+        "is_fork",
+        "is_template",
+        "is_archived",
+        "mirror_url",
+        "primary_language",
+        "language_bytes",
+        "created_at",
+        "updated_at",
+        "pushed_at",
+        "stargazers_count",
+        "forks_count",
+        "open_issues_and_prs_count",
+        "provenance"
+      ],
+      "title": "GitHubRepository",
+      "type": "object"
+    },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "LanguageBytes": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes_count": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Bytes Count",
+          "type": "integer"
+        },
+        "language": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Language",
+          "type": "string"
+        }
+      },
+      "required": [
+        "language",
+        "bytes_count"
+      ],
+      "title": "LanguageBytes",
+      "type": "object"
+    },
+    "MissingField": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Detail"
+        },
+        "field_path": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Field Path",
+          "type": "string"
+        },
+        "reason": {
+          "enum": [
+            "not_in_source",
+            "not_collected",
+            "unavailable",
+            "parse_error",
+            "not_applicable",
+            "ambiguous",
+            "historical_unavailable"
+          ],
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field_path",
+        "reason",
+        "detail"
+      ],
+      "title": "MissingField",
+      "type": "object"
+    },
+    "NormalizationRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "record_type": {
+          "const": "normalization_request",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "records": {
+          "items": {
+            "$ref": "#/$defs/RawRecord"
+          },
+          "title": "Records",
+          "type": "array"
+        },
+        "request_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "request_id",
+        "run_id",
+        "records"
+      ],
+      "title": "NormalizationRequest",
+      "type": "object"
+    },
+    "NormalizationResult": {
+      "additionalProperties": false,
+      "properties": {
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/DataError"
+          },
+          "title": "Errors",
+          "type": "array"
+        },
+        "input_record_count": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Input Record Count",
+          "type": "integer"
+        },
+        "normalizer_version": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Normalizer Version",
+          "type": "string"
+        },
+        "output_record_count": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Output Record Count",
+          "type": "integer"
+        },
+        "processed_record_count": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Processed Record Count",
+          "type": "integer"
+        },
+        "record_type": {
+          "const": "normalization_result",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "records": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "article": "#/$defs/Article",
+                "github_repository": "#/$defs/GitHubRepository",
+                "package_release": "#/$defs/PackageRelease",
+                "repository_activity": "#/$defs/RepositoryActivity",
+                "technology_entity": "#/$defs/TechnologyEntity"
+              },
+              "propertyName": "record_type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/GitHubRepository"
+              },
+              {
+                "$ref": "#/$defs/TechnologyEntity"
+              },
+              {
+                "$ref": "#/$defs/Article"
+              },
+              {
+                "$ref": "#/$defs/PackageRelease"
+              },
+              {
+                "$ref": "#/$defs/RepositoryActivity"
+              }
+            ]
+          },
+          "title": "Records",
+          "type": "array"
+        },
+        "rejected_record_count": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Rejected Record Count",
+          "type": "integer"
+        },
+        "request_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "request_id",
+        "run_id",
+        "normalizer_version",
+        "status",
+        "input_record_count",
+        "processed_record_count",
+        "rejected_record_count",
+        "output_record_count",
+        "records",
+        "errors"
+      ],
+      "title": "NormalizationResult",
+      "type": "object"
+    },
+    "PackageRelease": {
+      "additionalProperties": false,
+      "properties": {
+        "dependencies": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/DependencyRequirement"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Dependencies"
+        },
+        "is_yanked": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Is Yanked"
+        },
+        "package_id": {
+          "pattern": "^pypi:[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "title": "Package Id",
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "record_type": {
+          "const": "package_release",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "repo_id": {
+          "anyOf": [
+            {
+              "pattern": "^github:repository:[1-9][0-9]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Repo Id"
+        },
+        "requires_python": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Requires Python"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "uploaded_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "Uploaded At",
+          "type": "string"
+        },
+        "version": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Version",
+          "type": "string"
+        },
+        "yanked_reason": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Yanked Reason"
+        },
+        "yanked_status_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Yanked Status At"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "package_id",
+        "repo_id",
+        "version",
+        "uploaded_at",
+        "requires_python",
+        "dependencies",
+        "is_yanked",
+        "yanked_reason",
+        "yanked_status_at",
+        "provenance"
+      ],
+      "title": "PackageRelease",
+      "type": "object"
+    },
+    "PackageSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage": {
+          "items": {
+            "$ref": "#/$defs/Coverage"
+          },
+          "title": "Coverage",
+          "type": "array"
+        },
+        "cutoff_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "Cutoff At",
+          "type": "string"
+        },
+        "features": {
+          "$ref": "#/$defs/SnapshotFeatures"
+        },
+        "horizon_end_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "Horizon End At",
+          "type": "string"
+        },
+        "horizon_months": {
+          "const": 12,
+          "title": "Horizon Months",
+          "type": "integer"
+        },
+        "missing_fields": {
+          "items": {
+            "$ref": "#/$defs/MissingField"
+          },
+          "title": "Missing Fields",
+          "type": "array"
+        },
+        "package_id": {
+          "pattern": "^pypi:[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "title": "Package Id",
+          "type": "string"
+        },
+        "raw_record_ids": {
+          "items": {
+            "pattern": "^raw:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+            "type": "string"
+          },
+          "title": "Raw Record Ids",
+          "type": "array"
+        },
+        "record_type": {
+          "const": "package_snapshot",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "repo_group_id": {
+          "pattern": "^github:repository:[1-9][0-9]*$",
+          "title": "Repo Group Id",
+          "type": "string"
+        },
+        "repo_id": {
+          "pattern": "^github:repository:[1-9][0-9]*$",
+          "title": "Repo Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "package_id",
+        "repo_id",
+        "repo_group_id",
+        "cutoff_at",
+        "horizon_months",
+        "horizon_end_at",
+        "features",
+        "coverage",
+        "missing_fields",
+        "raw_record_ids"
+      ],
+      "title": "PackageSnapshot",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "properties": {
+        "available_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Available At"
+        },
+        "missing_fields": {
+          "items": {
+            "$ref": "#/$defs/MissingField"
+          },
+          "title": "Missing Fields",
+          "type": "array"
+        },
+        "raw_record_ids": {
+          "items": {
+            "pattern": "^raw:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Raw Record Ids",
+          "type": "array"
+        },
+        "retrieved_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "Retrieved At",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "github_rest",
+            "github_graphql",
+            "pypi_json",
+            "pypi_index",
+            "pypi_bigquery",
+            "gh_archive",
+            "deps_dev",
+            "osv",
+            "project_docs",
+            "web_article",
+            "source_archive",
+            "technology_catalog"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "source_url": {
+          "format": "uri",
+          "pattern": "^https?://\\S+$",
+          "title": "Source Url",
+          "type": "string"
+        },
+        "temporal_basis": {
+          "enum": [
+            "observation",
+            "historical_reconstruction"
+          ],
+          "title": "Temporal Basis",
+          "type": "string"
+        },
+        "valid_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "Valid At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "source_url",
+        "retrieved_at",
+        "valid_at",
+        "available_at",
+        "temporal_basis",
+        "raw_record_ids",
+        "missing_fields"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "RawRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "available_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Available At"
+        },
+        "event_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Event At"
+        },
+        "http_status": {
+          "anyOf": [
+            {
+              "maximum": 599,
+              "minimum": 100,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Http Status"
+        },
+        "package_id": {
+          "anyOf": [
+            {
+              "pattern": "^pypi:[a-z0-9]+(?:-[a-z0-9]+)*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Package Id"
+        },
+        "payload": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Payload",
+          "type": "object"
+        },
+        "raw_body_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Raw Body Sha256"
+        },
+        "raw_record_id": {
+          "pattern": "^raw:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Raw Record Id",
+          "type": "string"
+        },
+        "record_type": {
+          "const": "raw_record",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "repo_id": {
+          "anyOf": [
+            {
+              "pattern": "^github:repository:[1-9][0-9]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Repo Id"
+        },
+        "retrieved_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "Retrieved At",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "github_rest",
+            "github_graphql",
+            "pypi_json",
+            "pypi_index",
+            "pypi_bigquery",
+            "gh_archive",
+            "deps_dev",
+            "osv",
+            "project_docs",
+            "web_article",
+            "source_archive",
+            "technology_catalog"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "source_record_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Record Id"
+        },
+        "source_record_type": {
+          "enum": [
+            "github_repository",
+            "package_release",
+            "repository_activity",
+            "dependency_metadata",
+            "article",
+            "technology_entity",
+            "security_advisory"
+          ],
+          "title": "Source Record Type",
+          "type": "string"
+        },
+        "source_url": {
+          "format": "uri",
+          "pattern": "^https?://\\S+$",
+          "title": "Source Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "raw_record_id",
+        "run_id",
+        "source",
+        "source_record_type",
+        "source_record_id",
+        "repo_id",
+        "package_id",
+        "source_url",
+        "retrieved_at",
+        "event_at",
+        "available_at",
+        "http_status",
+        "raw_body_sha256",
+        "payload"
+      ],
+      "title": "RawRecord",
+      "type": "object"
+    },
+    "RepoIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "github_node_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Github Node Id"
+        },
+        "github_repo_id": {
+          "pattern": "^[1-9][0-9]*$",
+          "title": "Github Repo Id",
+          "type": "string"
+        },
+        "known_urls": {
+          "items": {
+            "format": "uri",
+            "pattern": "^https?://\\S+$",
+            "type": "string"
+          },
+          "title": "Known Urls",
+          "type": "array"
+        },
+        "repo_full_name": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$",
+          "title": "Repo Full Name",
+          "type": "string"
+        },
+        "repo_id": {
+          "pattern": "^github:repository:[1-9][0-9]*$",
+          "title": "Repo Id",
+          "type": "string"
+        },
+        "repo_url": {
+          "format": "uri",
+          "pattern": "^https?://\\S+$",
+          "title": "Repo Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo_id",
+        "github_repo_id",
+        "github_node_id",
+        "repo_full_name",
+        "repo_url",
+        "known_urls"
+      ],
+      "title": "RepoIdentity",
+      "type": "object"
+    },
+    "RepositoryActivity": {
+      "additionalProperties": false,
+      "properties": {
+        "activity_id": {
+          "pattern": "^github:activity:[1-9][0-9]*:(?:commit|issue_opened|issue_closed|issue_reopened|pr_opened|pr_closed|pr_reopened|pr_merged|comment):[A-Za-z0-9._-]+$",
+          "title": "Activity Id",
+          "type": "string"
+        },
+        "activity_kind": {
+          "enum": [
+            "commit",
+            "issue_opened",
+            "issue_closed",
+            "issue_reopened",
+            "pr_opened",
+            "pr_closed",
+            "pr_reopened",
+            "pr_merged",
+            "comment"
+          ],
+          "title": "Activity Kind",
+          "type": "string"
+        },
+        "actor_id": {
+          "anyOf": [
+            {
+              "pattern": "^[1-9][0-9]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Actor Id"
+        },
+        "actor_is_bot": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Actor Is Bot"
+        },
+        "event_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "Event At",
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "record_type": {
+          "const": "repository_activity",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "repo_id": {
+          "pattern": "^github:repository:[1-9][0-9]*$",
+          "title": "Repo Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_object_id": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Source Object Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "activity_id",
+        "repo_id",
+        "activity_kind",
+        "source_object_id",
+        "event_at",
+        "actor_id",
+        "actor_is_bot",
+        "provenance"
+      ],
+      "title": "RepositoryActivity",
+      "type": "object"
+    },
+    "SnapshotBuildRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "activities": {
+          "items": {
+            "$ref": "#/$defs/RepositoryActivity"
+          },
+          "title": "Activities",
+          "type": "array"
+        },
+        "coverage": {
+          "items": {
+            "$ref": "#/$defs/Coverage"
+          },
+          "title": "Coverage",
+          "type": "array"
+        },
+        "cutoff_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "Cutoff At",
+          "type": "string"
+        },
+        "horizon_months": {
+          "const": 12,
+          "title": "Horizon Months",
+          "type": "integer"
+        },
+        "package_id": {
+          "pattern": "^pypi:[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "title": "Package Id",
+          "type": "string"
+        },
+        "record_type": {
+          "const": "snapshot_build_request",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "releases": {
+          "items": {
+            "$ref": "#/$defs/PackageRelease"
+          },
+          "title": "Releases",
+          "type": "array"
+        },
+        "repository": {
+          "$ref": "#/$defs/RepoIdentity"
+        },
+        "request_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "request_id",
+        "run_id",
+        "package_id",
+        "repository",
+        "cutoff_at",
+        "horizon_months",
+        "releases",
+        "activities",
+        "coverage"
+      ],
+      "title": "SnapshotBuildRequest",
+      "type": "object"
+    },
+    "SnapshotBuildResult": {
+      "additionalProperties": false,
+      "properties": {
+        "builder_version": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Builder Version",
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/DataError"
+          },
+          "title": "Errors",
+          "type": "array"
+        },
+        "record_type": {
+          "const": "snapshot_build_result",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PackageSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "request_id",
+        "run_id",
+        "builder_version",
+        "status",
+        "snapshot",
+        "errors"
+      ],
+      "title": "SnapshotBuildResult",
+      "type": "object"
+    },
+    "SnapshotFeatures": {
+      "additionalProperties": false,
+      "properties": {
+        "commit_count_12m": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Commit Count 12M"
+        },
+        "commit_count_3m": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Commit Count 3M"
+        },
+        "commit_count_6m": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Commit Count 6M"
+        },
+        "contributor_count_12m": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Contributor Count 12M"
+        },
+        "days_since_latest_release": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Days Since Latest Release"
+        },
+        "issue_closed_count_12m": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Issue Closed Count 12M"
+        },
+        "issue_opened_count_12m": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Issue Opened Count 12M"
+        },
+        "package_age_days": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Package Age Days"
+        },
+        "pr_merged_count_12m": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Pr Merged Count 12M"
+        },
+        "pr_opened_count_12m": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Pr Opened Count 12M"
+        },
+        "release_count_12m": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Release Count 12M"
+        },
+        "release_count_3m": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Release Count 3M"
+        },
+        "release_count_6m": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Release Count 6M"
+        },
+        "releases_total": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Releases Total"
+        }
+      },
+      "required": [
+        "package_age_days",
+        "releases_total",
+        "days_since_latest_release",
+        "release_count_3m",
+        "release_count_6m",
+        "release_count_12m",
+        "commit_count_3m",
+        "commit_count_6m",
+        "commit_count_12m",
+        "contributor_count_12m",
+        "issue_opened_count_12m",
+        "issue_closed_count_12m",
+        "pr_opened_count_12m",
+        "pr_merged_count_12m"
+      ],
+      "title": "SnapshotFeatures",
+      "type": "object"
+    },
+    "TechnologyEntity": {
+      "additionalProperties": false,
+      "properties": {
+        "aliases": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "category": {
+          "enum": [
+            "language",
+            "framework",
+            "library",
+            "runtime",
+            "database",
+            "developer_tool",
+            "platform",
+            "standard"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Description"
+        },
+        "lifecycle_status": {
+          "enum": [
+            "active",
+            "deprecated",
+            "end_of_life",
+            "unknown"
+          ],
+          "title": "Lifecycle Status",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Name",
+          "type": "string"
+        },
+        "official_urls": {
+          "items": {
+            "format": "uri",
+            "pattern": "^https?://\\S+$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Official Urls",
+          "type": "array"
+        },
+        "package_ids": {
+          "items": {
+            "pattern": "^pypi:[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "title": "Package Ids",
+          "type": "array"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "record_type": {
+          "const": "technology_entity",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "repo_ids": {
+          "items": {
+            "pattern": "^github:repository:[1-9][0-9]*$",
+            "type": "string"
+          },
+          "title": "Repo Ids",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "slug": {
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "title": "Slug",
+          "type": "string"
+        },
+        "status_evidence_url": {
+          "anyOf": [
+            {
+              "format": "uri",
+              "pattern": "^https?://\\S+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Status Evidence Url"
+        },
+        "technology_id": {
+          "pattern": "^tech:[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "title": "Technology Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "technology_id",
+        "slug",
+        "name",
+        "category",
+        "aliases",
+        "description",
+        "official_urls",
+        "repo_ids",
+        "package_ids",
+        "lifecycle_status",
+        "status_evidence_url",
+        "provenance"
+      ],
+      "title": "TechnologyEntity",
+      "type": "object"
+    },
+    "TechnologyLinkRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "articles": {
+          "items": {
+            "$ref": "#/$defs/Article"
+          },
+          "title": "Articles",
+          "type": "array"
+        },
+        "record_type": {
+          "const": "technology_link_request",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "technology_entities": {
+          "items": {
+            "$ref": "#/$defs/TechnologyEntity"
+          },
+          "title": "Technology Entities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "request_id",
+        "run_id",
+        "articles",
+        "technology_entities"
+      ],
+      "title": "TechnologyLinkRequest",
+      "type": "object"
+    },
+    "TechnologyLinkResult": {
+      "additionalProperties": false,
+      "properties": {
+        "articles": {
+          "items": {
+            "$ref": "#/$defs/Article"
+          },
+          "title": "Articles",
+          "type": "array"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/DataError"
+          },
+          "title": "Errors",
+          "type": "array"
+        },
+        "linker_version": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Linker Version",
+          "type": "string"
+        },
+        "record_type": {
+          "const": "technology_link_result",
+          "title": "Record Type",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "request_id",
+        "run_id",
+        "linker_version",
+        "status",
+        "articles",
+        "errors"
+      ],
+      "title": "TechnologyLinkResult",
+      "type": "object"
+    },
+    "TechnologyMention": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "extractor_version": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Extractor Version",
+          "type": "string"
+        },
+        "match_method": {
+          "enum": [
+            "dictionary",
+            "manual",
+            "model"
+          ],
+          "title": "Match Method",
+          "type": "string"
+        },
+        "matched_text": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Matched Text",
+          "type": "string"
+        },
+        "technology_id": {
+          "pattern": "^tech:[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "title": "Technology Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "technology_id",
+        "matched_text",
+        "confidence",
+        "match_method",
+        "extractor_version"
+      ],
+      "title": "TechnologyMention",
+      "type": "object"
+    },
+    "TimeRange": {
+      "additionalProperties": false,
+      "description": "Half-open historical window (start_at, end_at].",
+      "properties": {
+        "end_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "End At",
+          "type": "string"
+        },
+        "start_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+          "title": "Start At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start_at",
+        "end_at"
+      ],
+      "title": "TimeRange",
+      "type": "object"
+    }
+  },
+  "$id": "urn:reposeer:data-contract:0.1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Structural schema. Cross-field invariants are enforced by shared/models.py and shared/validation.py.",
+  "discriminator": {
+    "mapping": {
+      "article": "#/$defs/Article",
+      "collection_request": "#/$defs/CollectionRequest",
+      "collection_result": "#/$defs/CollectionResult",
+      "github_repository": "#/$defs/GitHubRepository",
+      "normalization_request": "#/$defs/NormalizationRequest",
+      "normalization_result": "#/$defs/NormalizationResult",
+      "package_release": "#/$defs/PackageRelease",
+      "package_snapshot": "#/$defs/PackageSnapshot",
+      "raw_record": "#/$defs/RawRecord",
+      "repository_activity": "#/$defs/RepositoryActivity",
+      "snapshot_build_request": "#/$defs/SnapshotBuildRequest",
+      "snapshot_build_result": "#/$defs/SnapshotBuildResult",
+      "technology_entity": "#/$defs/TechnologyEntity",
+      "technology_link_request": "#/$defs/TechnologyLinkRequest",
+      "technology_link_result": "#/$defs/TechnologyLinkResult"
+    },
+    "propertyName": "record_type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/RawRecord"
+    },
+    {
+      "$ref": "#/$defs/GitHubRepository"
+    },
+    {
+      "$ref": "#/$defs/TechnologyEntity"
+    },
+    {
+      "$ref": "#/$defs/Article"
+    },
+    {
+      "$ref": "#/$defs/PackageRelease"
+    },
+    {
+      "$ref": "#/$defs/RepositoryActivity"
+    },
+    {
+      "$ref": "#/$defs/CollectionRequest"
+    },
+    {
+      "$ref": "#/$defs/CollectionResult"
+    },
+    {
+      "$ref": "#/$defs/NormalizationRequest"
+    },
+    {
+      "$ref": "#/$defs/NormalizationResult"
+    },
+    {
+      "$ref": "#/$defs/TechnologyLinkRequest"
+    },
+    {
+      "$ref": "#/$defs/TechnologyLinkResult"
+    },
+    {
+      "$ref": "#/$defs/PackageSnapshot"
+    },
+    {
+      "$ref": "#/$defs/SnapshotBuildRequest"
+    },
+    {
+      "$ref": "#/$defs/SnapshotBuildResult"
+    }
+  ],
+  "title": "RepoSeer Data Contract 0.1.0"
+}
