@@ -100,3 +100,10 @@ ruff check .
 # Format code
 ruff format .
 ```
+
+### 5. Common Collector Utilities
+
+GitHub and external collectors share HTTP timeout, retry/backoff, rate-limit
+handling, optional TTL response caching, logging, and atomic run checkpoints.
+See [Common collector utilities](docs/architecture/collector_utilities.md) for
+configuration, shared-session usage, checkpoint semantics, and the offline smoke test.

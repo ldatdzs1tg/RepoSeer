@@ -2,10 +2,14 @@
 
 import json
 import logging
+import re
+from datetime import datetime
 from pathlib import Path
 
 from reposeer.collection.context import CollectionContext
-from reposeer.constants import DEFAULT_DATA_DIR
+from reposeer.collection.persistence import write_json_atomic
+from reposeer.config import settings
+from reposeer.exceptions import CollectionError
 
 logger = logging.getLogger("reposeer.collection.run_manager")
 
@@ -14,21 +18,30 @@ class RunManager:
     """Manages run state, persistence of checkpoints, and recovery."""
 
     def __init__(self, checkpoints_dir: Path | None = None):
-        self.checkpoints_dir = checkpoints_dir or (
-            DEFAULT_DATA_DIR / "metadata" / "collection_runs"
+        self.checkpoints_dir = (
+            Path(checkpoints_dir)
+            if checkpoints_dir is not None
+            else settings.storage.metadata_dir / "collection_runs"
         )
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+
+    def _checkpoint_path(self, run_id: str) -> Path:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
+            raise ValueError("run_id must contain only letters, numbers, underscores, and hyphens")
+        return self.checkpoints_dir / f"run_{run_id}.json"
 
     def start_run(self, run_id: str | None = None) -> CollectionContext:
         """Start a new collection run context."""
         context = CollectionContext() if run_id is None else CollectionContext(run_id=run_id)
+        if self._checkpoint_path(context.run_id).exists():
+            raise CollectionError(f"Run {context.run_id} already exists; use resume_run")
         self.save_checkpoint(context)
         logger.info("Started collection run %s", context.run_id)
         return context
 
     def save_checkpoint(self, context: CollectionContext) -> Path:
-        """Persist current run state to checkpoint file."""
-        file_path = self.checkpoints_dir / f"run_{context.run_id}.json"
+        """Atomically persist current run state, keeping the previous file on failure."""
+        file_path = self._checkpoint_path(context.run_id)
         data = {
             "run_id": context.run_id,
             "started_at": context.started_at.isoformat(),
@@ -36,23 +49,43 @@ class RunManager:
             "error_count": context.error_count,
             "checkpoint_state": context.checkpoint_state,
         }
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        try:
+            write_json_atomic(file_path, data)
+        except (OSError, ValueError, TypeError) as error:
+            logger.error("Could not save checkpoint for run %s", context.run_id)
+            raise CollectionError(f"Could not save checkpoint for run {context.run_id}") from error
         return file_path
 
     def resume_run(self, run_id: str) -> CollectionContext | None:
         """Resume an existing run from its saved checkpoint."""
-        file_path = self.checkpoints_dir / f"run_{run_id}.json"
+        file_path = self._checkpoint_path(run_id)
         if not file_path.exists():
             logger.warning("Checkpoint for run %s not found", run_id)
             return None
-        with open(file_path, encoding="utf-8") as f:
-            data = json.load(f)
-        context = CollectionContext(
-            run_id=data["run_id"],
-            checkpoint_state=data.get("checkpoint_state", {}),
-            collected_count=data.get("collected_count", 0),
-            error_count=data.get("error_count", 0),
-        )
+        try:
+            data = json.loads(file_path.read_text(encoding="utf-8"))
+            state = data["checkpoint_state"]
+            if data["run_id"] != run_id or not isinstance(state, dict):
+                raise ValueError("Invalid checkpoint identity or state")
+            if any(
+                not isinstance(key, str) or type(value) not in (str, int)
+                for key, value in state.items()
+            ):
+                raise ValueError("Invalid checkpoint cursor")
+            if any(
+                type(data[key]) is not int or data[key] < 0
+                for key in ("collected_count", "error_count")
+            ):
+                raise ValueError("Invalid checkpoint counts")
+            context = CollectionContext(
+                run_id=run_id,
+                started_at=datetime.fromisoformat(data["started_at"]),
+                checkpoint_state=state,
+                collected_count=data["collected_count"],
+                error_count=data["error_count"],
+            )
+        except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
+            logger.error("Could not read checkpoint for run %s", run_id)
+            raise CollectionError(f"Invalid or unreadable checkpoint for run {run_id}") from error
         logger.info("Resumed collection run %s", run_id)
         return context

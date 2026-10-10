@@ -15,7 +15,11 @@ collection:
   timeout_seconds: 30
   max_retries: 3
   backoff_factor: 2.0
+  max_backoff_seconds: 10.0
   rate_limit_pause_seconds: 60
+  rate_limit_buffer: 5
+  cache_enabled: false
+  cache_ttl_seconds: 300
   max_workers: 4
   checkpoint_interval: 50
 

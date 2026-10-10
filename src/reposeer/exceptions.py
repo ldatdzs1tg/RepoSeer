@@ -33,8 +33,15 @@ class HTTPClientError(CollectionError):
 class RateLimitExceededError(HTTPClientError):
     """Raised when an upstream API rate limit is reached."""
 
-    def __init__(self, message: str, reset_timestamp: float | None = None):
-        super().__init__(message, status_code=429)
+    def __init__(
+        self,
+        message: str,
+        reset_timestamp: float | None = None,
+        *,
+        status_code: int = 429,
+        response_body: str | None = None,
+    ):
+        super().__init__(message, status_code=status_code, response_body=response_body)
         self.reset_timestamp = reset_timestamp
 
 
