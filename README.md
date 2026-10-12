@@ -81,6 +81,9 @@ reposeer collect pallets/flask
 # Normalize & process raw data into Parquet
 reposeer process
 
+# Identify technology entities & generate external search terms (T-011)
+reposeer detect-tech pallets/flask
+
 # Generate data quality profiling report
 reposeer profile
 
@@ -209,3 +212,37 @@ intend to collect, configure `GITHUB_TOKEN` through the existing environment set
 and run the batch command above. Check its summary, replay the raw JSONL using
 `JsonlStorage.read_contract_records`, and inspect the projected Parquet with Polars
 or DuckDB. Live collection writes new observations to the configured data directory.
+
+
+## Technology entity detection & search terms (T-011)
+
+Identifies technology entities, aliases, and generates multi-intent external search queries from repository metadata, READMEs, topics, dependency manifests (`requirements.txt`, `pyproject.toml`), or pinned signals:
+
+```python
+from reposeer.technology import detect_technologies
+
+result = detect_technologies(
+    repo="pallets/flask",
+    manifest_files={"requirements.txt": "Werkzeug>=3.0\nJinja2>=3.1.2\nclick>=8.1.3\npytest"},
+    topics=["python", "web", "framework", "flask"],
+    readme_content="# Flask\nA micro web framework written in Python.",
+)
+
+# Output canonical entities conforming strictly to T-011 TechnologyEntity schema
+for entity in result.entities:
+    print(entity.technology_id, entity.name, entity.category)
+
+# Output prioritized search terms for external news, maintenance, and security
+for term in result.search_terms:
+    print(f"[{term.priority}] ({term.platform}) {term.intent}: {term.query}")
+```
+
+CLI usage:
+
+```bash
+# Formatted table view
+reposeer detect-tech pallets/flask
+
+# JSON output according to schema T-011
+reposeer detect-tech pydantic/pydantic --json
+```
