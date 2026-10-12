@@ -1,0 +1,38 @@
+{
+  "article_id": "article:sha256:19e2cfd9f283d9792f23d39416efda556e44310e099c53610c9dd2bda66e3c3b",
+  "article_kind": "announcement",
+  "authors": null,
+  "canonical_url": "https://example.test/News/Python?edition=1",
+  "content_available_at": null,
+  "content_sha256": "d9a9f205727f0fec6e61d5c063774778d5a2aa0c3887fc09a45b53beae20a1ed",
+  "content_status": "full",
+  "content_text": "Python synthetic announcement.",
+  "language_code": "en",
+  "original_url": "https://example.test/News/Python?edition=1",
+  "package_ids": [
+    "pypi:demo-maintenance-package"
+  ],
+  "provenance": {
+    "available_at": "2024-02-29T12:00:00.000Z",
+    "missing_fields": [],
+    "raw_record_ids": [
+      "raw:00000000-0000-4000-8000-000000000014"
+    ],
+    "retrieved_at": "2024-02-29T12:00:00.000Z",
+    "source": "web_article",
+    "source_url": "https://example.test/News/Python?edition=1",
+    "temporal_basis": "observation",
+    "valid_at": "2024-02-29T12:00:00.000Z"
+  },
+  "published_at": null,
+  "published_date": "2024-02-01",
+  "published_precision": "date",
+  "record_type": "article",
+  "repo_ids": [
+    "github:repository:900000001"
+  ],
+  "schema_version": "0.1.0",
+  "technology_mentions": [],
+  "title": "Synthetic Python announcement",
+  "updated_at": null
+}

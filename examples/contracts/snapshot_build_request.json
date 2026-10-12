@@ -1,0 +1,85 @@
+{
+  "activities": [
+    {
+      "activity_id": "github:activity:900000001:commit:abc123",
+      "activity_kind": "commit",
+      "actor_id": null,
+      "actor_is_bot": null,
+      "event_at": "2024-01-01T00:00:00.000Z",
+      "provenance": {
+        "available_at": "2024-01-01T00:00:00.000Z",
+        "missing_fields": [],
+        "raw_record_ids": [
+          "raw:00000000-0000-4000-8000-000000000012"
+        ],
+        "retrieved_at": "2024-02-29T12:00:00.000Z",
+        "source": "github_rest",
+        "source_url": "https://api.github.com/repos/Synthetic/Demo/commits",
+        "temporal_basis": "historical_reconstruction",
+        "valid_at": "2024-01-01T00:00:00.000Z"
+      },
+      "record_type": "repository_activity",
+      "repo_id": "github:repository:900000001",
+      "schema_version": "0.1.0",
+      "source_object_id": "abc123"
+    }
+  ],
+  "coverage": [
+    {
+      "data_group": "releases",
+      "missing_reason": "not_collected",
+      "records_observed": 1,
+      "status": "partial",
+      "time_range": null
+    },
+    {
+      "data_group": "commits",
+      "missing_reason": "not_collected",
+      "records_observed": 1,
+      "status": "partial",
+      "time_range": null
+    }
+  ],
+  "cutoff_at": "2024-03-31T23:59:59.999Z",
+  "horizon_months": 12,
+  "package_id": "pypi:demo-maintenance-package",
+  "record_type": "snapshot_build_request",
+  "releases": [
+    {
+      "dependencies": null,
+      "is_yanked": null,
+      "package_id": "pypi:demo-maintenance-package",
+      "provenance": {
+        "available_at": "2023-12-01T00:00:00.000Z",
+        "missing_fields": [],
+        "raw_record_ids": [
+          "raw:00000000-0000-4000-8000-000000000011"
+        ],
+        "retrieved_at": "2024-02-29T12:00:00.000Z",
+        "source": "pypi_json",
+        "source_url": "https://pypi.org/pypi/demo-maintenance-package/json",
+        "temporal_basis": "historical_reconstruction",
+        "valid_at": "2023-12-01T00:00:00.000Z"
+      },
+      "record_type": "package_release",
+      "repo_id": "github:repository:900000001",
+      "requires_python": ">=3.12",
+      "schema_version": "0.1.0",
+      "uploaded_at": "2023-12-01T00:00:00.000Z",
+      "version": "1.0.0",
+      "yanked_reason": null,
+      "yanked_status_at": null
+    }
+  ],
+  "repository": {
+    "github_node_id": "R_SYNTHETIC",
+    "github_repo_id": "900000001",
+    "known_urls": [],
+    "repo_full_name": "Synthetic/Demo",
+    "repo_id": "github:repository:900000001",
+    "repo_url": "https://github.com/synthetic/demo"
+  },
+  "request_id": "00000000-0000-4000-8000-000000000005",
+  "run_id": "00000000-0000-4000-8000-000000000001",
+  "schema_version": "0.1.0"
+}

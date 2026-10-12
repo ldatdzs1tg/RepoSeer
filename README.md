@@ -107,3 +107,32 @@ GitHub and external collectors share HTTP timeout, retry/backoff, rate-limit
 handling, optional TTL response caching, logging, and atomic run checkpoints.
 See [Common collector utilities](docs/architecture/collector_utilities.md) for
 configuration, shared-session usage, checkpoint semantics, and the offline smoke test.
+
+
+## Data contract (T-011)
+
+Canonical exchange contract `0.1.0` aligns with T-008 architecture v0.3. Models, identity helpers, strict record/pair validation and typed GitHub adapters live in `src/reposeer/contracts/`; `src/reposeer/schemas/` remains legacy/internal DTOs.
+
+```python
+from reposeer.contracts import RawRecord, GitHubRepository, validate_record
+from reposeer.contracts.adapters import GitHubRepositoryContractCollector, GitHubRepositoryContractNormalizer
+```
+
+`RepositoryService.collect_and_store` now follows native GitHub JSON → validated RawRecord → append-only JSONL → validated GitHubRepository → flattened Parquet → DuckDB. It uses T-012 HTTP utilities and preserves injected session ownership. Unknown counts stay null; unavailable raw HTTP body hashes/status stay null. Current observations cannot become historical features. Raw persistence and fetch checkpoints are separate.
+
+Generated artifacts: `docs/contracts/data_contract.schema.json`, `types.ts`, `schema_reference.md`. See [contract](docs/contracts/data_contract.md), [feature grain](docs/contracts/feature_grain.md), [raw](docs/contracts/raw_record.md) and [processed models](docs/contracts/processed_entities.md). `examples/contracts/*.json` contains 19 synthetic, cross-consistent fixtures; invalid examples are under `tests/fixtures/contracts/invalid/`.
+
+Using Python 3.12 with the activated project virtualenv (on Windows: `.venv\Scripts\Activate.ps1`):
+
+```bash
+uv sync --extra dev --frozen
+python scripts/export_contract.py
+python scripts/export_contract.py --check
+python scripts/validate_examples.py
+python -m pytest -q tests/contracts tests/integration/test_github_contract_pipeline.py
+python -m pytest -q -m "not smoke"
+python -m pytest -q tests/unit/collection tests/integration/test_github_pipeline.py tests/integration/test_external_pipeline.py tests/integration/test_collector_utilities.py
+python -m ruff check src/reposeer/contracts scripts/export_contract.py scripts/validate_examples.py tests/contracts tests/integration/test_github_contract_pipeline.py
+```
+
+The offline integration demo uses fake GitHub payloads and HTTPX MockTransport, replays JSONL without refetching, verifies nullable Parquet columns and queries them with DuckDB. Default verification needs no network/credentials; live `smoke` tests are optional. The repository CLI remains a local demo entrypoint. Other collectors, technology linking business logic, snapshot feature computation, broader package-first CLI, dependency/vulnerability and label pipelines are outside T-011. Stored legacy files are never silently migrated; see the explicit ID migration helper and dataset migration notes in the contract.

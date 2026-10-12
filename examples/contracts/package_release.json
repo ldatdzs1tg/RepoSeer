@@ -1,0 +1,25 @@
+{
+  "dependencies": null,
+  "is_yanked": null,
+  "package_id": "pypi:demo-maintenance-package",
+  "provenance": {
+    "available_at": "2023-12-01T00:00:00.000Z",
+    "missing_fields": [],
+    "raw_record_ids": [
+      "raw:00000000-0000-4000-8000-000000000011"
+    ],
+    "retrieved_at": "2024-02-29T12:00:00.000Z",
+    "source": "pypi_json",
+    "source_url": "https://pypi.org/pypi/demo-maintenance-package/json",
+    "temporal_basis": "historical_reconstruction",
+    "valid_at": "2023-12-01T00:00:00.000Z"
+  },
+  "record_type": "package_release",
+  "repo_id": "github:repository:900000001",
+  "requires_python": ">=3.12",
+  "schema_version": "0.1.0",
+  "uploaded_at": "2023-12-01T00:00:00.000Z",
+  "version": "1.0.0",
+  "yanked_reason": null,
+  "yanked_status_at": null
+}

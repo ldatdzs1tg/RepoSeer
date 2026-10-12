@@ -1,0 +1,21 @@
+{
+  "available_at": "2024-01-01T00:00:00.000Z",
+  "event_at": "2024-01-01T00:00:00.000Z",
+  "http_status": null,
+  "package_id": null,
+  "payload": {
+    "event_at": "2024-01-01T00:00:00Z",
+    "id": "abc123"
+  },
+  "raw_body_sha256": null,
+  "raw_record_id": "raw:00000000-0000-4000-8000-000000000012",
+  "record_type": "raw_record",
+  "repo_id": "github:repository:900000001",
+  "retrieved_at": "2024-02-29T12:00:00.000Z",
+  "run_id": "00000000-0000-4000-8000-000000000001",
+  "schema_version": "0.1.0",
+  "source": "github_rest",
+  "source_record_id": "abc123",
+  "source_record_type": "repository_activity",
+  "source_url": "https://api.github.com/repos/Synthetic/Demo/commits"
+}

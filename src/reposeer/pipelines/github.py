@@ -15,4 +15,7 @@ class GitHubPipeline:
         parts = repo_url_or_slug.rstrip("/").split("/")
         owner, repo = parts[-2], parts[-1]
         logger.info("Running GitHub pipeline for %s/%s", owner, repo)
-        self.service.collect_and_store(owner, repo)
+        try:
+            self.service.collect_and_store(owner, repo)
+        finally:
+            self.service.close()

@@ -1,10 +1,10 @@
 # RepoSeer Data Contract v0.1
 
-**Schema version:** `0.1.0`  
+**Schema version:** `0.1.0` (contract=0.1.0; architecture=T-008 v0.3)
 **Ngày lập:** 08/10/2026  
 **Áp dụng:** collector, normalizer, technology linker và snapshot builder của demo RepoSeer.
 
-Tài liệu này chốt syntax và interface trước khi các thành viên code song song. Mọi module trao đổi JSON theo các định nghĩa trong `shared/models.py`; JSON Schema, TypeScript types và bảng field được sinh từ cùng định nghĩa đó. Không tự đặt alias hoặc thay đổi tên trường ở module riêng.
+Tài liệu này chốt syntax và interface trước khi các thành viên code song song. Mọi module trao đổi JSON theo các định nghĩa trong `src/reposeer/contracts/models.py`; JSON Schema, TypeScript types và bảng field được sinh từ cùng định nghĩa đó. Không tự đặt alias hoặc thay đổi tên trường ở module riêng.
 
 Phạm vi nền là Repository Scope v0.1: package Python trên PyPI, repo nguồn GitHub public/non-fork, lịch sử 2019–2025 và snapshot theo quý 2020–2024. Technology và article là dữ liệu bổ trợ; contract không biến một keyword hoặc một bài viết thành nhãn abandoned tự động.
 
@@ -12,13 +12,13 @@ Phạm vi nền là Repository Scope v0.1: package Python trên PyPI, repo ngu�
 
 | File | Vai trò | Cách thay đổi |
 | --- | --- | --- |
-| `shared/models.py` | Python/Pydantic models, constraints, cross-field checks, Protocol interfaces | Sửa tại đây trước |
-| `shared/identity.py` | Chuẩn hóa ID, URL, timestamp và content hash | Thay đổi cùng contract khi ảnh hưởng semantics |
-| `shared/validation.py` | Validate record và đối chiếu request/result | Chạy tại biên module |
-| `shared/schemas/data_contract.schema.json` | JSON Schema Draft 2020-12 của toàn bộ contract | Tự sinh, không sửa tay |
-| `shared/types.ts` | TypeScript types và interface Promise | Tự sinh, không sửa tay |
-| `docs/schema_reference.md` | Danh sách đầy đủ field/type/bắt buộc | Tự sinh, không sửa tay |
-| `examples/*.json` | Record và các cặp I/O giả lập đã validate | Tạo lại bằng script hoặc thêm fixture có kiểm tra |
+| `src/reposeer/contracts/models.py` | Python/Pydantic models, constraints, cross-field checks, Protocol interfaces | Sửa tại đây trước |
+| `src/reposeer/contracts/identity.py` | Chuẩn hóa ID, URL, timestamp và content hash | Thay đổi cùng contract khi ảnh hưởng semantics |
+| `src/reposeer/contracts/validation.py` | Validate record và đối chiếu request/result | Chạy tại biên module |
+| `docs/contracts/data_contract.schema.json` | JSON Schema Draft 2020-12 của toàn bộ contract | Tự sinh, không sửa tay |
+| `docs/contracts/types.ts` | TypeScript types và interface Promise | Tự sinh, không sửa tay |
+| `docs/contracts/schema_reference.md` | Danh sách đầy đủ field/type/bắt buộc | Tự sinh, không sửa tay |
+| `examples/contracts/*.json` | Record và các cặp I/O giả lập đã validate | Tạo lại bằng script hoặc thêm fixture có kiểm tra |
 
 `record_type` phân biệt các loại record; `schema_version` phải bằng `0.1.0`. Một object đúng schema chưa chắc đạt tiêu chí chọn repo. Public/non-fork là bước eligibility riêng; schema vẫn cho phép biểu diễn repo bị loại để lưu lý do và kiểm tra pipeline.
 
@@ -57,7 +57,7 @@ Canonical object dùng `extra="forbid"`. Thêm field lạ hoặc bỏ một key 
 
 Khi repo chuyển owner/đổi tên, giữ `repo_id`; cập nhật full name/URL của observation mới và giữ URL cũ trong lịch sử hoặc `known_urls`. Không dùng URL hoặc owner/name làm khóa join ổn định. Nhiều package trong một repo vẫn có package ID riêng và cùng `repo_group_id` để chia tập. Monorepo chưa xác minh mapping được giữ pending; không đoán package path.
 
-ID package được tạo bằng `package_id(name)` trong `shared/identity.py`. Không tự suy diễn ID technology từ tên package: Python là một technology, còn package PyPI là một distribution. Alias technology phải qua registry; `tech:python` và `pypi:python` không thay thế nhau.
+ID package được tạo bằng `package_id(name)` trong `src/reposeer/contracts/identity.py`. Không tự suy diễn ID technology từ tên package: Python là một technology, còn package PyPI là một distribution. Alias technology phải qua registry; `tech:python` và `pypi:python` không thay thế nhau.
 
 JavaScript collector cần đọc ID lớn mà không làm tròn. Nếu native JSON có ID vượt giới hạn số nguyên an toàn, dùng cách đọc lossless hoặc giữ bytes gốc để adapter xử lý; chuyển một `number` đã bị làm tròn sang string không khôi phục được ID.
 
@@ -179,7 +179,7 @@ Mỗi result có ít nhất một `Coverage`. Data group dùng enum trong code; 
 | Technology linker | `TechnologyLinkRequest` | `TechnologyLinkResult` | Nhận articles + taxonomy; chỉ cập nhật `technology_mentions` |
 | Snapshot builder | `SnapshotBuildRequest` | `SnapshotBuildResult` | Nhận release/activity đã lọc đúng thời gian; xuất feature snapshot và missing reasons |
 
-Python dùng các Protocol trong `shared/models.py`; TypeScript dùng Promise interfaces trong `shared/types.ts`. Đây là interface dữ liệu, không phải implementation API/collector. Một `run_id` xuyên suốt pipeline; mỗi lời gọi có `request_id` mới, result echo đúng request. Khi retry nguyên request có thể giữ request ID; re-collect observation mới dùng raw UUID mới.
+Python dùng các Protocol trong `src/reposeer/contracts/models.py`; TypeScript dùng Promise interfaces trong `docs/contracts/types.ts`. Đây là interface dữ liệu, không phải implementation API/collector. Một `run_id` xuyên suốt pipeline; mỗi lời gọi có `request_id` mới, result echo đúng request. Khi retry nguyên request có thể giữ request ID; re-collect observation mới dùng raw UUID mới.
 
 Normalizer có thể tạo nhiều output từ một raw record. `processed_record_count` đếm raw input được xử lý, `output_record_count` đếm normalized outputs. `input_record_count = processed_record_count + rejected_record_count`. Mọi normalized output phải tham chiếu raw input qua `provenance.raw_record_ids`.
 
@@ -192,7 +192,7 @@ Snapshot dùng khóa `(package_id, cutoff_at)` và `repo_group_id == repo_id`. H
 ### Boundary validation trong Python
 
 ```python
-from shared.validation import validate_record, validate_collection_pair
+from reposeer.contracts.validation import validate_record, validate_collection_pair
 
 request = validate_record(request_json)
 result = validate_record(result_json)
@@ -204,7 +204,7 @@ Các checker còn lại: `validate_normalization_pair`, `validate_technology_lin
 ### Sử dụng types trong TypeScript
 
 ```typescript
-import type { Collector, CollectionRequest, CollectionResult } from "../shared/types";
+import type { Collector, CollectionRequest, CollectionResult } from "./types";
 
 // Collector implementation phải trả object đúng schema; type chỉ kiểm tra khi compile.
 declare const collector: Collector;
@@ -216,18 +216,19 @@ Không dùng `as CollectionResult` thay cho validation dữ liệu untrusted. JS
 
 ## 11 Ví dụ record hợp lệ
 
-Tất cả ví dụ là dữ liệu **giả lập**, không phải kết quả crawl hoặc xác nhận trạng thái các dự án thực tế. Có 17 file đầy đủ, đã qua strict validation; không dùng để huấn luyện.
+Tất cả ví dụ là dữ liệu **giả lập**, không phải kết quả crawl hoặc xác nhận trạng thái các dự án thực tế. Có 19 file đầy đủ (15 loại record và 4 raw evidence bổ sung), đã qua strict validation; không dùng để huấn luyện.
 
 | Ví dụ | File |
 | --- | --- |
-| GitHub raw envelope | [github_raw_record.json](../examples/github_raw_record.json) |
-| GitHub canonical repository | [github_repository.json](../examples/github_repository.json) |
-| Technology entity | [technology_entity.json](../examples/technology_entity.json) |
-| Article có published date nhưng không có giờ | [article.json](../examples/article.json) |
-| Collector request/result | [collection_request.json](../examples/collection_request.json), [collection_result.json](../examples/collection_result.json) |
-| Normalizer request/result | [normalization_request.json](../examples/normalization_request.json), [normalization_result.json](../examples/normalization_result.json) |
-| Technology linker request/result | [technology_link_request.json](../examples/technology_link_request.json), [technology_link_result.json](../examples/technology_link_result.json) |
-| Snapshot builder request/result | [snapshot_build_request.json](../examples/snapshot_build_request.json), [snapshot_build_result.json](../examples/snapshot_build_result.json) |
+| GitHub raw envelope | [github_raw_record.json](../../examples/contracts/github_raw_record.json) |
+| GitHub canonical repository | [github_repository.json](../../examples/contracts/github_repository.json) |
+| Package release / repository activity / package snapshot | [package_release.json](../../examples/contracts/package_release.json), [repository_activity.json](../../examples/contracts/repository_activity.json), [package_snapshot.json](../../examples/contracts/package_snapshot.json) |
+| Technology entity | [technology_entity.json](../../examples/contracts/technology_entity.json) |
+| Article có published date nhưng không có giờ | [article.json](../../examples/contracts/article.json) |
+| Collector request/result | [collection_request.json](../../examples/contracts/collection_request.json), [collection_result.json](../../examples/contracts/collection_result.json) |
+| Normalizer request/result | [normalization_request.json](../../examples/contracts/normalization_request.json), [normalization_result.json](../../examples/contracts/normalization_result.json) |
+| Technology linker request/result | [technology_link_request.json](../../examples/contracts/technology_link_request.json), [technology_link_result.json](../../examples/contracts/technology_link_result.json) |
+| Snapshot builder request/result | [snapshot_build_request.json](../../examples/contracts/snapshot_build_request.json), [snapshot_build_result.json](../../examples/contracts/snapshot_build_result.json) |
 
 ## 12 Quy trình thay đổi và kiểm tra trước khi ghép module
 
@@ -238,14 +239,16 @@ Tất cả ví dụ là dữ liệu **giả lập**, không phải kết quả c
 5. Consumer từ chối version chưa hỗ trợ. Không âm thầm rename key, coercion hoặc fill defaults.
 
 ```bash
-python -m pip install -r requirements.txt
+uv sync --extra dev --frozen  # hoặc: python -m pip install -e '.[dev]'
 python scripts/export_contract.py
 python scripts/export_contract.py --check
 python scripts/validate_examples.py
-python -m unittest discover -s tests -v
+python -m pytest -q tests/contracts tests/integration/test_github_contract_pipeline.py
+python -m pytest -q -m "not smoke"
+python -m ruff check src/reposeer/contracts scripts/export_contract.py scripts/validate_examples.py tests/contracts tests/integration/test_github_contract_pipeline.py
 ```
 
-Python 3.11 trở lên. Pydantic được pin để generated schema không đổi theo version dependency. Có thể kiểm tra TypeScript bằng `tsc --noEmit --strict --target ES2020 shared/types.ts` khi TypeScript compiler có trong project. TypeScript không có runtime validator riêng trong bundle này; Python là reference validator đã kiểm tra.
+Python 3.12 trở lên. Dùng `uv.lock` (`uv sync --extra dev --frozen`) để giữ version Pydantic và artifacts tái lập được. Có thể kiểm tra TypeScript bằng `tsc --noEmit --strict --target ES2020 docs/contracts/types.ts` khi TypeScript compiler có trong project. TypeScript không có runtime validator riêng trong bundle này; Python là reference validator đã kiểm tra.
 
 Trước khi tích hợp, mọi thành viên cần thống nhất: cùng schema version; join bằng stable ID; không lẫn source/canonical naming; explicit null; UTC; không dùng current repository metadata làm historical features; coverage không bị đổi thành zero; raw provenance không bị bỏ.
 
@@ -258,3 +261,28 @@ Trước khi tích hợp, mọi thành viên cần thống nhất: cùng schema 
 - [Python package name normalization](https://packaging.python.org/en/latest/specifications/name-normalization/): quy tắc ID package.
 
 Các tên field, ID prefix, hashing rule và I/O trong tài liệu là quyết định thiết kế của RepoSeer; không phải field native của GitHub/PyPI.
+
+## 14 T-011 integration và compatibility
+
+Nguồn canonical duy nhất là `src/reposeer/contracts/`; `src/reposeer/schemas/` là DTO legacy/internal. `SchemaValidator` và `ProvenanceValidator` cũ chỉ kiểm tra DataFrame columns, không thay cho strict contract validation. JSON Schema/types là structural artifacts; Python validators vẫn bắt buộc cho hash, chronology và pair matching.
+
+Typed GitHub adapters trong `src/reposeer/contracts/adapters/github_repository.py` dùng `GitHubClient`/HTTP utilities T-012 và giữ session ownership. Collector chỉ hỗ trợ một current GitHub repository observation; historical/cursor/unsupported requests có structured errors, package-only subject có `not_mapped`. Các Protocol khác chỉ là interface; chưa có business implementation.
+
+`RepositoryService.collect_and_store` gọi collector → pair validation → strict append-only JSONL → normalizer → pair validation → flattened Parquet. Raw native keys `archived`, `full_name`, `open_issues_count` được giữ; processed dùng canonical IDs, `is_archived`, `repo_full_name`, `open_issues_and_prs_count`. `raw_body_sha256` và `http_status` là null vì provider chỉ trả parsed JSON. Normalizer replay offline và giữ retrieval time; không backfill current metadata về historical cutoff. Boolean bắt buộc thiếu sẽ rejected; nullable counts không thành zero.
+
+`JsonlStorage.append_contract_record` / `read_contract_records` validate canonical RawRecord. Các API generic cũ chỉ dành cho legacy compatibility, không contract-safe. Raw được persist trước normalization; lỗi normalization giữ raw để audit, không ghi processed. Service không coi fetch checkpoint là bằng chứng raw đã persist, và không tự cập nhật checkpoint. Parquet projection có explicit nullable integer/boolean/string types và raw reference.
+
+ID legacy chỉ được migrate khi có input rõ ràng:
+
+```python
+from reposeer.contracts.identity import migrate_legacy_id
+
+migrate_legacy_id("gh_900000001")  # github:repository:900000001
+migrate_legacy_id("pypi_My_Pkg")   # pypi:my-pkg
+```
+
+Helper không tự rewrite persisted files. Service từ chối processed table có schema legacy; hãy migrate sang dataset canonical riêng sau khi xác minh dữ liệu. Raw JSONL legacy được giữ nguyên; strict replay từ chối các dòng legacy và cần export/migration rõ ràng trước khi replay một file trộn.
+
+Offline demo: `python -m pytest -q tests/integration/test_github_contract_pipeline.py` dùng fake provider và HTTPX MockTransport, tmp storage, JSONL replay, Parquet và DuckDB; không dùng credentials hay GitHub thật. Fixtures hoàn toàn synthetic. Dependency graph, vulnerability, confirmed abandonment labels, feature computation và CLI package-first đầy đủ chưa được implement trong T-011.
+
+Strict integer horizon validation fixes the original Pydantic Literal coercion of `12.0` to `12`; the declared field set and schema version remain unchanged. Regression tests cover both snapshot records and build requests.

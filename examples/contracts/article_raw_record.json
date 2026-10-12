@@ -1,0 +1,21 @@
+{
+  "available_at": null,
+  "event_at": null,
+  "http_status": null,
+  "package_id": null,
+  "payload": {
+    "text": "Python synthetic announcement.",
+    "url": "https://example.test/News/Python?edition=1"
+  },
+  "raw_body_sha256": null,
+  "raw_record_id": "raw:00000000-0000-4000-8000-000000000014",
+  "record_type": "raw_record",
+  "repo_id": null,
+  "retrieved_at": "2024-02-29T12:00:00.000Z",
+  "run_id": "00000000-0000-4000-8000-000000000001",
+  "schema_version": "0.1.0",
+  "source": "web_article",
+  "source_record_id": "14",
+  "source_record_type": "article",
+  "source_url": "https://example.test/News/Python?edition=1"
+}
