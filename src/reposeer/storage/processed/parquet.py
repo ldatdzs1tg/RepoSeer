@@ -1,5 +1,7 @@
 """Processed storage handler using Parquet and Polars."""
 
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +14,7 @@ class ParquetStorage(BaseStorage):
     """Parquet columnar storage for processed entity datasets."""
 
     def write(self, path: Path, data: pl.DataFrame | list[dict[str, Any]]) -> None:
-        """Write records or DataFrame to Parquet with snappy/zstd compression."""
+        """Replace Parquet atomically after writing a complete temporary file with zstd."""
         path.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(data, pl.DataFrame):
             df = data
@@ -20,7 +22,17 @@ class ParquetStorage(BaseStorage):
             df = pl.DataFrame(data) if data else pl.DataFrame()
         else:
             df = pl.DataFrame(list(data))
-        df.write_parquet(path, compression="zstd")
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+            df.write_parquet(temporary_path, compression="zstd")
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     def read(self, path: Path) -> pl.DataFrame:
         """Read Parquet file into a Polars DataFrame."""

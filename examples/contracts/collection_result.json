@@ -1,0 +1,78 @@
+{
+  "errors": [],
+  "metadata": {
+    "collector_name": "github_repository_contract",
+    "collector_version": "0.1.0",
+    "coverage": [
+      {
+        "data_group": "repo_identity",
+        "missing_reason": null,
+        "records_observed": 1,
+        "status": "complete",
+        "time_range": null
+      }
+    ],
+    "finished_at": "2024-02-29T12:00:00.000Z",
+    "next_cursor": null,
+    "pages_fetched": 1,
+    "pagination_complete": true,
+    "rate_limit_remaining": null,
+    "rate_limit_reset_at": null,
+    "records_emitted": 1,
+    "records_rejected": 0,
+    "requested_time_range": null,
+    "started_at": "2024-02-29T12:00:00.000Z"
+  },
+  "record_type": "collection_result",
+  "records": [
+    {
+      "available_at": null,
+      "event_at": null,
+      "http_status": null,
+      "package_id": null,
+      "payload": {
+        "archived": false,
+        "created_at": "2020-01-01T00:00:00Z",
+        "description": "Synthetic repository fixture",
+        "fork": false,
+        "forks_count": 0,
+        "full_name": "Synthetic/Demo",
+        "id": 900000001,
+        "is_template": false,
+        "language": "Python",
+        "mirror_url": null,
+        "node_id": "R_SYNTHETIC",
+        "open_issues_count": 2,
+        "private": false,
+        "providerNativeKey": {
+          "list": [
+            null,
+            0,
+            false
+          ],
+          "preserveCase": true
+        },
+        "pushed_at": "2024-02-01T00:00:00Z",
+        "stargazers_count": 5,
+        "updated_at": "2024-02-01T01:00:00+01:00",
+        "visibility": "public"
+      },
+      "raw_body_sha256": null,
+      "raw_record_id": "raw:00000000-0000-4000-8000-000000000010",
+      "record_type": "raw_record",
+      "repo_id": "github:repository:900000001",
+      "retrieved_at": "2024-02-29T12:00:00.000Z",
+      "run_id": "00000000-0000-4000-8000-000000000001",
+      "schema_version": "0.1.0",
+      "source": "github_rest",
+      "source_record_id": "900000001",
+      "source_record_type": "github_repository",
+      "source_url": "https://api.github.com/repos/Synthetic/Demo"
+    }
+  ],
+  "request_id": "00000000-0000-4000-8000-000000000002",
+  "run_id": "00000000-0000-4000-8000-000000000001",
+  "schema_version": "0.1.0",
+  "source": "github_rest",
+  "status": "complete"
+}

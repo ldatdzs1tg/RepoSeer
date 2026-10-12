@@ -1,0 +1,127 @@
+{
+  "builder_version": "0.1.0",
+  "errors": [],
+  "record_type": "snapshot_build_result",
+  "request_id": "00000000-0000-4000-8000-000000000005",
+  "run_id": "00000000-0000-4000-8000-000000000001",
+  "schema_version": "0.1.0",
+  "snapshot": {
+    "coverage": [
+      {
+        "data_group": "releases",
+        "missing_reason": "not_collected",
+        "records_observed": 1,
+        "status": "partial",
+        "time_range": null
+      },
+      {
+        "data_group": "commits",
+        "missing_reason": "not_collected",
+        "records_observed": 1,
+        "status": "partial",
+        "time_range": null
+      }
+    ],
+    "cutoff_at": "2024-03-31T23:59:59.999Z",
+    "features": {
+      "commit_count_12m": null,
+      "commit_count_3m": null,
+      "commit_count_6m": null,
+      "contributor_count_12m": null,
+      "days_since_latest_release": null,
+      "issue_closed_count_12m": null,
+      "issue_opened_count_12m": null,
+      "package_age_days": null,
+      "pr_merged_count_12m": null,
+      "pr_opened_count_12m": null,
+      "release_count_12m": null,
+      "release_count_3m": null,
+      "release_count_6m": null,
+      "releases_total": null
+    },
+    "horizon_end_at": "2025-03-31T23:59:59.999Z",
+    "horizon_months": 12,
+    "missing_fields": [
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.package_age_days",
+        "reason": "not_collected"
+      },
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.releases_total",
+        "reason": "not_collected"
+      },
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.days_since_latest_release",
+        "reason": "not_collected"
+      },
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.release_count_3m",
+        "reason": "not_collected"
+      },
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.release_count_6m",
+        "reason": "not_collected"
+      },
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.release_count_12m",
+        "reason": "not_collected"
+      },
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.commit_count_3m",
+        "reason": "not_collected"
+      },
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.commit_count_6m",
+        "reason": "not_collected"
+      },
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.commit_count_12m",
+        "reason": "not_collected"
+      },
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.contributor_count_12m",
+        "reason": "not_collected"
+      },
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.issue_opened_count_12m",
+        "reason": "not_collected"
+      },
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.issue_closed_count_12m",
+        "reason": "not_collected"
+      },
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.pr_opened_count_12m",
+        "reason": "not_collected"
+      },
+      {
+        "detail": "Synthetic fixture; feature computation is out of scope",
+        "field_path": "features.pr_merged_count_12m",
+        "reason": "not_collected"
+      }
+    ],
+    "package_id": "pypi:demo-maintenance-package",
+    "raw_record_ids": [
+      "raw:00000000-0000-4000-8000-000000000011",
+      "raw:00000000-0000-4000-8000-000000000012"
+    ],
+    "record_type": "package_snapshot",
+    "repo_group_id": "github:repository:900000001",
+    "repo_id": "github:repository:900000001",
+    "schema_version": "0.1.0"
+  },
+  "status": "partial"
+}

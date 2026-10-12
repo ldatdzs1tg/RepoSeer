@@ -65,3 +65,10 @@ data/metadata/**
 # Reference & temporary
 reference-markdown/
 *.tmp
+
+# Local analytical database
+*.duckdb
+*.duckdb.wal
+
+# Optional project-local uv cache
+.uv-cache/

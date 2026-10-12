@@ -1,0 +1,49 @@
+{
+  "created_at": "2020-01-01T00:00:00.000Z",
+  "description": "Synthetic repository fixture",
+  "forks_count": 0,
+  "identity": {
+    "github_node_id": "R_SYNTHETIC",
+    "github_repo_id": 900000001.0,
+    "known_urls": [],
+    "repo_full_name": "Synthetic/Demo",
+    "repo_id": "github:repository:900000001",
+    "repo_url": "https://github.com/synthetic/demo"
+  },
+  "is_archived": false,
+  "is_fork": false,
+  "is_template": false,
+  "language_bytes": null,
+  "mirror_url": null,
+  "open_issues_and_prs_count": 2,
+  "primary_language": "Python",
+  "provenance": {
+    "available_at": "2024-02-29T12:00:00.000Z",
+    "missing_fields": [
+      {
+        "detail": null,
+        "field_path": "mirror_url",
+        "reason": "not_in_source"
+      },
+      {
+        "detail": null,
+        "field_path": "language_bytes",
+        "reason": "not_collected"
+      }
+    ],
+    "raw_record_ids": [
+      "raw:00000000-0000-4000-8000-000000000010"
+    ],
+    "retrieved_at": "2024-02-29T12:00:00.000Z",
+    "source": "github_rest",
+    "source_url": "https://api.github.com/repos/Synthetic/Demo",
+    "temporal_basis": "observation",
+    "valid_at": "2024-02-29T12:00:00.000Z"
+  },
+  "pushed_at": "2024-02-01T00:00:00.000Z",
+  "record_type": "github_repository",
+  "schema_version": "0.1.0",
+  "stargazers_count": 5,
+  "updated_at": "2024-02-01T00:00:00.000Z",
+  "visibility": "public"
+}

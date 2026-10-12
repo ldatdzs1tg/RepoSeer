@@ -1,25 +1,37 @@
 """Hacker News Algolia search client."""
 
-import logging
+from typing import Any, Self
 
 from reposeer.clients.external.base import DiscoveryProvider
+from reposeer.collection.errors import handle_collection_error
 from reposeer.collection.http.client import HTTPClient
+from reposeer.collection.progress import CollectionProgress
+from reposeer.exceptions import HTTPClientError
 from reposeer.schemas.external.candidate import ExternalCandidate
-
-logger = logging.getLogger("reposeer.clients.external.hackernews")
 
 
 class HackerNewsClient(DiscoveryProvider):
     """Discovery provider querying Hacker News Algolia search API."""
 
-    def __init__(self, base_url: str = "https://hn.algolia.com/api/v1"):
-        self.http = HTTPClient(base_url=base_url)
+    def __init__(
+        self,
+        base_url: str = "https://hn.algolia.com/api/v1",
+        *,
+        http_client: HTTPClient | None = None,
+        progress: CollectionProgress | None = None,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self._owns_http = http_client is None
+        self.http = http_client if http_client is not None else HTTPClient(base_url=base_url)
+        self.progress = progress
 
     def search(self, query: str, limit: int = 50) -> list[ExternalCandidate]:
         """Search HN stories matching query."""
         try:
             data = self.http.get_json(
-                "/search", params={"query": query, "hitsPerPage": limit, "tags": "story"}
+                f"{self.base_url}/search",
+                params={"query": query, "hitsPerPage": limit, "tags": "story"},
+                headers={"Accept": "application/json"},
             )
             candidates = []
             for hit in data.get("hits", []):
@@ -36,7 +48,20 @@ class HackerNewsClient(DiscoveryProvider):
                         score=float(hit.get("points") or 0.0),
                     )
                 )
-            return candidates
-        except Exception as e:
-            logger.warning("Failed to search Hacker News for '%s': %s", query, e)
+        except (HTTPClientError, ValueError, TypeError, AttributeError) as error:
+            handle_collection_error(error, f"hackernews:{query}", progress=self.progress)
             return []
+        if self.progress is not None:
+            self.progress.record_success("external.hackernews.query", query, count=len(candidates))
+        return candidates
+
+    def close(self) -> None:
+        """Close the HTTP session if this provider created it."""
+        if self._owns_http:
+            self.http.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()

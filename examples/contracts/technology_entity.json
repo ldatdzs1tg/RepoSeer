@@ -1,0 +1,35 @@
+{
+  "aliases": [
+    "CPython"
+  ],
+  "category": "language",
+  "description": null,
+  "lifecycle_status": "active",
+  "name": "Python",
+  "official_urls": [
+    "https://www.python.org/"
+  ],
+  "package_ids": [
+    "pypi:demo-maintenance-package"
+  ],
+  "provenance": {
+    "available_at": "2024-02-29T12:00:00.000Z",
+    "missing_fields": [],
+    "raw_record_ids": [
+      "raw:00000000-0000-4000-8000-000000000013"
+    ],
+    "retrieved_at": "2024-02-29T12:00:00.000Z",
+    "source": "technology_catalog",
+    "source_url": "https://example.test/catalog/python",
+    "temporal_basis": "observation",
+    "valid_at": "2024-02-29T12:00:00.000Z"
+  },
+  "record_type": "technology_entity",
+  "repo_ids": [
+    "github:repository:900000001"
+  ],
+  "schema_version": "0.1.0",
+  "slug": "python",
+  "status_evidence_url": null,
+  "technology_id": "tech:python"
+}

@@ -17,14 +17,22 @@ class CollectionContext:
 
     def record_success(self, count: int = 1) -> None:
         """Increment collected items count."""
+        if type(count) is not int or count < 0:
+            raise ValueError("Success count must be a non-negative integer")
         self.collected_count += count
 
     def record_error(self, count: int = 1) -> None:
         """Increment error count."""
+        if type(count) is not int or count < 0:
+            raise ValueError("Error count must be a non-negative integer")
         self.error_count += count
 
     def set_checkpoint(self, key: str, value: str | int) -> None:
         """Record cursor or checkpoint identifier for resuming."""
+        if not isinstance(key, str) or not key or type(value) not in (str, int):
+            raise ValueError(
+                "Checkpoint keys must be non-empty strings and values strings or integers"
+            )
         self.checkpoint_state[key] = value
 
     def get_checkpoint(self, key: str, default: str | int | None = None) -> str | int | None:

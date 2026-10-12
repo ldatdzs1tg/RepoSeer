@@ -23,10 +23,16 @@ class StorageConfig(BaseModel):
 class CollectionConfig(BaseModel):
     """Collection parameters and constraints."""
 
-    timeout_seconds: float = 30.0
-    max_retries: int = 3
-    backoff_factor: float = 2.0
-    rate_limit_pause_seconds: int = 60
+    timeout_seconds: float = Field(default=30.0, gt=0, allow_inf_nan=False)
+    # Legacy name: total attempts, including the first request. Use 1 to disable retries.
+    max_retries: int = Field(default=3, ge=1)
+    backoff_factor: float = Field(default=2.0, ge=0, allow_inf_nan=False)
+    max_backoff_seconds: float = Field(default=10.0, ge=0, allow_inf_nan=False)
+    rate_limit_pause_seconds: int = Field(default=60, ge=0)
+    rate_limit_buffer: int = Field(default=5, ge=0)
+    cache_enabled: bool = False
+    cache_ttl_seconds: float = Field(default=300.0, gt=0, allow_inf_nan=False)
+    cache_dir: Path | None = None
     max_workers: int = 4
     checkpoint_interval: int = 50
 

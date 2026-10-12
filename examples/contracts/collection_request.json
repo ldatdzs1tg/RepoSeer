@@ -1,0 +1,24 @@
+{
+  "collector_name": "github_repository_contract",
+  "cursor": null,
+  "cutoff_at": null,
+  "max_pages": 1,
+  "max_records": 1,
+  "record_kinds": [
+    "github_repository"
+  ],
+  "record_type": "collection_request",
+  "request_id": "00000000-0000-4000-8000-000000000002",
+  "run_id": "00000000-0000-4000-8000-000000000001",
+  "schema_version": "0.1.0",
+  "source": "github_rest",
+  "subjects": [
+    {
+      "package_id": null,
+      "repo_full_name": "Synthetic/Demo",
+      "repo_id": "github:repository:900000001",
+      "url": null
+    }
+  ],
+  "time_range": null
+}

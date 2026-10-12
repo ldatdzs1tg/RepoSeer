@@ -5,22 +5,36 @@ field-name drift. No aliases and no coercion at module boundaries.
 """
 from __future__ import annotations
 
-import re
 from datetime import date
-from typing import Annotated, Literal, Protocol, TypeAlias
+from typing import Annotated, Literal, Protocol, TypeAlias, TypeAliasType
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, model_validator
-from typing_extensions import TypeAliasType
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    model_validator,
+)
 
-from shared.identity import (
-    FULL_NAME_PATTERN, UTC_PATTERN, add_calendar_months, article_id,
-    canonical_article_url, canonical_github_url, checked_timestamp,
-    normalize_article_text, repo_id, text_sha256, validate_http_url,
+from reposeer.contracts.identity import (
+    FULL_NAME_PATTERN,
+    UTC_PATTERN,
+    add_calendar_months,
+    article_id,
+    canonical_article_url,
+    canonical_github_url,
+    checked_timestamp,
+    normalize_article_text,
+    repo_id,
+    text_sha256,
+    validate_http_url,
 )
 
 SCHEMA_VERSION = "0.1.0"
-JsonValue = TypeAliasType("JsonValue", "None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]")
-SchemaVersion: TypeAlias = Literal["0.1.0"]
+JsonValue = TypeAliasType("JsonValue", "None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]")  # noqa: UP040 - retain original canonical alias semantics
+SchemaVersion: TypeAlias = Literal["0.1.0"]  # noqa: UP040 - retain original canonical alias semantics
 UtcTimestamp = Annotated[str, Field(pattern=UTC_PATTERN, json_schema_extra={"format": "date-time"}), AfterValidator(checked_timestamp)]
 HttpUrl = Annotated[str, Field(pattern=r"^https?://\S+$", json_schema_extra={"format": "uri"}), AfterValidator(validate_http_url)]
 NonEmpty = Annotated[str, Field(min_length=1, pattern=r"\S")]
@@ -33,17 +47,23 @@ UuidText = Annotated[str, Field(pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-
 RawRecordId = Annotated[str, Field(pattern=r"^raw:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$")]
 Count = Annotated[int, Field(ge=0, le=9007199254740991)]
 Confidence = Annotated[float, Field(ge=0.0, le=1.0)]
-Source: TypeAlias = Literal["github_rest", "github_graphql", "pypi_json", "pypi_index", "pypi_bigquery", "gh_archive", "deps_dev", "osv", "project_docs", "web_article", "source_archive", "technology_catalog"]
-RecordKind: TypeAlias = Literal["github_repository", "package_release", "repository_activity", "dependency_metadata", "article", "technology_entity", "security_advisory"]
-RunStatus: TypeAlias = Literal["complete", "partial", "failed"]
-MissingReason: TypeAlias = Literal["not_in_source", "not_collected", "unavailable", "parse_error", "not_applicable", "ambiguous", "historical_unavailable"]
-DataGroup: TypeAlias = Literal["repo_identity", "releases", "commits", "contributors", "issues", "pull_requests", "dependencies", "articles", "technologies", "security_advisories"]
+Source: TypeAlias = Literal["github_rest", "github_graphql", "pypi_json", "pypi_index", "pypi_bigquery", "gh_archive", "deps_dev", "osv", "project_docs", "web_article", "source_archive", "technology_catalog"]  # noqa: UP040 - retain original canonical alias semantics
+RecordKind: TypeAlias = Literal["github_repository", "package_release", "repository_activity", "dependency_metadata", "article", "technology_entity", "security_advisory"]  # noqa: UP040 - retain original canonical alias semantics
+RunStatus: TypeAlias = Literal["complete", "partial", "failed"]  # noqa: UP040 - retain original canonical alias semantics
+MissingReason: TypeAlias = Literal["not_in_source", "not_collected", "unavailable", "parse_error", "not_applicable", "ambiguous", "historical_unavailable"]  # noqa: UP040 - retain original canonical alias semantics
+DataGroup: TypeAlias = Literal["repo_identity", "releases", "commits", "contributors", "issues", "pull_requests", "dependencies", "articles", "technologies", "security_advisories"]  # noqa: UP040 - retain original canonical alias semantics
 
 
 def unique(values: list, field: str, *, casefold: bool = False) -> None:
     keys = [v.casefold() if casefold and isinstance(v, str) else v for v in values]
     if len(keys) != len(set(keys)):
         raise ValueError(field + " must not contain duplicates")
+
+
+def _checked_horizon(value):
+    if type(value) is not int:
+        raise ValueError("horizon_months must be the integer 12, without coercion")
+    return value
 
 
 class ContractModel(BaseModel):
@@ -338,7 +358,7 @@ class RepositoryActivity(ContractModel):
         return self
 
 
-NormalizedRecord: TypeAlias = Annotated[GitHubRepository | TechnologyEntity | Article | PackageRelease | RepositoryActivity, Field(discriminator="record_type")]
+NormalizedRecord: TypeAlias = Annotated[GitHubRepository | TechnologyEntity | Article | PackageRelease | RepositoryActivity, Field(discriminator="record_type")]  # noqa: UP040 - retain original canonical alias semantics
 
 
 class CollectionSubject(ContractModel):
@@ -577,7 +597,7 @@ class PackageSnapshot(ContractModel):
     repo_id: RepoId
     repo_group_id: RepoId
     cutoff_at: UtcTimestamp
-    horizon_months: Literal[12]
+    horizon_months: Annotated[Literal[12], BeforeValidator(_checked_horizon)]
     horizon_end_at: UtcTimestamp
     features: SnapshotFeatures
     coverage: list[Coverage]
@@ -611,7 +631,7 @@ class SnapshotBuildRequest(ContractModel):
     package_id: PackageId
     repository: RepoIdentity
     cutoff_at: UtcTimestamp
-    horizon_months: Literal[12]
+    horizon_months: Annotated[Literal[12], BeforeValidator(_checked_horizon)]
     releases: list[PackageRelease]
     activities: list[RepositoryActivity]
     coverage: list[Coverage]
@@ -662,7 +682,7 @@ class SnapshotBuildResult(ContractModel):
         return self
 
 
-ContractRecord: TypeAlias = Annotated[
+ContractRecord: TypeAlias = Annotated[  # noqa: UP040 - retain original canonical alias semantics
     RawRecord | GitHubRepository | TechnologyEntity | Article | PackageRelease |
     RepositoryActivity | CollectionRequest | CollectionResult | NormalizationRequest |
     NormalizationResult | TechnologyLinkRequest | TechnologyLinkResult |
