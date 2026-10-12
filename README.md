@@ -136,3 +136,66 @@ python -m ruff check src/reposeer/contracts scripts/export_contract.py scripts/v
 ```
 
 The offline integration demo uses fake GitHub payloads and HTTPX MockTransport, replays JSONL without refetching, verifies nullable Parquet columns and queries them with DuckDB. Default verification needs no network/credentials; live `smoke` tests are optional. The repository CLI remains a local demo entrypoint. Other collectors, technology linking business logic, snapshot feature computation, broader package-first CLI, dependency/vulnerability and label pipelines are outside T-011. Stored legacy files are never silently migrated; see the explicit ID migration helper and dataset migration notes in the contract.
+
+
+## GitHub repository batch collection (T-013)
+
+Collect several current GitHub repository observations with the same service/client:
+
+```bash
+reposeer collect --repos-file repositories.txt --source github
+# The existing single-repository command remains available:
+reposeer collect pallets/flask
+```
+
+The UTF-8 input file contains one `owner/repo` or HTTPS GitHub repository URL per line:
+
+```text
+# Current repository metadata targets
+pallets/flask
+https://github.com/pydantic/pydantic
+psf/requests
+```
+
+Blank lines and full-line comments are ignored; inline comments are not parsed.
+Supply either a positional target or `--repos-file`, with 1 to 1,000 batch entries.
+Batch mode accepts `--source github` or `all`; it collects only GitHub metadata.
+URLs with credentials, ports, queries, fragments, clone suffixes or extra path segments
+are rejected. Invalid entries are reported without echoing potentially sensitive input.
+
+`RepositoryService.collect_many(targets)` returns an immutable `RepositoryBatchResult`
+with per-target items and actual raw/processed write counts. It shares one UUID run ID
+across single-subject canonical requests. Equivalent slugs/URLs/case variants are
+fetched once; verified duplicate numeric repository IDs are stored once per batch.
+A new run appends new observations rather than deduplicating history.
+
+Raw observations append to `data/raw/github/repositories.jsonl`. Eligible canonical
+repositories append to `data/processed/repositories/repositories.parquet` via one
+Parquet read/write at the end of the batch. Paths use configured `StoragePaths`.
+Private/internal repositories are excluded before raw persistence. Public forks,
+templates and mirrors retain raw audit evidence but are excluded from batch processed
+output. Archived repositories remain eligible; stars, popularity and primary language
+are not exclusion criteria. **Metadata screening passed does not mean that
+package-to-repository mapping has been verified.** No abandonment labels are assigned.
+
+`complete` means all entries are stored, excluded or duplicate (exit 0). `partial`
+means failures alongside stored/excluded entries; `failed` means there were failures
+without a stored/excluded entry (both exit 1). A normalization failure preserves raw;
+a final Parquet write failure raises `CollectionError` and does not report success.
+Existing incompatible Parquet schemas require explicit migration. Alias/rename history
+is not verified: a conflicting provider name is rejected even when its ID is familiar.
+These are current observations, with exact raw retrieval provenance, not historical
+backfill. PyPI mapping, historical snapshots and activity collection remain later tasks.
+
+Run offline verification yourself in the existing Python 3.12 environment:
+
+```bash
+python -m pytest -q tests/integration/test_github_repository_batch.py tests/integration/test_github_contract_pipeline.py tests/contracts
+python -m pytest -q -m "not smoke"
+```
+
+For manual live verification, create `repositories.txt` with public repositories you
+intend to collect, configure `GITHUB_TOKEN` through the existing environment setup,
+and run the batch command above. Check its summary, replay the raw JSONL using
+`JsonlStorage.read_contract_records`, and inspect the projected Parquet with Polars
+or DuckDB. Live collection writes new observations to the configured data directory.
