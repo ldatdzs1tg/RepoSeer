@@ -142,6 +142,10 @@ class GitHubRepositoryContractCollector:
                     canonical_id = repo_id(numeric_id)
                     if subject.repo_id is not None and subject.repo_id != canonical_id:
                         raise ValueError("requested repository ID does not match provider ID")
+                    if canonical_github_url(payload.get("full_name")) != canonical_github_url(name):
+                        raise ValueError(
+                            "requested repository name does not match provider full_name"
+                        )
                     base_url = getattr(self.client, "base_url", "https://api.github.com")
                     records.append(
                         RawRecord(

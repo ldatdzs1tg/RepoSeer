@@ -1,5 +1,7 @@
 """All four pair checkers reject valid-but-unrelated results."""
 
+from copy import deepcopy
+
 import pytest
 
 from reposeer.contracts import (
@@ -207,3 +209,140 @@ def test_snapshot_pair_rejects_future_coverage_even_for_failure(example, status)
         result["snapshot"]["coverage"] = request["coverage"]
     with pytest.raises(ValueError):
         validate_snapshot_pair(validate_record(request), validate_record(result))
+
+
+@pytest.mark.parametrize(
+    "change,valid",
+    [
+        ("name_mismatch", False),
+        ("url_mismatch", False),
+        ("consistent", True),
+        ("case", True),
+        ("provider_name", False),
+        ("missing_name", False),
+        ("invalid_name", False),
+        ("nonstring_name", False),
+        ("name_only_source_url", False),
+        ("url_only_source_url", False),
+        ("second_match", True),
+        ("cross_subject", False),
+    ],
+)
+def test_collection_repository_identifiers_must_match_one_subject(example, change, valid):
+    request = example("collection_request")
+    result = example("collection_result")
+    subject = request["subjects"][0]
+    subject["url"] = "https://github.com/Synthetic/Demo/"
+    raw = result["records"][0]
+    if change == "name_mismatch":
+        subject["repo_full_name"] = "Synthetic/Other"
+    elif change == "url_mismatch":
+        subject["url"] = "https://github.com/Synthetic/Other"
+    elif change == "case":
+        subject.update(repo_full_name="synthetic/DEMO", url="https://GitHub.com/SYNTHETIC/demo/")
+        raw["payload"]["full_name"] = "SYNTHETIC/Demo"
+    elif change in {"provider_name", "name_only_source_url", "url_only_source_url"}:
+        raw["payload"]["full_name"] = "Synthetic/Other"
+        if change == "name_only_source_url":
+            subject.update(repo_id=None, url=None)
+        elif change == "url_only_source_url":
+            subject.update(repo_id=None, repo_full_name=None)
+    elif change == "missing_name":
+        raw["payload"].pop("full_name")
+    elif change == "invalid_name":
+        raw["payload"]["full_name"] = "invalid"
+    elif change == "nonstring_name":
+        raw["payload"]["full_name"] = 123
+    elif change in {"second_match", "cross_subject"}:
+        second = deepcopy(subject)
+        subject["repo_full_name"] = "Synthetic/Other"
+        if change == "cross_subject":
+            second["repo_id"] = "github:repository:1"
+        request["subjects"].append(second)
+    request = validate_record(request)
+    result = validate_record(result)
+    if valid:
+        validate_collection_pair(request, result)
+    else:
+        with pytest.raises(ValueError, match="outside requested subjects"):
+            validate_collection_pair(request, result)
+
+
+NORMALIZED_PAIRS = [
+    ("article_raw_record", "article"),
+    ("package_release_raw_record", "package_release"),
+    ("repository_activity_raw_record", "repository_activity"),
+    ("github_raw_record", "github_repository"),
+    ("technology_raw_record", "technology_entity"),
+]
+
+
+def _normalization_data(example, raw_name, record_name):
+    request = example("normalization_request")
+    request["records"] = [example(raw_name)]
+    request["run_id"] = request["records"][0]["run_id"]
+    result = example("normalization_result")
+    result.update(
+        request_id=request["request_id"],
+        run_id=request["run_id"],
+        records=[example(record_name)],
+        input_record_count=1,
+        processed_record_count=1,
+        rejected_record_count=0,
+        output_record_count=1,
+        status="complete",
+        errors=[],
+    )
+    return request, result
+
+
+@pytest.mark.parametrize("raw_name,record_name", NORMALIZED_PAIRS)
+@pytest.mark.parametrize("change", ["same", "later", "earlier", "source"])
+def test_normalization_preserves_raw_source_and_retrieval(example, raw_name, record_name, change):
+    request, result = _normalization_data(example, raw_name, record_name)
+    provenance = result["records"][0]["provenance"]
+    if change in {"later", "earlier"}:
+        timestamp = "2024-03-01T12:00:00.000Z" if change == "later" else "2024-02-28T12:00:00.000Z"
+        provenance["retrieved_at"] = timestamp
+        if provenance["temporal_basis"] == "observation":
+            provenance.update(valid_at=timestamp, available_at=timestamp)
+    elif change == "source":
+        provenance["source"] = "github_graphql"
+    # Both boundaries must be independently valid before exercising the pair invariant.
+    request = validate_record(request)
+    result = validate_record(result)
+    if change == "same":
+        validate_normalization_pair(request, result)
+    else:
+        message = "source mismatch" if change == "source" else "retrieved_at timestamp mismatch"
+        with pytest.raises(ValueError, match=message):
+            validate_normalization_pair(request, result)
+
+
+@pytest.mark.parametrize("change", ["same", "later", "source"])
+def test_normalization_multi_raw_requires_common_source_and_retrieval(example, change):
+    request, result = _normalization_data(example, "article_raw_record", "article")
+    extra = deepcopy(request["records"][0])
+    extra["raw_record_id"] = "raw:00000000-0000-4000-8000-000000000099"
+    if change == "later":
+        extra["retrieved_at"] = "2024-03-01T12:00:00.000Z"
+    elif change == "source":
+        extra["source"] = "github_graphql"
+    request["records"].append(extra)
+    provenance = result["records"][0]["provenance"]
+    provenance["raw_record_ids"].append(extra["raw_record_id"])
+    # Even choosing the latest retrieval cannot represent raw inputs from different times.
+    provenance.update(
+        retrieved_at=extra["retrieved_at"],
+        valid_at=extra["retrieved_at"],
+        available_at=extra["retrieved_at"],
+    )
+    result.update(input_record_count=2, processed_record_count=2)
+    request = validate_record(request)
+    result = validate_record(result)
+    if change == "same":
+        validate_normalization_pair(request, result)
+    else:
+        message = "source mismatch" if change == "source" else "retrieved_at timestamp mismatch"
+        with pytest.raises(ValueError, match=message):
+            validate_normalization_pair(request, result)

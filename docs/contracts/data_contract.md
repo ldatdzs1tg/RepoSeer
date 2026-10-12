@@ -156,6 +156,8 @@ Published date không chứng minh bản text hiện tại đã tồn tại vào
 
 `CollectionRequest` gồm request/run ID, tên collector, source, subjects, record kinds, time range/cutoff, cursor và giới hạn pages/records. Subject cần ít nhất một repo ID, full name, package ID hoặc URL. Khi đủ cả ID và name, collector phải resolve/đối chiếu với provider; identity không khớp thì báo lỗi, không ghi đè ID.
 
+Với GitHub repository metadata, mọi repo ID, full name và GitHub URL được cung cấp trong cùng một subject phải đồng thời khớp repository trả về; chỉ cần một subject khớp đầy đủ khi có nhiều subjects. Name/URL được đối chiếu case-insensitive với native `payload.full_name` hợp lệ, không dùng request endpoint (`source_url`) làm bằng chứng thay thế khi thiếu hoặc mâu thuẫn tên. Contract v0.1.0 chưa tự động chấp nhận rename/redirect chỉ dựa vào numeric ID khi chưa có alias evidence đã xác minh. Package ID chưa xác minh đi kèm name/URL không chứng minh package-to-repository mapping; raw repository vẫn để `package_id=null`.
+
 `CollectionResult` echo `request_id`, `run_id`, `source`; chứa `records`, `errors`, `status`, `metadata`. Metadata gồm collector name/version, started/finished times, requested range, pages/counts, pagination, next cursor, coverage và rate-limit info.
 
 | Tình trạng | Ý nghĩa |
@@ -182,6 +184,8 @@ Mỗi result có ít nhất một `Coverage`. Data group dùng enum trong code; 
 Python dùng các Protocol trong `src/reposeer/contracts/models.py`; TypeScript dùng Promise interfaces trong `docs/contracts/types.ts`. Đây là interface dữ liệu, không phải implementation API/collector. Một `run_id` xuyên suốt pipeline; mỗi lời gọi có `request_id` mới, result echo đúng request. Khi retry nguyên request có thể giữ request ID; re-collect observation mới dùng raw UUID mới.
 
 Normalizer có thể tạo nhiều output từ một raw record. `processed_record_count` đếm raw input được xử lý, `output_record_count` đếm normalized outputs. `input_record_count = processed_record_count + rejected_record_count`. Mọi normalized output phải tham chiếu raw input qua `provenance.raw_record_ids`.
+
+Với mọi loại normalized record, `provenance.source` và `provenance.retrieved_at` phải bằng chính xác source và retrieval timestamp của từng raw input được tham chiếu. Trong contract v0.1.0, một output tham chiếu nhiều raw records chỉ hợp lệ khi tất cả có cùng source và cùng `retrieved_at`; khác timestamp phải bị từ chối, không chọn `max()`, `min()` hoặc thời điểm normalization để thay thế. Quy tắc này không đổi `valid_at` hay `available_at`: historical reconstruction vẫn giữ thời điểm lịch sử riêng với thời điểm retrieval.
 
 Linker không sửa URL, title, body, content hash, publication hoặc provenance của article. Technology ID trong output phải thuộc taxonomy supplied. Complete output có đủ input article IDs; partial output phải giải thích lỗi.
 

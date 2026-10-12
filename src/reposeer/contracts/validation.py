@@ -72,6 +72,36 @@ def validate_collection_pair(request: CollectionRequest, result: CollectionResul
             raise ValueError("record unavailable at requested cutoff")
 
         def matches(subject, raw=raw):
+            if raw.source == "github_rest" and raw.source_record_type == "github_repository":
+                if subject.repo_id is not None and raw.repo_id != subject.repo_id:
+                    return False
+                if subject.repo_full_name is not None or subject.url is not None:
+                    try:
+                        observed_url = canonical_github_url(raw.payload.get("full_name"))
+                        if (
+                            subject.repo_full_name is not None
+                            and canonical_github_url(subject.repo_full_name) != observed_url
+                        ):
+                            return False
+                        if subject.url is not None:
+                            parts = urlsplit(subject.url)
+                            if (
+                                parts.hostname != "github.com"
+                                or parts.query
+                                or parts.fragment
+                                or parts.port is not None
+                                or canonical_github_url(parts.path.strip("/")) != observed_url
+                            ):
+                                return False
+                    except ValueError:
+                        return False
+                if any(
+                    value is not None
+                    for value in (subject.repo_id, subject.repo_full_name, subject.url)
+                ):
+                    # A repository subject does not verify a package-to-repository mapping.
+                    return True
+                return subject.package_id is not None and raw.package_id == subject.package_id
             if subject.repo_id is not None:
                 return raw.repo_id == subject.repo_id
             if subject.repo_full_name is not None:
@@ -121,16 +151,12 @@ def validate_normalization_pair(request: NormalizationRequest, result: Normaliza
             raise ValueError("orphan normalization raw reference")
         for raw_id in ids:
             raw = inputs[raw_id]
-            if (
-                record.provenance.source != raw.source
-                or record.provenance.retrieved_at < raw.retrieved_at
-            ):
-                raise ValueError("normalization provenance mismatch")
-            if record.record_type == "github_repository" and (
-                record.identity.repo_id != raw.repo_id
-                or record.provenance.retrieved_at != raw.retrieved_at
-            ):
-                raise ValueError("normalized repository identity/time mismatch")
+            if record.provenance.source != raw.source:
+                raise ValueError("normalization provenance source mismatch")
+            if record.provenance.retrieved_at != raw.retrieved_at:
+                raise ValueError("normalization provenance retrieved_at timestamp mismatch")
+            if record.record_type == "github_repository" and record.identity.repo_id != raw.repo_id:
+                raise ValueError("normalized repository identity mismatch")
         processed.update(ids)
     if len(processed) != result.processed_record_count:
         raise ValueError("processed count does not match referenced raw inputs")

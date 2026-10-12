@@ -434,3 +434,42 @@ def test_repo_subject_does_not_claim_unverified_package_mapping(identifier):
     assert result.status == "complete"
     assert result.records[0].repo_id == "github:repository:900000001"
     assert result.records[0].package_id is None
+
+
+@pytest.mark.parametrize("full_name", ["Synthetic/Other", None, "invalid", 123])
+def test_conflicting_or_invalid_native_name_emits_no_raw(full_name):
+    fake = FakeGitHub()
+    if full_name is None:
+        fake.payload.pop("full_name")
+    else:
+        fake.payload["full_name"] = full_name
+    request = validate_record(example("collection_request"))
+    result = GitHubRepositoryContractCollector(fake).collect(request)
+    validate_collection_pair(request, result)
+    assert result.status == "failed"
+    assert result.records == []
+    assert len(result.errors) == 1
+    assert result.errors[0].code == "validation_error"
+    assert fake.calls == [("Synthetic", "Demo")]
+
+
+def test_native_name_mismatch_creates_no_raw_or_processed_record(tmp_path):
+    fake = FakeGitHub()
+    fake.payload["full_name"] = "Synthetic/Other"
+    service = RepositoryService(fake, storage_paths=StoragePaths(tmp_path))
+    with pytest.raises(CollectionError):
+        service.collect_and_store("Synthetic", "Demo")
+    assert not list(tmp_path.rglob("*.jsonl"))
+    assert not list(tmp_path.rglob("*.parquet"))
+
+
+def test_native_name_case_difference_preserves_payload():
+    fake = FakeGitHub()
+    fake.payload["full_name"] = "SYNTHETIC/demo"
+    request = validate_record(example("collection_request"))
+    result = GitHubRepositoryContractCollector(fake).collect(request)
+    validate_collection_pair(request, result)
+    assert result.status == "complete"
+    assert result.errors == []
+    assert result.records[0].payload == fake.payload
+    assert result.records[0].payload["full_name"] == "SYNTHETIC/demo"
