@@ -1,6 +1,7 @@
 """Offline T-013 batch collection, screening, storage and CLI regressions."""
 
 import json
+import os
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
 from datetime import datetime
@@ -22,8 +23,13 @@ from reposeer.exceptions import (
     RateLimitExceededError,
     StorageError,
 )
-from reposeer.services.repository_service import RepositoryService, parse_repository_target
+from reposeer.services.repository_service import (
+    RepositoryService,
+    _repository_public_scope,
+    parse_repository_target,
+)
 from reposeer.storage.paths import StoragePaths
+from reposeer.storage.processed.parquet import ParquetStorage
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -703,10 +709,12 @@ def test_cli_persistence_failure_never_reports_complete(batch_service, tmp_path,
     service, _ = batch_service
     monkeypatch.setattr("reposeer.cli.collect.RepositoryService", lambda: service)
 
-    def fail_write(path, data):
+    def fail_replace(temporary, destination):
+        assert Path(temporary).parent == Path(destination).parent
+        assert pl.read_parquet(temporary).height == 1
         raise OSError("synthetic-secret")
 
-    monkeypatch.setattr(service.parquet_storage, "write", fail_write)
+    monkeypatch.setattr("reposeer.storage.processed.parquet.os.replace", fail_replace)
     path = tmp_path / "repositories.txt"
     path.write_text("Synthetic/Alpha\n", encoding="utf-8")
     result = CliRunner().invoke(app, ["collect", "--repos-file", str(path)])
@@ -714,6 +722,8 @@ def test_cli_persistence_failure_never_reports_complete(batch_service, tmp_path,
     assert "Status: complete" not in result.output
     assert "synthetic-secret" not in result.output
     assert len(raws(service)) == 1
+    assert not service.paths.processed_path("repositories").exists()
+    assert not list(tmp_path.rglob("*.tmp"))
 
 
 def test_cli_does_not_parse_inline_comments(batch_service, tmp_path, monkeypatch):
@@ -782,3 +792,337 @@ def test_cli_credentials_are_never_echoed(batch_service, tmp_path, monkeypatch, 
     assert result.exit_code == 1
     assert "synthetic-secret" not in result.output
     assert not fake.calls
+
+
+@pytest.mark.parametrize(
+    "changes,reasons",
+    [
+        ({}, ()),
+        ({"archived": True}, ()),
+        ({"language": "Rust"}, ()),
+        ({"language": "C++"}, ()),
+        ({"language": None}, ()),
+        ({"fork": True}, ("fork_repository",)),
+        ({"is_template": True}, ("template_repository",)),
+        ({"mirror_url": "https://example.org/mirror"}, ("mirror_repository",)),
+        (
+            {"fork": True, "is_template": True, "mirror_url": "https://example.org/mirror"},
+            ("fork_repository", "template_repository", "mirror_repository"),
+        ),
+    ],
+)
+def test_single_and_batch_share_eligibility(tmp_path, changes, reasons):
+    fake = FakeGitHub()
+    fake.payloads["synthetic/alpha"].update(changes)
+    single = RepositoryService(fake, storage_paths=StoragePaths(tmp_path / "single"))
+    batch = RepositoryService(fake, storage_paths=StoragePaths(tmp_path / "batch"))
+    if reasons:
+        with pytest.raises(CollectionError) as error:
+            single.collect_and_store("Synthetic", "Alpha")
+        assert str(error.value).endswith(", ".join(reasons))
+        assert not single.paths.processed_path("repositories").exists()
+    else:
+        repository = single.collect_and_store("Synthetic", "Alpha")
+        assert isinstance(repository, GitHubRepository)
+        assert repository.is_archived is changes.get("archived", False)
+        assert frame(single).height == 1
+    result = batch.collect_many(["Synthetic/Alpha"])
+    assert result.items[0].status == ("excluded" if reasons else "stored")
+    assert result.items[0].screening_reasons == reasons
+    assert result.processed_stored_count == (0 if reasons else 1)
+    if reasons:
+        assert not batch.paths.processed_path("repositories").exists()
+    else:
+        assert frame(batch).height == 1
+    for service in (single, batch):
+        raw = raws(service)
+        assert len(raw) == 1
+        assert raw[0].payload == fake.payloads["synthetic/alpha"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"fork": True},
+        {"is_template": True},
+        {"mirror_url": "https://example.org/mirror"},
+        {"fork": True, "is_template": True, "mirror_url": "https://example.org/mirror"},
+    ],
+)
+def test_single_exclusion_preserves_previous_processed(batch_service, changes):
+    service, fake = batch_service
+    service.collect_and_store("Synthetic", "Beta")
+    destination = service.paths.processed_path("repositories")
+    previous = destination.read_bytes()
+    fake.payloads["synthetic/alpha"].update(changes)
+    with pytest.raises(CollectionError, match="excluded from processed output"):
+        service.collect_and_store("Synthetic", "Alpha")
+    assert destination.read_bytes() == previous
+    assert frame(service)["repo_full_name"].to_list() == ["Synthetic/Beta"]
+    assert len(raws(service)) == 2
+
+
+@pytest.mark.parametrize(
+    "payload,scope,reasons",
+    [
+        ({"private": False, "visibility": "public"}, "public", ()),
+        ({"private": False}, "public", ()),
+        ({"private": False, "visibility": None}, "public", ()),
+        ({"visibility": "public"}, "public", ()),
+        ({"private": None, "visibility": "public"}, "public", ()),
+        ({"private": True, "visibility": "private"}, "excluded", ("private_repository",)),
+        ({"private": True}, "excluded", ("private_repository",)),
+        ({"private": True, "visibility": None}, "excluded", ("private_repository",)),
+        ({"private": True, "visibility": "public"}, "excluded", ("private_repository",)),
+        ({"private": True, "visibility": "internal"}, "excluded", ("private_repository",)),
+        ({"private": False, "visibility": "private"}, "excluded", ("private_repository",)),
+        ({"visibility": "private"}, "excluded", ("private_repository",)),
+        ({"private": False, "visibility": "internal"}, "excluded", ("internal_repository",)),
+        ({"visibility": "internal"}, "excluded", ("internal_repository",)),
+        ({}, "unverified", ()),
+        ({"private": None, "visibility": None}, "unverified", ()),
+        ({"private": None}, "unverified", ()),
+        ({"visibility": None}, "unverified", ()),
+    ],
+)
+def test_public_scope_truth_table_preserves_payload(payload, scope, reasons):
+    previous = deepcopy(payload)
+    assert _repository_public_scope(payload) == (scope, reasons)
+    assert payload == previous
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"private": "false", "visibility": "public"},
+        {"private": 0, "visibility": "public"},
+        {"private": 1, "visibility": "private"},
+        {"private": [], "visibility": "public"},
+        {"private": False, "visibility": "unknown"},
+        {"private": True, "visibility": 123},
+        {"private": False, "visibility": []},
+        {"private": True, "visibility": {}},
+    ],
+)
+def test_public_scope_rejects_invalid_native_types(payload):
+    with pytest.raises(ValueError, match="^Invalid repository visibility metadata$"):
+        _repository_public_scope(payload)
+
+
+@pytest.mark.parametrize("mode", ["single", "batch"])
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize(
+    "fields,status,code,reasons,message",
+    [
+        (
+            {"private": True, "visibility": "public"},
+            "excluded",
+            None,
+            ("private_repository",),
+            "outside the public metadata scope",
+        ),
+        (
+            {"private": False, "visibility": "internal"},
+            "excluded",
+            None,
+            ("internal_repository",),
+            "outside the public metadata scope",
+        ),
+        ({}, "failed", "visibility_unverified", (), "public visibility could not be verified"),
+        (
+            {"private": "false"},
+            "failed",
+            "validation_error",
+            (),
+            "Invalid repository visibility metadata",
+        ),
+    ],
+)
+def test_nonpublic_scope_never_calls_raw_writer(
+    batch_service, monkeypatch, caplog, mode, existing, fields, status, code, reasons, message
+):
+    service, fake = batch_service
+    if existing:
+        service.collect_and_store("Synthetic", "Beta")
+    previous = {
+        path: path.read_bytes() for path in service.paths.base_dir.rglob("*") if path.is_file()
+    }
+    payload = fake.payloads["synthetic/alpha"]
+    payload.pop("private", None)
+    payload.pop("visibility", None)
+    payload.update(fields, description="synthetic-sensitive-payload")
+
+    def forbidden_raw_write(*args):
+        raise AssertionError("Blocked scope must never reach raw storage")
+
+    monkeypatch.setattr(service.raw_storage, "append_contract_record", forbidden_raw_write)
+    if mode == "single":
+        with pytest.raises(CollectionError, match=message) as error:
+            service.collect_and_store("Synthetic", "Alpha")
+        report = str(error.value)
+    else:
+        result = service.collect_many(["Synthetic/Alpha"])
+        assert result.status == ("complete" if status == "excluded" else "failed")
+        assert result.raw_stored_count == result.processed_stored_count == 0
+        assert result.items[0].status == status
+        assert result.items[0].error_code == code
+        assert result.items[0].screening_reasons == reasons
+        if code:
+            assert message in result.items[0].error_message
+        report = repr(result)
+    assert "synthetic-sensitive-payload" not in report + caplog.text
+    assert {
+        path: path.read_bytes() for path in service.paths.base_dir.rglob("*") if path.is_file()
+    } == previous
+
+
+@pytest.mark.parametrize("fields", [{"private": False}, {"visibility": "public"}])
+def test_public_evidence_in_one_field_succeeds_in_both_apis(tmp_path, fields):
+    fake = FakeGitHub()
+    payload = fake.payloads["synthetic/alpha"]
+    payload.pop("private", None)
+    payload.pop("visibility", None)
+    payload.update(fields)
+    for mode in ("single", "batch"):
+        service = RepositoryService(fake, storage_paths=StoragePaths(tmp_path / mode))
+        if mode == "single":
+            assert service.collect_and_store("Synthetic", "Alpha").visibility == "public"
+        else:
+            assert service.collect_many(["Synthetic/Alpha"]).items[0].status == "stored"
+        assert raws(service)[0].payload == payload
+        assert frame(service).height == 1
+
+
+def test_unverified_repository_does_not_block_public_target(batch_service):
+    service, fake = batch_service
+    fake.payloads["synthetic/alpha"].pop("private", None)
+    fake.payloads["synthetic/alpha"].pop("visibility", None)
+    result = service.collect_many(["Synthetic/Alpha", "Synthetic/Beta"])
+    assert result.status == "partial"
+    assert result.failed_count == result.processed_stored_count == result.raw_stored_count == 1
+    assert result.items[0].error_code == "visibility_unverified"
+    assert result.items[1].status == "stored"
+    assert raws(service)[0].payload == fake.payloads["synthetic/beta"]
+
+
+@pytest.mark.parametrize("mode", ["single", "batch"])
+@pytest.mark.parametrize("fields", [{"private": True}, {}, {"private": "false"}])
+def test_cli_blocked_scope_does_not_expose_payload(
+    batch_service, tmp_path, monkeypatch, caplog, mode, fields
+):
+    from reposeer.cli.app import app
+
+    service, fake = batch_service
+    payload = fake.payloads["synthetic/alpha"]
+    payload.pop("private", None)
+    payload.pop("visibility", None)
+    payload.update(fields, description="synthetic-sensitive-payload")
+    if mode == "batch":
+        monkeypatch.setattr("reposeer.cli.collect.RepositoryService", lambda: service)
+        path = tmp_path / "repositories.txt"
+        path.write_text("Synthetic/Alpha\n", encoding="utf-8")
+        args = ["collect", "--repos-file", str(path)]
+    else:
+        monkeypatch.setattr("reposeer.pipelines.github.RepositoryService", lambda: service)
+        args = ["collect", "Synthetic/Alpha"]
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == (0 if mode == "batch" and fields.get("private") is True else 1)
+    assert "synthetic-sensitive-payload" not in result.output + caplog.text
+    assert not list(tmp_path.rglob("*.jsonl"))
+    assert not list(tmp_path.rglob("*.parquet"))
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("failure", ["write", "replace"])
+def test_atomic_parquet_failure_preserves_destination(tmp_path, monkeypatch, existing, failure):
+    storage = ParquetStorage()
+    destination = tmp_path / "processed" / "repositories.parquet"
+    if existing:
+        storage.write(destination, [{"value": "old"}])
+    previous = destination.read_bytes() if existing else None
+    reached = []
+
+    def fail_replace(temporary, target):
+        assert Path(target) == destination
+        assert Path(temporary).parent == destination.parent
+        assert pl.read_parquet(temporary).to_dicts() == [{"value": "new"}]
+        reached.append("replace")
+        raise OSError("replacement failed")
+
+    def fail_write(self, temporary, *, compression):
+        assert Path(temporary) != destination
+        assert Path(temporary).parent == destination.parent
+        assert compression == "zstd"
+        Path(temporary).write_bytes(b"partial parquet")
+        reached.append("write")
+        raise OSError("temporary write failed")
+
+    if failure == "replace":
+        monkeypatch.setattr("reposeer.storage.processed.parquet.os.replace", fail_replace)
+    else:
+        monkeypatch.setattr(pl.DataFrame, "write_parquet", fail_write)
+    with pytest.raises(OSError):
+        storage.write(destination, [{"value": "new"}])
+    assert reached == [failure]
+    if existing:
+        assert destination.read_bytes() == previous
+        assert storage.read(destination).to_dicts() == [{"value": "old"}]
+    else:
+        assert not destination.exists()
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_atomic_parquet_success_replaces_complete_file(tmp_path, monkeypatch):
+    storage = ParquetStorage()
+    destination = tmp_path / "repositories.parquet"
+    storage.write(destination, [{"value": "old"}])
+    previous = destination.read_bytes()
+    replace = os.replace
+    replacements = []
+
+    def observe_replace(temporary, target):
+        assert Path(target) == destination
+        assert Path(temporary).parent == destination.parent
+        assert destination.read_bytes() == previous
+        assert pl.read_parquet(temporary).to_dicts() == [{"value": "new"}]
+        replacements.append(Path(temporary))
+        replace(temporary, target)
+
+    monkeypatch.setattr("reposeer.storage.processed.parquet.os.replace", observe_replace)
+    storage.write(destination, pl.DataFrame({"value": ["new"]}))
+    assert storage.read(destination).to_dicts() == [{"value": "new"}]
+    assert len(replacements) == 1
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_batch_atomic_replacement_failure_retains_raw_and_previous_processed(
+    batch_service, monkeypatch
+):
+    service, _ = batch_service
+    service.collect_many(["Synthetic/Alpha"])
+    destination = service.paths.processed_path("repositories")
+    raw_path = service.paths.raw_path("github", "repositories")
+    previous = destination.read_bytes()
+    previous_raw = raw_path.read_bytes()
+    replacements = []
+
+    def fail_replace(temporary, target):
+        assert Path(target) == destination
+        assert Path(temporary).parent == destination.parent
+        assert pl.read_parquet(temporary)["repo_full_name"].to_list() == [
+            "Synthetic/Alpha",
+            "Synthetic/Beta",
+            "Synthetic/Gamma",
+        ]
+        replacements.append(Path(temporary))
+        raise OSError("replacement failed")
+
+    monkeypatch.setattr("reposeer.storage.processed.parquet.os.replace", fail_replace)
+    with pytest.raises(CollectionError, match="Unable to persist processed repository data"):
+        service.collect_many(["Synthetic/Beta", "Synthetic/Gamma"])
+    assert len(replacements) == 1
+    assert destination.read_bytes() == previous
+    assert frame(service)["repo_full_name"].to_list() == ["Synthetic/Alpha"]
+    assert raw_path.read_bytes().startswith(previous_raw)
+    assert len(raws(service)) == 3
+    assert not list(service.paths.base_dir.rglob("*.tmp"))

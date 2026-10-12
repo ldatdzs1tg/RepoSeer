@@ -77,12 +77,24 @@ def parse_repository_target(target: str) -> str:
     return slug
 
 
-def _private_exclusion_reasons(payload: dict) -> tuple[str, ...]:
-    if payload.get("private") is True or payload.get("visibility") == "private":
-        return ("private_repository",)
-    if payload.get("visibility") == "internal":
-        return ("internal_repository",)
-    return ()
+def _repository_public_scope(
+    payload: dict,
+) -> tuple[Literal["public", "excluded", "unverified"], tuple[str, ...]]:
+    private = payload.get("private")
+    visibility = payload.get("visibility")
+    if private is not None and type(private) is not bool:
+        raise ValueError("Invalid repository visibility metadata")
+    if visibility is not None and (
+        not isinstance(visibility, str) or visibility not in {"public", "private", "internal"}
+    ):
+        raise ValueError("Invalid repository visibility metadata")
+    if private is True or visibility == "private":
+        return "excluded", ("private_repository",)
+    if visibility == "internal":
+        return "excluded", ("internal_repository",)
+    if private is False or visibility == "public":
+        return "public", ()
+    return "unverified", ()
 
 
 def _repository_exclusion_reasons(repository: GitHubRepository) -> tuple[str, ...]:
@@ -218,10 +230,21 @@ class RepositoryService:
         if len(collected.records) != 1:
             raise CollectionError("Expected one raw repository")
         raw = collected.records[0]
-        if _private_exclusion_reasons(raw.payload):
+        try:
+            scope, _ = _repository_public_scope(raw.payload)
+        except ValueError as error:
+            raise CollectionError("Invalid repository visibility metadata") from error
+        if scope == "excluded":
             raise CollectionError("Repository is outside the public metadata scope")
+        if scope == "unverified":
+            raise CollectionError("Repository public visibility could not be verified")
         self.raw_storage.append_contract_record(self.paths.raw_path("github", "repositories"), raw)
         record = self._normalize_repository(raw)
+        reasons = _repository_exclusion_reasons(record)
+        if reasons:
+            raise CollectionError(
+                "Repository excluded from processed output: " + ", ".join(reasons)
+            )
         self._write_processed_rows([_repository_row(record)])
         return record
 
@@ -281,9 +304,27 @@ class RepositoryService:
                 items.append(RepositoryBatchItem(slug, "duplicate", repo_id, (), None, None))
                 continue
             seen_ids.add(repo_id)
-            reasons = _private_exclusion_reasons(raw.payload)
-            if reasons:
+            try:
+                scope, reasons = _repository_public_scope(raw.payload)
+            except ValueError:
+                items.append(
+                    _batch_failure(
+                        slug, "validation_error", "Invalid repository visibility metadata", repo_id
+                    )
+                )
+                continue
+            if scope == "excluded":
                 items.append(RepositoryBatchItem(slug, "excluded", repo_id, reasons, None, None))
+                continue
+            if scope == "unverified":
+                items.append(
+                    _batch_failure(
+                        slug,
+                        "visibility_unverified",
+                        "Repository public visibility could not be verified",
+                        repo_id,
+                    )
+                )
                 continue
             try:
                 self.raw_storage.append_contract_record(

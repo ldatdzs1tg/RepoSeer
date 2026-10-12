@@ -172,11 +172,21 @@ A new run appends new observations rather than deduplicating history.
 Raw observations append to `data/raw/github/repositories.jsonl`. Eligible canonical
 repositories append to `data/processed/repositories/repositories.parquet` via one
 Parquet read/write at the end of the batch. Paths use configured `StoragePaths`.
-Private/internal repositories are excluded before raw persistence. Public forks,
-templates and mirrors retain raw audit evidence but are excluded from batch processed
-output. Archived repositories remain eligible; stars, popularity and primary language
-are not exclusion criteria. **Metadata screening passed does not mean that
+Single-repository and batch collection share public verification and eligibility
+screening. Private/internal repositories, unverified public status and invalid native
+visibility metadata are blocked before raw persistence. Public forks, templates and
+mirrors retain raw audit evidence but are excluded from processed output; single-repo
+collection raises `CollectionError` with the screening reasons. Archived repositories
+remain eligible; stars, popularity and primary language are not exclusion criteria.
+Raw remains append-only. **Metadata screening passed does not mean that
 package-to-repository mapping has been verified.** No abandonment labels are assigned.
+
+Parquet writes use a temporary file in the destination directory, close its handle,
+write the complete file with `zstd`, then replace the destination with `os.replace`.
+Temporary files are cleaned up on failure; the previous destination remains intact
+if writing or replacement fails. Atomic replacement depends on filesystem support
+and does not resolve concurrent writers or cloud synchronization conflicts, or provide
+full transaction semantics.
 
 `complete` means all entries are stored, excluded or duplicate (exit 0). `partial`
 means failures alongside stored/excluded entries; `failed` means there were failures

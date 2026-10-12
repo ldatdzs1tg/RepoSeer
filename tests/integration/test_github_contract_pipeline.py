@@ -282,7 +282,6 @@ def test_unknown_count_stays_null_in_jsonl_parquet_and_duckdb(tmp_path):
         "fork",
         "archived",
         "is_template",
-        "visibility",
         "count_string",
         "naive_timestamp",
         "future_updated",
@@ -290,10 +289,7 @@ def test_unknown_count_stays_null_in_jsonl_parquet_and_duckdb(tmp_path):
 )
 def test_bad_native_records_persist_raw_but_never_write_processed(tmp_path, change):
     fake = FakeGitHub()
-    if change == "visibility":
-        fake.payload.pop("visibility")
-        fake.payload.pop("private")
-    elif change == "count_string":
+    if change == "count_string":
         fake.payload["stargazers_count"] = "0"
     elif change == "naive_timestamp":
         fake.payload["created_at"] = "2020-01-01T00:00:00"
@@ -309,6 +305,23 @@ def test_bad_native_records_persist_raw_but_never_write_processed(tmp_path, chan
         == 1
     )
     assert not (tmp_path / "processed/repositories/repositories.parquet").exists()
+
+
+def test_unverified_visibility_never_persists_raw_or_processed(tmp_path, monkeypatch):
+    fake = FakeGitHub()
+    fake.payload.pop("visibility")
+    fake.payload.pop("private")
+    service = RepositoryService(fake, storage_paths=StoragePaths(tmp_path))
+
+    def forbidden_raw_write(*args):
+        raise AssertionError("Unverified public scope must be blocked before persistence")
+
+    monkeypatch.setattr(service.raw_storage, "append_contract_record", forbidden_raw_write)
+    # Public verification is a security/scope guard before raw persistence.
+    with pytest.raises(CollectionError, match="public visibility could not be verified"):
+        service.collect_and_store("Synthetic", "Demo")
+    assert not list(tmp_path.rglob("*.jsonl"))
+    assert not list(tmp_path.rglob("*.parquet"))
 
 
 def test_mixed_normalization_reports_partial_and_unsupported_kind():
