@@ -1,6 +1,7 @@
 """Raw storage handler for JSON Lines (JSONL)."""
 
 import json
+import os
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,27 @@ class JsonlStorage(BaseStorage):
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(line)
+
+    def append_contract_records_durable(
+        self, path: Path, records: Iterable[RawRecord]
+    ) -> int:
+        """Append one bounded, prevalidated step and sync it before returning."""
+        lines = []
+        for record in records:
+            if not isinstance(record, RawRecord):
+                raise TypeError("strict raw storage requires contracts.RawRecord")
+            validated = validate_record(record)
+            lines.append(json.dumps(
+                validated.model_dump(mode="json"), sort_keys=True, ensure_ascii=False,
+                allow_nan=False, separators=(",", ":"),
+            ) + "\n")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as stream:
+            for line in lines:
+                stream.write(line)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return len(lines)
 
     def read_contract_records(self, path: Path) -> list[RawRecord]:
         """Strict replay: every line must be a canonical raw JSON object."""

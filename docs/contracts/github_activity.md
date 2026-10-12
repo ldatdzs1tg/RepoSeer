@@ -536,3 +536,272 @@ Full interaction/timeline/review data, processed activity Parquet, T-018 normali
 historical features and labels remain outside this implementation. Existing CLI,
 legacy collectors, entity models, T-011 contracts and T-013 services are unchanged.
 T-014 as a whole is not declared complete by this phase.
+
+
+## 14. Phase 3 — Durable activity collection and batch execution
+
+### Architecture and public interfaces
+
+`ActivityBatchService` performs synchronous, sequential repository/group execution.
+It shares one `GitHubClient` with T-013 `RepositoryService` and `ActivityService`.
+Injected clients belong to the caller; an internally created client is closed once
+by `ActivityBatchService.close()`. Importing the CLI performs no collection or HTTP
+request. The original `reposeer collect` and Phase 2 `collect_and_store()` APIs remain
+unchanged.
+
+```python
+ActivityBatchService(client=None, *, storage_paths=None, clock=None,
+                     run_manager=None, on_run_started=None)
+service.start(targets, *, groups, max_pages_per_group=5,
+              max_records_per_group=500) -> ActivityBatchResult
+service.resume(run_id) -> ActivityBatchResult
+service.close()
+```
+
+`on_run_started(run_id, checkpoint_path)` runs after the initial durable checkpoint
+and before metadata collection. The CLI uses it to display the resumable run ID
+before potentially lengthy work. An injected `RunManager` must use the supplied
+`StoragePaths.metadata_dir / "collection_runs"` directory.
+
+`ActivityService.collect_page_and_store(repository, group, *, context, run_manager,
+target_index, cursor, remaining_record_budget)` builds a canonical T-011 request and
+calls the existing `GitHubActivityContractCollector` with `max_pages=1`. It does not
+implement another pagination loop or replace the five extractors. A collection step
+is bounded to one native page (100 items), possibly ending inside the page when the
+remaining record budget is consumed. Native PR skips and rejected items still affect
+the Phase 2 `p:<page>:i:<index>` cursor. Empty successful pages can prove exhaustion;
+full pages cannot. Phase 1 models, all Phase 2 native mappings, time rules and schema
+version `0.1.0` are preserved.
+
+### Initial manifest and checkpoint state
+
+The sole authoritative mutable run state remains the T-012 checkpoint:
+
+```text
+data/metadata/collection_runs/run_<uuidv4>.json
+```
+
+`RunManager.start_run(initial_checkpoint_state=...)` validates keys/primitive values
+through `CollectionContext.set_checkpoint`, includes them in its first atomic write,
+and refuses to overwrite existing runs. Older positional calls remain compatible.
+`CollectionProgress` remains fetch accounting and is not used as a storage transaction.
+
+`activity:manifest` is a JSON string with exactly:
+
+```json
+{
+  "manifest_version": 1,
+  "schema_version": "0.1.0",
+  "targets": ["Synthetic/Demo"],
+  "groups": ["commits", "issues", "pull_requests", "contributors", "releases"],
+  "max_pages_per_group": 5,
+  "max_records_per_group": 500
+}
+```
+
+Targets use T-013 `parse_repository_target()`, preserve first appearance/casing and
+remove case-insensitive duplicate slugs/URLs. Inputs must contain 1-1,000 targets;
+invalid targets fail before run creation. Groups are a unique nonempty subset;
+`all` expands to the order shown above. Page budgets are strict integers in
+1-10,000; record budgets are strict integers in 1-1,000,000. Run IDs use canonical
+lowercase UUIDv4. Resume takes no target/group/budget overrides and explicitly
+revalidates the manifest. `activity:manifest_sha256` detects inconsistent manifest
+edits; it is an integrity check, not an authentication mechanism.
+`activity:started_at` stores the injected clock's canonical UTC run start.
+
+Repository keys are `activity:repo:<target_index>:status`, `:error_code`, and, after
+successful verification, `:context` containing canonical repository JSON. Per-group
+keys use `activity:item:<target_index>:<group>:` with these fields:
+
+| Field | Initial value | Meaning |
+| --- | --- | --- |
+| status | pending | pending, complete, partial, retryable_failure, failed or excluded |
+| cursor | empty string | Next unprocessed native position; empty becomes request cursor null |
+| pages_fetched | 0 | Cumulative successful list pages |
+| records_emitted | 0 | Cumulative validated emissions, including logical duplicates |
+| records_stored | 0 | Distinct persisted raw observations |
+| records_rejected | 0 | Cumulative native validation failures |
+| error_count | 0 | Cumulative canonical collection errors |
+| pagination_complete | 0 | Integer 0/1, proven endpoint exhaustion |
+| last_error_code | empty string | Last canonical error code |
+| last_request_id | empty string | Last committed request, used to recognize stale journals |
+| missing_reason | empty string | Explicit budget, rejection, collection error or exclusion reason |
+
+Every checkpoint value remains a string/integer, never a nested object, boolean or
+serialized Python object. Run-level collected/error counters agree with committed
+per-group counters. The manifest remains unchanged throughout execution.
+
+### Verified repository identity and eligibility
+
+Each new target calls public T-013 `RepositoryService.collect_and_store(owner, repo)`
+once before any activity. Its returned canonical repository is revalidated, screened
+for public/non-fork/non-template/non-mirror eligibility and checkpointed. Archived
+public repositories remain eligible. T-013 communicates verified exclusions through
+fixed `CollectionError` diagnostics; the batch recognizes those diagnostics without
+changing RepositoryService or duplicating its normalization/public-scope logic.
+Repository metadata retains T-013 raw/processed persistence behavior.
+
+Resume restores and validates existing contexts, identities, provenance endpoints
+and manifest bindings without refetching metadata. Unverified/failed metadata can
+be retried on an explicit resume. Invalid stored context fails closed before requests.
+Different input slugs resolving to an already processed numeric `repo_id` are reported
+as duplicates and do not collect activity again. Numeric identity, not the slug, is
+stable across names; supplied names must still pass the existing T-013 verification.
+A previously failed target resolving on resume to an already processed identity is
+also skipped. No package-to-repository mapping is invented.
+
+### Journal lifecycle and commit order
+
+A bounded step uses this temporary write-ahead journal:
+
+```text
+data/metadata/collection_runs/activity_<uuidv4>_<numeric_repo_id>_<group>_pending.json
+```
+
+Journal names derive only from verified numeric repository IDs, canonical run UUIDs
+and supported group literals. A journal contains version 1, run/repository/group/
+target identities, nullable start cursor, canonical request and result, and
+`state="pending"`. `before_state` captures the original group checkpoint fields;
+`append_raw_ids` freezes the original decision about which emitted UUIDs to persist
+when known native duplicates were skipped. Full staged RawRecord envelopes retain
+native payloads, timestamps and original UUIDs. Zero-record results are journaled
+as well. Existing pending journals cannot be silently overwritten.
+
+The successful order is:
+
+1. Fetch one bounded step and validate the canonical request/result pair.
+2. Atomically persist its pending journal through `write_json_atomic()`.
+3. Append only missing staged records to the existing group JSONL.
+4. Flush and `os.fsync()` JSONL before returning from durable append.
+5. Apply staged counters/cursor and atomically save the RunManager checkpoint.
+6. Remove the pending journal before fetching the next step.
+
+Raw paths remain `data/raw/github/{commits,issues,pull_requests,contributors,releases}.jsonl`.
+`JsonlStorage.append_contract_records_durable()` validates the bounded batch before
+writing, appends one canonical envelope per line, fsyncs and returns appended count.
+All prior storage methods retain their existing semantics.
+
+Append failure leaves the previous checkpoint and journal available. Checkpoint
+failure leaves the journal and rolls back in-memory progress. Deletion failure after
+checkpoint success retains the committed checkpoint; resume recognizes the original
+request and removes the stale journal without appending or counting it again. A
+failed initial journal write leaves progress unchanged and requires a fresh fetch.
+No report claims such a step committed.
+
+### Resume, replay and deduplication
+
+Resume checks all pending journal filenames/scopes before new API calls. It validates
+journal structure/version/identity, original contracts, native identities, group
+endpoints, cursor/configuration, original checkpoint snapshot and append selection.
+Conflicts fail closed. A journal must match either the checkpoint before its step or
+the exact checkpoint after that same request. Anything else is inconsistent.
+
+Recovery streams only the necessary group JSONL and builds reusable UUID/digest and
+logical identity indexes. Native identity/time indexes retain only the current run,
+with per-repository UUID sets for bounded reconciliation/report lookups; other runs
+retain UUID digests for collision checks. It does not retain another copy of native
+payloads or rescan all files after every page. Existing identical UUID/content pairs
+are skipped; the same UUID with different canonical content is an integrity error.
+Missing staged records reuse their original UUIDs and timestamps. Any appended data
+is fsynced before counters are applied exactly once.
+
+Known native deduplication uses `(run_id, repo_id, group, source_record_id)`; group is
+implicit in its separate dataset/index. It suppresses repeats on moving upstream
+pages within one run. Different runs represent new observations and are not merged.
+Anonymous contributors have no invented native identity: replay is idempotent by
+original raw UUID, but separate identical anonymous observations remain separate.
+This is not a global exactly-once guarantee.
+
+Invalid JSON, invalid canonical/raw group identity, conflicting UUID content, or an
+incomplete final JSONL line prevents automatic recovery and identifies the affected
+file. Raw files are never automatically truncated, filtered, replaced or rewritten.
+A partial final line needs explicit manual repair before resume.
+
+The protocol supports **one active writer per run**. Concurrent writers to the same
+run are unsupported. Filesystem corruption and changing provider pagination cannot
+be solved solely through checkpoint replay. Valid raw files and valid journals are
+prerequisites for automatic recovery; there is no distributed transaction or locking
+system in this phase.
+
+### Budgets, failures and batch coverage
+
+Budgets apply cumulatively to emitted records and successfully fetched pages across
+the entire group run, including resume. Storage deduplication does not refund the
+record budget. An HTTP failure with no successful page leaves cursor/page counters
+unchanged. Explicit resume can retry `retryable_failure`; completed/excluded/failed
+groups and terminal partial groups are skipped. A fixed budget cannot be increased
+by resume; start a new run for larger budgets.
+
+`complete` requires proven pagination exhaustion and no cumulative rejection/error.
+`partial` distinguishes `budget_exhausted`, `native_rejections` and
+`collection_errors`. Earlier API errors remain in cumulative counts even when a
+subsequent resume succeeds, so exhaustion after such a retry can still be partial.
+Retryable activity failures stop that group for this execution. Metadata and activity
+failures are isolated so later eligible targets/groups can proceed. Invalid recovery
+state stops unsafe resume; persistence interruptions retain recovery information.
+
+Batch `complete` requires all eligible unique requested groups complete, with no
+unresolved failure/exclusion/pending cleanup. Skipped identity duplicates alone do
+not invalidate completeness. A completed group or persisted usable records alongside
+incomplete coverage produces `partial`; absence of either produces `failed`.
+All-excluded batches are failed. Pending persistence/metadata/API work is resumable;
+budget-limited partial coverage cannot be bypassed.
+
+### CLI and machine-readable report
+
+```bat
+reposeer collect-activity start --repos-file repos.txt --groups all --max-pages 5 --max-records 500
+reposeer collect-activity start --repos-file repos.txt --groups commits,issues,pull_requests --data-dir data_pilot
+reposeer collect-activity resume --run-id <uuidv4> --data-dir data_pilot
+```
+
+These are documentation examples, not commands executed during implementation.
+The UTF-8 target file contains one slug/HTTPS GitHub URL per line; blank lines and
+left-trimmed comment lines beginning with `#` are ignored. Unknown/duplicate/empty
+groups, invalid targets/budgets and missing/empty files are rejected before collection.
+Resume has only run ID/data directory options. Rich output shows run ID/status,
+unique requested targets, repository outcomes, per-group pages/stored/rejected/
+coverage, resumability and checkpoint/report paths. Diagnostics do not print tokens,
+provider bodies or arbitrary raw content. Exit codes: 0 complete, 1 incomplete or
+recovery/persistence problem, 2 invalid CLI input/configuration where practical.
+
+The atomic report is:
+
+```text
+data/metadata/collection_runs/activity_<uuidv4>_report.json
+```
+
+It uses top-level `report_version`, `run_id`, `schema_version`, `status`, `started_at`,
+`finished_at`, `targets_requested`, repository processed/excluded/duplicate/failed
+counts, `total_raw_records_stored`, `groups` and `limitations`.
+Every group includes repo ID/full name, group/status, pages fetched, records emitted/
+stored/rejected, error count, pagination completeness, nullable next cursor/missing
+reason, min/max event time and null event/availability counts. Repo ID is null when
+T-013 never returned a verified context. Duplicate target groups are reported as
+excluded from repeated work and contribute no additional observations.
+
+Counts derive from the durable checkpoint and validated stored observations.
+Uncommitted journal records are excluded even if their raw append already reached
+disk. Event metrics select only committed observations for this run/repository/group.
+Missing times remain null; zero records do not imply that no source events existed.
+Report write failure raises an explicit error; a valid report can be regenerated
+through resume, without refetching completed groups.
+
+### Historical limitations and remaining manual verification
+
+REST pages are not a frozen historical snapshot. Pagination completeness does not
+certify reconstruction for 2019-2025 or any prediction cutoff. `min_event_at` is not
+the beginning of certified coverage. Current issue/PR/contributor states cannot be
+backfilled to every cutoff, contributor aggregates are not historical contributor
+counts, and `available_at=None` remains unknown. GitHub Releases are not PyPI package
+releases. No feature, abandonment label, normalization dataset, EDA, profiling or
+integrated T-020 pipeline is produced here.
+
+Runtime tests and Ruff have deliberately not been executed by Codex; only static
+source inspection was performed. After manually passing focused recovery tests,
+Phase 1-2/T-011-T-013 regression
+checks, the non-smoke suite and Ruff in Windows CMD, separately perform authorized
+live verification: a small public-repository/subset run in a separate data directory,
+check raw/report/checkpoint consistency, interrupt/resume with the same UUID, verify
+metadata reuse and cumulative budgets, and inspect real rate-limit behavior. Do not
+use live smoke collection as a substitute for the offline durability tests.

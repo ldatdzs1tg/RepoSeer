@@ -30,11 +30,19 @@ class RunManager:
             raise ValueError("run_id must contain only letters, numbers, underscores, and hyphens")
         return self.checkpoints_dir / f"run_{run_id}.json"
 
-    def start_run(self, run_id: str | None = None) -> CollectionContext:
+    def start_run(
+        self,
+        run_id: str | None = None,
+        *,
+        initial_checkpoint_state: dict[str, str | int] | None = None,
+    ) -> CollectionContext:
         """Start a new collection run context."""
         context = CollectionContext() if run_id is None else CollectionContext(run_id=run_id)
         if self._checkpoint_path(context.run_id).exists():
             raise CollectionError(f"Run {context.run_id} already exists; use resume_run")
+        if initial_checkpoint_state is not None:
+            for key, value in initial_checkpoint_state.items():
+                context.set_checkpoint(key, value)
         self.save_checkpoint(context)
         logger.info("Started collection run %s", context.run_id)
         return context
