@@ -76,12 +76,13 @@ class GitHubClient:
         )
 
     def list_contributors(
-        self, owner: str, repo: str, per_page: int = 100, page: int = 1
+        self, owner: str, repo: str, per_page: int = 100, page: int = 1, *, anon: bool = False
     ) -> list[dict[str, Any]]:
-        """Fetch repository contributors."""
-        return self._get_json(
-            f"/repos/{owner}/{repo}/contributors", params={"per_page": per_page, "page": page}
-        )
+        """Fetch repository contributors, optionally including anonymous entries."""
+        params: dict[str, Any] = {"per_page": per_page, "page": page}
+        if anon:
+            params["anon"] = "true"
+        return self._get_json(f"/repos/{owner}/{repo}/contributors", params=params)
 
     def get_file_content(self, owner: str, repo: str, path: str, ref: str = "HEAD") -> str | None:
         """Fetch raw file content from repository if exists."""

@@ -356,3 +356,183 @@ artifacts, migrations, dependencies, collectors, raw adapters, storage writers,
 feature builders or labels are part of this phase. Existing T-011/T-012/T-013 behavior
 is preserved. Unit tests use synthetic in-memory inputs only and require no token,
 network or data-file writes.
+
+
+## 13. Phase 2 — GitHub activity collection implementation
+
+Phase 2 adds `GitHubActivityContractCollector` in
+`src/reposeer/collectors/github/activity.py` and `ActivityService` in
+`src/reposeer/services/activity_service.py`. The five Phase 1 models and all T-011
+contracts remain unchanged. Sections 1–12 describe the schema phase; this section
+records the subsequent collection implementation.
+
+### Entry points and verified repository context
+
+`ActivityGroup` is `Literal["commits", "issues", "pull_requests", "contributors", "releases"]`.
+Each collector handles one group and one canonical `GitHubRepository` supplied from
+the existing T-013 repository collection path. It revalidates that object before any
+activity request and requires public, non-fork, non-template, non-mirror metadata.
+Archived public upstream repositories remain eligible. Both subject repository ID
+and full name must match the verified context (name matching is case-insensitive).
+The stable numeric ID comes from that context, never from owner/repo text. A verified
+rename changes the endpoint name, not the repository ID. No per-group repository
+metadata refetch is performed, and no unverified rename/alias is inferred.
+
+Public signatures:
+
+```text
+GitHubActivityContractCollector(group, repository, client=None, *, clock=None)
+collector.collect(request)  # -> canonical CollectionResult
+collector.close()
+
+ActivityService(client=None, *, storage_paths=None, clock=None)
+service.collect_and_store(
+    repository, group, *, max_pages=10, max_records=1000, cursor=None, run_id=None
+)  # -> canonical CollectionResult, after all emitted records are appended
+service.close()
+```
+
+An injected GitHubClient belongs to its caller. Collector/service close only clients
+they create; the service shares its client with each group collector. A supplied
+clock must return aware datetimes; `format_utc_timestamp` formats actual retrieval
+and run bounds. It is never used as a fallback for missing historical event dates.
+
+A supported request uses `source="github_rest"`, `record_kinds=["repository_activity"]`,
+exactly one subject with non-null canonical `repo_id` and `repo_full_name`, and null
+`time_range`/`cutoff_at`. The service supplies null subject `package_id`/`url`; activity
+collection does not certify package mapping or use an ancillary URL to resolve identity.
+Historical window/cutoff requests
+fail with `insufficient_history`; unsupported sources/kinds fail without fetching.
+Failed responses echo the request's source so canonical pair validation still passes.
+Invalid canonical request objects are rejected by existing boundary validation.
+
+### Native endpoints, extraction and raw envelopes
+
+All requests use existing GitHubClient `list_*` methods and shared T-012 HTTP,
+authentication, retry and rate-limit behavior. No additional retry layer is added.
+The configured client base URL supplies the endpoint origin/prefix.
+
+| Group | Endpoint suffix | Parameters beyond owner/repo |
+| --- | --- | --- |
+| `commits` | `/repos/{owner}/{repo}/commits` | `per_page=100`, `page=N` |
+| `issues` | `/repos/{owner}/{repo}/issues` | `state=all`, `per_page=100`, `page=N` |
+| `pull_requests` | `/repos/{owner}/{repo}/pulls` | `state=all`, `per_page=100`, `page=N` |
+| `contributors` | `/repos/{owner}/{repo}/contributors` | `anon=true`, `per_page=100`, `page=N` |
+| `releases` | `/repos/{owner}/{repo}/releases` | `per_page=100`, `page=N` |
+
+`list_contributors` adds keyword-only `anon=False`; its existing positional arguments
+and default request behavior are preserved. The activity collector opts into `anon=True`.
+
+Five extraction functions instantiate the strict Phase 1 models before raw emission.
+Native numeric IDs must be positive integers before decimal-string conversion;
+booleans/string IDs are rejected. Counts remain bounded strict integers. Optional
+missing/null fields remain null; malformed present values reject that item. Optional
+empty/whitespace text may become null in the extracted entity while the native string
+remains unchanged in raw. Source timestamps must be aware strings and are explicitly
+converted to canonical UTC milliseconds. No emails are extracted into entity models.
+
+Issues containing the `pull_request` key are skipped before validation, including
+items with a null value for that key. Skipped PRs are not malformed issues. Known
+commit parents determine the merge flag; unknown parents remain null. Commit detail
+statistics are not fetched and both statistics fields remain null. PR merge evidence
+must be internally consistent; closed alone does not imply merged. Anonymous
+contributors require affirmative native `type="Anonymous"` evidence and no account
+ID/login; an ambiguous identity is rejected. Their `observed_at` equals raw retrieval.
+Release asset arrays are checked for object-list shape, but `assets_count` remains
+null because this phase does not certify list completeness or fetch asset details.
+
+Each successful extraction yields an independently validated canonical `RawRecord`:
+version 0.1.0, source github_rest, kind repository_activity, fresh raw UUIDv4, request
+run ID, verified repository ID and unchanged native payload. No extracted/derived
+fields are inserted into the payload. `package_id`, `available_at`, `http_status` and
+`raw_body_sha256` are null. Source-record namespaces follow section 11. `source_url`
+is the configured group endpoint without credentials or query parameters.
+
+One actual retrieval timestamp is captured immediately after obtaining each page and
+shared by that page's records and contributor observations. Commit `event_at` uses
+validated committed time; issues/PRs use creation time; contributors use null;
+releases use published time only for non-draft releases with publication evidence.
+Canonical raw validation rejects future event times; dates are not moved or filled
+to make validation pass. Source creation/publication dates do not certify historical
+availability, state at a cutoff, public commit push time or PyPI release history.
+
+### Pagination and continuation cursors
+
+All groups share one synchronous pagination loop with fixed page size 100.
+`max_pages` limits list-page fetches per call; `max_records` limits valid emitted
+raw records. Invalid items and skipped PRs consume native positions but not the
+record budget. Unexpected non-list or oversized page responses are errors, never
+empty-page success. `pages_fetched` counts successfully obtained valid list pages,
+including empty pages; HTTP/JSON/invalid page-shape failures do not add to this count.
+
+The cursor format is exactly `p:<page>:i:<index>`: positive 1-based page and index
+0–99 of the next unprocessed native item. `cursor=None` starts at page 1, index 0.
+Examples are `p:1:i:0` and `p:3:i:27`. Malformed cursors fail before fetching.
+A starting offset beyond the returned page yields an explicit error rather than
+silently certifying completion.
+
+- An empty page or a fully consumed page shorter than 100 proves pagination complete;
+  `next_cursor` is null. This includes an exact record-budget match at the end of a
+  short page.
+- Stopping inside a page yields partial coverage and the next native index.
+- Consuming a full page while exhausting either budget yields partial coverage and
+  cursor `p:<next page>:i:0`; no extra fetch exceeds the budget to prove exhaustion.
+- An API failure retains earlier emitted records and points to the failed page's
+  starting offset. Valid items on a page survive other items' validation failures.
+
+Cursors are scoped to the same repository and group and can be supplied to a later
+explicit call. They do not encode or verify that scope themselves, freeze upstream
+ordering, guarantee stable pagination, or survive crashes automatically. A caller
+must retain the scope and use the continuation intentionally.
+
+### Results, errors and raw persistence
+
+The collector returns T-011 `CollectionResult` with request/run echoes, canonical
+metadata, emitted/rejected counts, run bounds, pagination status and one `Coverage`
+for the selected group. Collector name echoes the request; collector version is
+`SCHEMA_VERSION`. Unknown rate-limit metadata remains null. Every returned result
+passes `validate_collection_pair`.
+
+| Status | Meaning | Coverage |
+| --- | --- | --- |
+| `complete` | Proven endpoint exhaustion, no errors/rejections; zero records can be complete | complete, no missing reason |
+| `partial` | At least one valid list page fetched with errors or incomplete pagination/budgets; may emit zero records | partial, explicit parse_error/unavailable/not_collected reason |
+| `failed` | No valid list page fetched and a blocking scope, request, HTTP, JSON or page-shape error | unavailable with explicit reason and at least one error |
+
+Coverage `records_observed` counts emitted validated records, not skipped PRs or
+rejected items. A malformed item creates a safe `validation_error` or `parse_error`,
+with a source-record ID only when safely known and null raw-record ID. No provider
+body, token or validation input is included in diagnostics. HTTP errors map 404 to
+`not_found`, rate limits to `rate_limited`, network errors to `network_error`, successful
+HTTP responses containing malformed JSON to `parse_error`, and other statuses to
+`http_error`. Retryable flags follow existing transient HTTP/rate-limit/network
+semantics; the collector does not retry independently.
+
+`ActivityService` builds one canonical request with collector name
+`github_activity_<group>`, fresh request UUIDv4 and either the caller's validated run
+UUIDv4 or a new one. After collection and pair validation it appends every returned
+raw record through `JsonlStorage.append_contract_record` and
+`StoragePaths.raw_path("github", group)`:
+
+- `data/raw/github/commits.jsonl`
+- `data/raw/github/issues.jsonl`
+- `data/raw/github/pull_requests.jsonl`
+- `data/raw/github/contributors.jsonl`
+- `data/raw/github/releases.jsonl`
+
+Partial results' valid records are persisted too. Failed/empty results do not create
+a raw dataset. OSError/StorageError during append becomes a clear `CollectionError`;
+the service returns no success report. Previous observations and already successful
+appends remain intact. New collection runs may create new observations of the same
+upstream entity; there is no global raw deduplication or exactly-once guarantee.
+
+### Remaining Phase 3 work
+
+Phase 2 has no durable checkpoints, automatic resume or page transaction/idempotency
+protocol. A returned fetch cursor is not proof that raw storage succeeded. Phase 3
+must connect durable checkpoint advancement to successful persistence, implement
+multi-repository orchestration and perform separately authorized live verification.
+Full interaction/timeline/review data, processed activity Parquet, T-018 normalization,
+historical features and labels remain outside this implementation. Existing CLI,
+legacy collectors, entity models, T-011 contracts and T-013 services are unchanged.
+T-014 as a whole is not declared complete by this phase.
