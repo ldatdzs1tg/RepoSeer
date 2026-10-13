@@ -1,5 +1,6 @@
 """Lightweight heuristic rule agent for textual technology extraction."""
 
+import ast
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -25,13 +26,34 @@ AMBIGUOUS_WORDS = {
 
 @dataclass
 class AgentMatch:
-    """A verified technology mention extracted by the agent."""
+    """A heuristic text mention; neither verified usage nor lifecycle evidence."""
 
     spec: TechSpec
     matched_text: str
     confidence: float
     signal_kind: SignalKind
     context_snippet: str
+
+
+def _imported_modules(line: str) -> list[str]:
+    """Read module roots from a single Python import statement, without executing it."""
+    statement = line.strip().removeprefix(">>> ").strip()
+    if statement.startswith("`") and statement.endswith("`"):
+        statement = statement.strip("`").strip()
+    if not re.match(r"^(?:import|from)\s+", statement):
+        return []
+    try:
+        body = ast.parse(statement).body
+    except SyntaxError:
+        return []
+    if len(body) != 1:
+        return []
+    node = body[0]
+    if isinstance(node, ast.Import):
+        return [alias.name.split(".", 1)[0] for alias in node.names]
+    if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        return [node.module.split(".", 1)[0]]
+    return []
 
 
 class LightweightTechAgent:
@@ -54,7 +76,7 @@ class LightweightTechAgent:
         matches: dict[str, AgentMatch] = {}
         lines = text.splitlines()
 
-        for line_idx, line in enumerate(lines):
+        for line in lines:
             line_stripped = line.strip()
             if not line_stripped:
                 continue
@@ -71,7 +93,7 @@ class LightweightTechAgent:
                 continue
 
             # 2. Install / CLI command signal (pip install ..., uv add ...)
-            if re.search(r"\b(?:pip\s+install|uv\s+add|poetry\s+add|conda\s+install)\s+([A-Za-z0-9_-]+)", line_stripped, re.I):
+            if re.search(r"\b(?:pip(?:3)?\s+install|uv\s+add|poetry\s+add|conda\s+install)\s+(?:--?[\w-]+(?:=[^\s]+)?\s+)*[A-Za-z0-9_-]+", line_stripped, re.I):
                 self._scan_line(
                     line_stripped,
                     signal_kind="install_code",
@@ -81,15 +103,18 @@ class LightweightTechAgent:
                 )
                 continue
 
-            # 3. Import statements (import flask, from pydantic import ...)
-            if re.search(r"\b(?:import\s+|from\s+)([A-Za-z0-9_]+)", line_stripped):
-                self._scan_line(
-                    line_stripped,
-                    signal_kind="import_code",
-                    base_confidence=0.90,
-                    matches=matches,
-                    repo_name=repo_name,
-                )
+            # 3. Import confidence applies only to actual imported module roots.
+            imported_modules = _imported_modules(line_stripped)
+            if imported_modules:
+                for module in imported_modules:
+                    self._scan_line(
+                        module,
+                        signal_kind="import_code",
+                        base_confidence=0.90,
+                        matches=matches,
+                        repo_name=repo_name,
+                        context_line=line_stripped,
+                    )
                 continue
 
             # 4. Badges / Links (shields.io, pypi.org/project/...)
@@ -113,7 +138,7 @@ class LightweightTechAgent:
             )
 
         # Filter by minimum confidence
-        return [m for m in matches.values() if m.confidence >= min_confidence]
+        return [matches[slug] for slug in sorted(matches) if matches[slug].confidence >= min_confidence]
 
     def _scan_line(
         self,
@@ -122,10 +147,11 @@ class LightweightTechAgent:
         base_confidence: float,
         matches: dict[str, AgentMatch],
         repo_name: str | None,
+        context_line: str | None = None,
     ) -> None:
         """Scan a line against all registered technology keywords and aliases."""
         for spec in self.registry.all_specs():
-            candidate_tokens = [spec.name, spec.slug, *spec.aliases, *spec.keywords]
+            candidate_tokens = [spec.name, spec.slug, *spec.aliases]
 
             for token in candidate_tokens:
                 if len(token) < 2:
@@ -140,29 +166,46 @@ class LightweightTechAgent:
                 matched_word = match.group(0)
                 confidence = base_confidence
 
-                # If word is in AMBIGUOUS_WORDS, require exact case match or code context
-                token_lower = token.lower()
-                if token_lower in AMBIGUOUS_WORDS:
-                    if signal_kind == "body_mention":
-                        # If matched lowercase in ordinary prose, penalty unless matches repo name
-                        if matched_word == token_lower and (not repo_name or repo_name.lower() != token_lower):
-                            confidence -= 0.35
-                        elif matched_word[0].isupper():
-                            # Capitalized in prose (e.g. "Requests is...")
-                            confidence -= 0.10
-
-                # Comparative / negative context penalty
-                # e.g., "Unlike Flask...", "Migrated from Django...", "Inspired by FastAPI"
-                if re.search(r"\b(?:unlike|inspired by|alternative to|migration from|replaces)\s+" + re.escape(token), line, re.IGNORECASE):
-                    confidence = min(confidence, 0.45)
-
-                # Boost if matches repository name exactly
-                if repo_name and (repo_name.lower() == spec.slug.lower() or repo_name.lower() == spec.name.lower()):
-                    confidence = min(1.0, confidence + 0.15)
+                token_lower = token.casefold()
+                if token_lower in AMBIGUOUS_WORDS and signal_kind == "body_mention":
+                    # A common word needs explicit package/library context even when capitalized.
+                    package_context = re.search(
+                        rf"(?:\b{re.escape(token)}\s+(?:Python\s+)?(?:library|package|framework|toolkit)\b"
+                        rf"|\b(?:library|package|framework|toolkit)\s+{re.escape(token)}\b)", line, re.I,
+                    )
+                    if not package_context:
+                        confidence = min(confidence, 0.35)
+                # Single-letter and ambiguous abbreviations never identify a prose technology.
+                if token_lower in {"py", "js", "ts", "uv"} and signal_kind == "body_mention":
+                    confidence = min(confidence, 0.35)
+                # Suppress comparisons, negatives, alternatives and historical/migration references.
+                negative_prefix = (
+                    r"(?:unlike|inspired by|alternative to|compared (?:to|with)|"
+                    r"(?:migrat(?:ed|ing|ion)|moved|switched) (?:away )?from|"
+                    r"previously (?:used|using)|formerly (?:used|using)|used to use|"
+                    r"replaces|replaced|instead of|without|no longer (?:uses?|supports?)|"
+                    r"(?:does|do)(?:n't| not) (?:use|require|support)|not (?:using|based on))"
+                )
+                # Apply negative semantics to the concept, so another alias cannot undo them.
+                for name in (spec.name, spec.slug, *spec.aliases):
+                    escaped_name = re.escape(name)
+                    if re.search(
+                        negative_prefix + r"\s+(?:the\s+)?(?:[\w.-]+\s*(?:,\s*|and\s+|or\s+))*"
+                        + escaped_name + r"\b", line, re.I,
+                    ):
+                        confidence = min(confidence, 0.40)
+                    if re.search(r"\b" + escaped_name + r"\s+(?:vs\.?|versus)\b", line, re.I) or re.search(
+                        r"\b(?:vs\.?|versus)\s+" + escaped_name + r"\b", line, re.I,
+                    ):
+                        confidence = min(confidence, 0.40)
+                if token_lower in AMBIGUOUS_WORDS and signal_kind == "title":
+                    title = line.lstrip("#= ").strip()
+                    if not re.match(re.escape(token) + r"(?:$|\s+(?:Python|library|package|framework|toolkit)\b)", title, re.I):
+                        confidence = min(confidence, 0.35)
 
                 # Keep match if highest confidence for this technology
                 if spec.slug not in matches or confidence > matches[spec.slug].confidence:
-                    snippet = line[:120].strip()
+                    snippet = (context_line or line)[:240].strip()
                     matches[spec.slug] = AgentMatch(
                         spec=spec,
                         matched_text=matched_word,

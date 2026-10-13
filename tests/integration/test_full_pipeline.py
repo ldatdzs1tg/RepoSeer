@@ -3,7 +3,7 @@
 from reposeer.schemas.github.repository import RepositoryRecord
 from reposeer.storage.processed.parquet import ParquetStorage
 from reposeer.storage.raw.jsonl import JsonlStorage
-from reposeer.technology.resolver import TechnologyResolver
+from reposeer.technology import detect_technologies
 
 
 def test_pipeline_integration_flow(tmp_path):
@@ -25,11 +25,17 @@ def test_pipeline_integration_flow(tmp_path):
     assert raw_path.exists()
 
     # 3. Technology resolution
-    resolver = TechnologyResolver()
-    techs = resolver.resolve_from_file(
-        "tiangolo/fastapi", "requirements.txt", "pydantic>=2.0.0\nstarlette\n"
+    result = detect_technologies(
+        repo=repo,
+        manifest_files={"requirements.txt": "pydantic>=2.0.0\nstarlette\n"},
     )
-    assert any(t.name == "Pydantic" for t in techs)
+    assert {"pydantic", "starlette"} <= {spec.slug for spec in result.resolved_specs}
+    assert any(spec.name == "Pydantic" for spec in result.resolved_specs)
+    assert {"tech:pydantic", "tech:starlette"} <= {
+        signal.technology_id for signal in result.detected_signals if signal.source == "dependency"
+    }
+    # Generic legacy JSONL persistence is not a canonical RawRecord observation.
+    assert result.entities == []
 
     # 4. Processed Parquet persistence
     processed_path = tmp_path / "repos.parquet"

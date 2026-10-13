@@ -1,4 +1,6 @@
-"""Unit tests for search term generation."""
+"""Bounded search queries independent of fabricated canonical evidence."""
+
+from collections import Counter
 
 import pytest
 
@@ -6,64 +8,70 @@ from reposeer.technology.registry import TechnologyRegistry
 from reposeer.technology.search_terms import SearchTermGenerator
 
 
-def test_search_terms_multi_intent_and_platform():
-    reg = TechnologyRegistry()
-    flask_spec = reg.get_by_slug("flask")
-    python_spec = reg.get_by_slug("python")
-    assert flask_spec and python_spec
-
-    entities = [
-        flask_spec.to_contract_entity(
-            repo_numeric_ids=["900000001"],
-            retrieved_at="2024-02-29T12:00:00.000Z",
-        ),
-        python_spec.to_contract_entity(
-            retrieved_at="2024-02-29T12:00:00.000Z",
-        ),
-    ]
-
+def test_primary_queries_intents_priority_and_platforms():
+    registry = TechnologyRegistry()
+    specs = [registry.get_by_slug(slug) for slug in ("flask", "python", "werkzeug", "jinja2")]
     generator = SearchTermGenerator()
-    terms = generator.generate(
-        entities=entities,
-        repo_full_name="pallets/flask",
-        primary_slug="flask",
-        topics=["python", "web", "wsgi", "microframework"],
-    )
-
-    assert len(terms) > 0
-
-    # Must contain key intents
-    intents = {t.intent for t in terms}
-    assert "announcement" in intents
-    assert "maintenance" in intents
-    assert "security" in intents
-
-    # Must contain both web and hackernews platforms
-    platforms = {t.platform for t in terms}
-    assert "web" in platforms or "all" in platforms
-    assert "hackernews" in platforms
-
-    # Top priority terms should target the primary repo / technology
-    top_terms = [t for t in terms if t.priority == 1]
-    assert len(top_terms) > 0
-    top_queries = [t.query for t in top_terms]
-    assert any("pallets/flask" in q or "Flask" in q for q in top_queries)
-
-    # Check Hacker News queries are concise keywords
-    hn_terms = [t for t in terms if t.platform == "hackernews"]
-    assert any("Flask release" in t.query for t in hn_terms)
-    assert any("Flask maintenance" in t.query for t in hn_terms)
+    terms = generator.generate(entities=specs, repo_full_name="pallets/flask", primary_slug="flask",
+                               topics=["python", "web"])
+    assert {"announcement", "maintenance", "security", "ecosystem"} <= {term.intent for term in terms}
+    assert "hackernews" in {term.platform for term in terms}
+    assert [term.priority for term in terms] == sorted(term.priority for term in terms)
+    assert all(term.tech_slug == "flask" for term in terms if term.priority == 1)
+    assert any("pallets/flask maintenance" in term.query for term in terms)
+    assert any("Flask Python web framework" in term.query for term in terms)
+    assert any(term.query == "Flask release" for term in terms)
+    assert all(" OR " not in term.query for term in terms)
+    secondary = [term for term in terms if term.tech_slug != "flask"]
+    assert len(secondary) <= 1
+    assert all(term.intent == "ecosystem" for term in secondary)
 
 
-def test_search_terms_deduplication():
-    reg = TechnologyRegistry()
-    spec = reg.get_by_slug("pydantic")
-    assert spec
-    entity = spec.to_contract_entity(retrieved_at="2024-02-29T12:00:00.000Z")
+def test_casefold_deduplication_determinism_and_query_budget():
+    registry = TechnologyRegistry()
+    specs = registry.all_specs()
+    generator = SearchTermGenerator(max_terms_per_intent=1)
+    terms = generator.generate(entities=specs + specs, primary_slug="flask", repo_full_name="pallets/flask")
+    assert terms == generator.generate(entities=list(reversed(specs)), primary_slug="flask", repo_full_name="pallets/flask")
+    keys = [(term.query.casefold(), term.platform) for term in terms]
+    assert len(keys) == len(set(keys))
+    assert max(Counter((term.intent, term.platform) for term in terms).values()) == 1
+    assert SearchTermGenerator(0).generate(entities=specs, primary_slug="flask") == []
+    with pytest.raises(ValueError):
+        SearchTermGenerator(-1)
 
+
+def test_unknown_subject_has_no_invented_technology_or_unverified_queries():
     generator = SearchTermGenerator()
-    terms = generator.generate(entities=[entity], repo_full_name="pydantic/pydantic")
+    assert generator.generate(entities=[], repo_full_name="unknown/project") == []
+    terms = generator.generate(entities=[], repo_full_name="unknown/project", verified_subject=True)
+    assert terms and all(term.tech_slug is None for term in terms)
+    assert all("unknown/project" in term.query for term in terms)
+    spec = TechnologyRegistry().get_by_slug("requests")
+    terms = generator.generate(entities=[spec], repo_full_name="unknown/project")
+    assert all("unknown/project" not in term.query for term in terms)
+    assert all(term.tech_slug == "requests" for term in terms)
 
-    # Ensure no duplicate (query, platform) pairs exist
-    pairs = [(t.query.lower(), t.platform) for t in terms]
-    assert len(pairs) == len(set(pairs))
+
+@pytest.mark.parametrize("slug, expected", [
+    ("flask", "Flask Python web framework ecosystem discussions"),
+    ("requests", "Requests Python library ecosystem discussions"),
+])
+def test_primary_ecosystem_query_omits_covered_python_topic(slug, expected):
+    spec = TechnologyRegistry().get_by_slug(slug)
+    terms = SearchTermGenerator().generate(entities=[spec], primary_slug=slug, topics=["python", "PYTHON"])
+    assert [term.query for term in terms if term.intent == "ecosystem"] == [expected]
+    assert [term.priority for term in terms] == sorted(term.priority for term in terms)
+    assert len({(term.query.casefold(), term.platform) for term in terms}) == len(terms)
+
+
+def test_ecosystem_topics_keep_useful_phrases_and_deterministic_budget():
+    spec = TechnologyRegistry().get_by_slug("flask")
+    topics = ["python", "wsgi", "HTTP client", "http CLIENT", "web framework"]
+    generator = SearchTermGenerator(max_terms_per_intent=1)
+    terms = generator.generate(entities=[spec], primary_slug="flask", topics=topics)
+    assert terms == generator.generate(entities=[spec], primary_slug="flask", topics=list(reversed(topics)))
+    ecosystem = [term for term in terms if term.intent == "ecosystem"]
+    assert len(ecosystem) == 1
+    assert ecosystem[0].query == "Flask Python web framework HTTP client wsgi ecosystem discussions"
+    assert max(Counter((term.intent, term.platform) for term in terms).values()) == 1

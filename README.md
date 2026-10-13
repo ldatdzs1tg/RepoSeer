@@ -81,7 +81,7 @@ reposeer collect pallets/flask
 # Normalize & process raw data into Parquet
 reposeer process
 
-# Identify technology entities & generate external search terms (T-011)
+# Resolve technologies & generate external search terms (T-015)
 reposeer detect-tech pallets/flask
 
 # Generate data quality profiling report
@@ -214,35 +214,142 @@ and run the batch command above. Check its summary, replay the raw JSONL using
 or DuckDB. Live collection writes new observations to the configured data directory.
 
 
-## Technology entity detection & search terms (T-011)
+## Technology resolution & search terms (T-015)
 
-Identifies technology entities, aliases, and generates multi-intent external search queries from repository metadata, READMEs, topics, dependency manifests (`requirements.txt`, `pyproject.toml`), or pinned signals:
+T-015 resolves curated technology concepts from supplied repository metadata (`GitHubRepository`,
+legacy `RepositoryRecord`, dictionaries, or a recorded repository `RawRecord`), owner/repo strings,
+README/description text, topics, Python manifests, explicit dependencies and pinned aliases/slugs or
+`tech:<slug>` IDs. It performs no network requests, external search, LLM calls or storage writes.
+An owner/repo string supplies a textual subject; it does not fetch current GitHub metadata.
+
+`DetectionResult.resolved_specs` contains curated `TechSpec` catalog identities, `primary_spec` is the
+explicitly pinned or exact curated upstream concept, and `detected_signals` explains each match.
+Signals contain `technology_id`, optional numeric `repo_id`, textual `repo_full_name`, source,
+confidence, matched token/context, dependency scope, source URL and recorded raw IDs when present.
+Observation source, retrieval time and availability are retained separately from signal source.
+Relationships distinguish `implements`, runtime `depends_on`, `optional_dependency`,
+`dev_dependency`, language/topics, pins and text `mentions`. README examples, badges and install
+commands remain mentions; they do not establish package usage. Numeric IDs in dictionaries and
+legacy DTOs remain unverified until a matching GitHub raw observation validates both the ID and
+repository name. Validated canonical `GitHubRepository` inputs also establish verified identity.
+Signals and `metadata["repo_id"]` use only that verified ID; `metadata["supplied_repo_id"]` separately
+retains a syntactically valid caller ID without claiming verification. Exact curated owner/repo
+mapping resolves an upstream concept without proving a numeric ID. Unrelated repositories named
+`requests` or `flask` are not upstream matches.
+PyPI distribution names use the shared identity normalization and curated package mappings;
+unknown dependencies are diagnostics, not new technology concepts.
 
 ```python
 from reposeer.technology import detect_technologies
 
 result = detect_technologies(
     repo="pallets/flask",
-    manifest_files={"requirements.txt": "Werkzeug>=3.0\nJinja2>=3.1.2\nclick>=8.1.3\npytest"},
-    topics=["python", "web", "framework", "flask"],
+    manifest_files={"requirements.txt": "Werkzeug>=3.0\nJinja2>=3.1.2\nclick>=8.1.3"},
+    topics=["python", "web"],
     readme_content="# Flask\nA micro web framework written in Python.",
 )
-
-# Output canonical entities conforming strictly to T-011 TechnologyEntity schema
-for entity in result.entities:
-    print(entity.technology_id, entity.name, entity.category)
-
-# Output prioritized search terms for external news, maintenance, and security
+for spec in result.resolved_specs:
+    print(f"tech:{spec.slug}", spec.name, spec.category)
 for term in result.search_terms:
-    print(f"[{term.priority}] ({term.platform}) {term.intent}: {term.query}")
+    print(term.priority, term.platform, term.intent, term.query)
+assert result.entities == []  # No recorded observation was supplied.
 ```
 
-CLI usage:
+Canonical output uses only `reposeer.contracts.TechnologyEntity`, T-011 version `0.1.0`.
+`entities` and `primary_technology` contain only validated canonical output backed by recorded
+observations or existing validated canonical provenance. Without it, entities are omitted with
+explicit diagnostics, while specs/signals/search terms remain usable by T-016. The resolver never
+invents `raw:<UUID>`, official URLs, retrieval times or availability times. Unknown `available_at`
+stays null. Provenance establishes observation origin, not technology identity by itself.
+`TechSpec.to_contract_entity()` requires a matching catalog or GitHub repository `raw_record`;
+arbitrary provenance alone and direct document construction are rejected. Documentation must go
+through detector checks binding exact recorded content, a recognized signal and a verified subject.
+The existing `provenance`, `raw_record_id`, `source_url` and timestamp keywords remain accepted as
+consistency checks against actual evidence. A catalog observation proves a concept, not arbitrary
+repository links; only matching recorded curated upstream evidence supports `repo_ids`.
+Catalog specs store collection fields as immutable tuples while accepting existing list-based construction.
+The detector's optional `clock` is retained for compatibility and never supplies evidence time.
+
+To normalize an existing persisted repository observation, pass the actual raw record:
+
+```python
+from pathlib import Path
+from reposeer.storage.raw.jsonl import JsonlStorage
+from reposeer.technology import detect_technologies
+
+records = JsonlStorage().read_contract_records(Path("data/raw/github/repositories.jsonl"))
+if records:
+    result = detect_technologies(records[0])
+    for entity in result.entities:
+        print(entity.technology_id, entity.provenance.raw_record_ids)
+```
+
+`raw_records=` can additionally supply already-recorded evidence. A GitHub repository observation
+supports only its exact payload metadata, not separately supplied README/manifests. For supplied
+content, an existing `source_archive` or `project_docs` observation must have the same verified
+`repo_id` and exact payload `readme_content`, `manifest_files` or `dependencies`; a supplied
+`full_name` must agree. A `technology_catalog` observation identifies only its matching payload
+`slug`, `id` or `technology_id` (canonical slug or `tech:<slug>`); identity fields and any
+technology identity in `source_record_id` must agree. Existing canonical pinned entities preserve
+their original provenance and links, as do valid historical canonical repository observations.
+Callers are responsible for recording observations before passing them; this resolver does not
+verify external storage persistence or build a raw writer. Canonical `repo_ids` are limited to
+recorded curated upstream implementation evidence; dependencies and mentions remain structured
+signals, without being converted into upstream identity links. A catalog-only observation does
+not establish that a repository uses the technology.
+
+Detection precedence is pins, exact curated upstream mapping, dependencies, topics, language,
+then README heuristics. Stronger evidence determines confidence; all distinct signal meanings
+remain visible. Results and queries have stable ordering and deduplication. Search priority 1
+is repository-specific discovery, 2 primary technology, 3 its ecosystem and 4 secondary integration.
+`SearchTermGenerator(max_terms_per_intent=2)` limits each `(intent, platform)` across the entire
+call after priority sorting, rather than granting every dependency its own budget. Zero disables
+queries. Secondary concepts get ecosystem/integration queries only. Queries use contextual
+keywords without provider-specific Boolean operators or ambiguous aliases; ecosystem topics
+already covered by the primary name/category are omitted case-insensitively, while useful phrases
+such as `HTTP client` remain. With no primary,
+verified subject-only queries have `SearchTerm.tech_slug=None`; an unverified unknown subject
+produces no invented canonical slug or repository queries. This nullable field is an explicit
+resolver API refinement and does not change T-011.
+
+CLI usage (local/manual input; no external retrieval):
 
 ```bash
-# Formatted table view
-reposeer detect-tech pallets/flask
+reposeer detect-tech . --pinned tech:flask
+reposeer detect-tech pallets/flask --readme README.md --requirements requirements.txt --topic python
+reposeer detect-tech pydantic/pydantic --pyproject pyproject.toml --pinned tech:pydantic --json
+```
 
-# JSON output according to schema T-011
-reposeer detect-tech pydantic/pydantic --json
+The CLI preserves its existing options. Local directories auto-read supported README files,
+`requirements.txt`, `pyproject.toml`, `setup.cfg` and `setup.py`; explicit file options override
+local files. File errors are Typer errors, parser diagnostics and missing evidence are displayed,
+and JSON includes input mode and `externally_retrieved=False`. JSON is a structured resolver
+result; only its `entities` follow the canonical T-011 entity contract.
+
+Python manifests use `packaging.Requirement` (the existing locked packaging distribution is now
+a runtime dependency) for PEP 508 names, extras, markers and named URLs. URL fragments survive
+comment stripping; named VCS `#egg=` references are supported. Pip options/includes/constraints
+are never dependencies; referenced files are not read implicitly. `tomllib` handles PEP 621,
+optional groups, Poetry groups and explicit Flit requirements. Build-system dependencies and
+project names are excluded. Scopes distinguish runtime, optional and dev declarations. Invalid
+TOML and unsupported forms produce diagnostics via `parse_manifests()`; compatibility name-list
+parsers raise for parse/unsupported errors rather than silently returning an empty success.
+`setup.cfg` is parsed statically and `setup.py` only accepts literal top-level setuptools arguments;
+no project code is executed. Dynamic dependency calculation and full dependency resolution are
+unsupported. README heuristics suppress common English words, negative/comparative and historical
+mentions, but are not a semantic parser and can still miss context. Confidence is recognition
+confidence, never abandonment probability, and README keywords do not change technology lifecycle.
+
+**T-015 does not establish historical cutoff-safe technology usage merely by observing current
+project files.** T-016 providers, T-017 crawling, T-018 normalization/storage pipelines, T-019
+processed storage, live auto-fetch and historical reconstruction remain outside this resolver.
+
+Manual verification in the existing Python 3.12 environment:
+
+```bash
+python -m pytest -q tests/unit/technology tests/integration/test_technology_detection.py
+python -m pytest -q tests/contracts
+python -m pytest -q -m "not smoke"
+python -m ruff check src/reposeer/technology src/reposeer/cli/detect_tech.py tests/unit/technology tests/integration/test_technology_detection.py
+reposeer detect-tech . --pinned tech:flask --json
 ```

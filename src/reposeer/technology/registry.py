@@ -1,14 +1,46 @@
 """Technology catalog registry and canonical specification database."""
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass
 from typing import Literal
-from uuid import uuid4
 
-from reposeer.contracts import TechnologyEntity, validate_record
-from reposeer.contracts.identity import format_utc_timestamp, package_id, repo_id
-from reposeer.contracts.models import MissingField, Provenance, SCHEMA_VERSION
+from reposeer.contracts import Provenance, RawRecord, TechnologyEntity, validate_record
+from reposeer.contracts.identity import (
+    canonical_github_url,
+    normalize_pypi_name,
+    package_id,
+    repo_id,
+    technology_id,
+)
+from reposeer.contracts.models import SCHEMA_VERSION
+
+
+def _raw_repository_identity(raw: RawRecord) -> tuple[str, str]:
+    """Check native GitHub identity as well as the canonical raw envelope."""
+    if raw.source not in {"github_rest", "github_graphql"} or raw.source_record_type != "github_repository":
+        raise ValueError("Repository evidence requires a GitHub repository observation")
+    numeric = raw.payload.get("id")
+    numeric_id = str(numeric) if type(numeric) in {int, str} else None
+    canonical_id = repo_id(numeric_id)
+    if canonical_id != raw.repo_id:
+        raise ValueError("Raw repository ID disagrees with payload numeric ID")
+    full_name = raw.payload.get("full_name")
+    canonical_github_url(full_name)
+    for key in ("language", "primary_language", "description"):
+        value = raw.payload.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"Raw repository {key} must be text or null")
+    topics = raw.payload.get("topics")
+    if topics is not None and (not isinstance(topics, list) or not all(isinstance(topic, str) for topic in topics)):
+        raise ValueError("Raw repository topics must be a list of text values")
+    alternate_name = raw.payload.get("repo_full_name")
+    if alternate_name is not None and canonical_github_url(alternate_name) != canonical_github_url(full_name):
+        raise ValueError("Raw repository full names disagree")
+    if raw.source_record_id is not None and (
+        raw.source_record_id.isdecimal() or raw.source_record_id.startswith("github:repository:")
+    ) and raw.source_record_id not in {numeric_id, canonical_id}:
+        raise ValueError("Raw repository source_record_id disagrees with payload numeric ID")
+    return canonical_id, full_name
+
 
 CategoryType = Literal[
     "language",
@@ -30,14 +62,19 @@ class TechSpec:
     slug: str
     name: str
     category: CategoryType
-    aliases: list[str] = field(default_factory=list)
+    aliases: tuple[str, ...] = ()
     description: str | None = None
-    official_urls: list[str] = field(default_factory=list)
-    default_packages: list[str] = field(default_factory=list)
-    known_repo_slugs: list[str] = field(default_factory=list)
-    keywords: list[str] = field(default_factory=list)
+    official_urls: tuple[str, ...] = ()
+    default_packages: tuple[str, ...] = ()
+    known_repo_slugs: tuple[str, ...] = ()
+    keywords: tuple[str, ...] = ()
     lifecycle_status: LifecycleType = "active"
     status_evidence_url: str | None = None
+
+    def __post_init__(self) -> None:
+        # Accept existing list-based construction without retaining mutable catalog collections.
+        for name in ("aliases", "official_urls", "default_packages", "known_repo_slugs", "keywords"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
 
     def to_contract_entity(
         self,
@@ -47,11 +84,84 @@ class TechSpec:
         retrieved_at: str | None = None,
         source_url: str | None = None,
         raw_record_id: str | None = None,
+        raw_record: RawRecord | None = None,
+        provenance: Provenance | None = None,
     ) -> TechnologyEntity:
-        """Instantiate and validate a canonical TechnologyEntity under schema T-011."""
-        now_ts = retrieved_at or format_utc_timestamp(datetime.now(UTC))
-        raw_id = raw_record_id or f"raw:{uuid4()}"
-        source_endpoint = source_url or (self.official_urls[0] if self.official_urls else "https://reposeer.local/catalog")
+        """Build from matching catalog/upstream/metadata evidence; provenance alone is insufficient.
+
+        Documentation evidence needs the detector's content/signal/subject checks.
+        """
+        if raw_record is None:
+            raise ValueError("Canonical output requires semantically validated recorded evidence: raw_record")
+        raw_record = validate_record(raw_record)
+        if not isinstance(raw_record, RawRecord):
+            raise TypeError("raw_record must be a canonical RawRecord")
+        upstream_repo_id = None
+        if raw_record.source == "technology_catalog":
+            self._validate_catalog_observation(raw_record)
+        elif raw_record.source in {"github_rest", "github_graphql"}:
+            observed_id, full_name = _raw_repository_identity(raw_record)
+            registry = TechnologyRegistry([self])
+            if registry.lookup_by_repo(full_name) == self:
+                upstream_repo_id = observed_id
+            else:
+                language = raw_record.payload.get("language")
+                topics = raw_record.payload.get("topics") or []
+                language_match = (isinstance(language, str) and self.category == "language"
+                                  and registry.lookup(language) == self)
+                topic_match = (isinstance(topics, list) and any(
+                    isinstance(topic, str) and registry.lookup_by_topic(topic) == self for topic in topics
+                ))
+                if not language_match and not topic_match:
+                    raise ValueError("Repository observation does not identify this technology")
+        else:
+            raise ValueError("Documentation evidence requires detector-validated content and subject signals")
+        observed = Provenance(
+            source=raw_record.source, source_url=raw_record.source_url,
+            retrieved_at=raw_record.retrieved_at, valid_at=raw_record.retrieved_at,
+            available_at=raw_record.available_at, temporal_basis="observation",
+            raw_record_ids=[raw_record.raw_record_id], missing_fields=[],
+        )
+        if provenance is not None and provenance != observed:
+            raise ValueError("raw_record and provenance disagree")
+        for supplied, actual, label in (
+            (retrieved_at, observed.retrieved_at, "retrieved_at"),
+            (source_url, observed.source_url, "source_url"),
+        ):
+            if supplied is not None and supplied != actual:
+                raise ValueError(f"{label} disagrees with recorded evidence")
+        if raw_record_id is not None and raw_record_id not in observed.raw_record_ids:
+            raise ValueError("raw_record_id disagrees with recorded evidence")
+        if any(repo_id(str(numeric)) != upstream_repo_id for numeric in (repo_numeric_ids or [])):
+            raise ValueError("Repository association requires matching recorded upstream evidence")
+        return self._from_verified_provenance(observed, repo_numeric_ids=repo_numeric_ids,
+                                              package_names=package_names)
+
+    def _validate_catalog_observation(self, raw: RawRecord) -> None:
+        identities = [raw.payload[key] for key in ("slug", "id", "technology_id") if key in raw.payload]
+        if (raw.source != "technology_catalog" or raw.source_record_type != "technology_entity"
+                or not identities or any(value not in (self.slug, technology_id(self.slug)) for value in identities)
+                or ("slug" in raw.payload and raw.payload["slug"] != self.slug)):
+            raise ValueError("Catalog observation does not identify this technology")
+        source_identity = raw.source_record_id
+        # Canonical IDs and known catalog slugs carry technology identity; opaque keys do not.
+        if source_identity is not None and (
+            source_identity.startswith("tech:") or source_identity == self.slug
+            or any(source_identity == spec.slug for spec in DEFAULT_TAXONOMY)
+        ) and source_identity not in {self.slug, technology_id(self.slug)}:
+            raise ValueError("Catalog source_record_id contradicts technology identity")
+
+    def _from_verified_provenance(
+        self, provenance: Provenance, *, repo_numeric_ids: list[str] | None = None,
+        package_names: list[str] | None = None,
+    ) -> TechnologyEntity:
+        """Internal construction after public raw checks or detector-bound semantic evidence.
+
+        The detector must bind provenance to the actual subject and detected signal first.
+        """
+        provenance = Provenance.model_validate(provenance.model_dump(), strict=True)
+        if not self.official_urls:
+            raise ValueError("Canonical output requires a real official URL")
 
         # Normalize and deduplicate repo_ids
         target_repo_ids: list[str] = []
@@ -87,19 +197,6 @@ class TechSpec:
 
         # Deduplicate official URLs
         urls = list(dict.fromkeys(self.official_urls))
-        if not urls:
-            urls = ["https://github.com/"]
-
-        provenance = Provenance(
-            source="technology_catalog",
-            source_url=source_endpoint,
-            retrieved_at=now_ts,
-            valid_at=now_ts,
-            available_at=now_ts,
-            temporal_basis="observation",
-            raw_record_ids=[raw_id],
-            missing_fields=[],
-        )
 
         entity = TechnologyEntity(
             schema_version=SCHEMA_VERSION,
@@ -559,22 +656,31 @@ class TechnologyRegistry:
 
     def register(self, spec: TechSpec) -> None:
         """Register a new technology specification in all lookup indices."""
+        technology_id(spec.slug)
+        existing = self._by_slug.get(spec.slug)
+        if existing is not None:
+            if existing != spec:
+                raise ValueError(f"Conflicting technology slug: {spec.slug}")
+            return
+        aliases = {token.strip().casefold() for token in (spec.name, spec.slug, *spec.aliases)}
+        packages = {normalize_pypi_name(name) for name in spec.default_packages}
+        repos = {canonical_github_url(name).removeprefix("https://github.com/")
+                 for name in spec.known_repo_slugs}
+        # Validate all indices before mutating any of them.
+        for keys, index, label in (
+            (aliases, self._alias_map, "alias"),
+            (packages, self._package_map, "package"),
+            (repos, self._repo_map, "repository"),
+        ):
+            for key in sorted(keys):
+                if key in index and index[key].slug != spec.slug:
+                    raise ValueError(f"Conflicting {label} mapping: {key}")
         self._by_slug[spec.slug] = spec
-        self._alias_map[spec.name.casefold()] = spec
-        self._alias_map[spec.slug.casefold()] = spec
-
-        for alias in spec.aliases:
-            self._alias_map[alias.casefold()] = spec
-
-        for pkg in spec.default_packages:
-            normalized_pkg = pkg.replace("_", "-").casefold()
-            self._package_map[normalized_pkg] = spec
-
-        for repo_slug in spec.known_repo_slugs:
-            self._repo_map[repo_slug.casefold()] = spec
-
-        for kw in spec.keywords:
-            self._keyword_map[kw.casefold()] = spec
+        self._alias_map.update(dict.fromkeys(aliases, spec))
+        self._package_map.update(dict.fromkeys(packages, spec))
+        self._repo_map.update(dict.fromkeys(repos, spec))
+        for keyword in spec.keywords:
+            self._keyword_map.setdefault(keyword.casefold(), spec)
 
     def get_by_slug(self, slug: str) -> TechSpec | None:
         """Retrieve by exact canonical slug."""
@@ -583,26 +689,21 @@ class TechnologyRegistry:
     def lookup(self, term: str) -> TechSpec | None:
         """Lookup by name, slug, or alias (case-insensitive)."""
         clean = term.strip().casefold()
+        if clean.startswith("tech:"):
+            return self._by_slug.get(clean[5:]) if term.strip() == clean else None
         return self._alias_map.get(clean) or self._by_slug.get(clean) or self._keyword_map.get(clean)
 
     def lookup_by_package(self, package_name: str) -> TechSpec | None:
         """Lookup by PyPI package distribution name."""
-        clean = package_name.strip().replace("_", "-").casefold()
-        if clean in self._package_map:
-            return self._package_map[clean]
-        # Also test direct alias/slug lookup
-        return self._alias_map.get(clean)
+        try:
+            clean = normalize_pypi_name(package_name.strip())
+        except ValueError:
+            return None
+        return self._package_map.get(clean)
 
     def lookup_by_repo(self, repo_full_name: str) -> TechSpec | None:
-        """Lookup by repository owner/name slug."""
-        clean = repo_full_name.strip().casefold()
-        if clean in self._repo_map:
-            return self._repo_map[clean]
-        # Check repository name part only
-        if "/" in clean:
-            repo_name = clean.split("/")[-1]
-            return self._alias_map.get(repo_name)
-        return self._alias_map.get(clean)
+        """Match only a curated full owner/repository identity."""
+        return self._repo_map.get(repo_full_name.strip().casefold())
 
     def lookup_by_topic(self, topic: str) -> TechSpec | None:
         """Lookup by GitHub topic tag."""

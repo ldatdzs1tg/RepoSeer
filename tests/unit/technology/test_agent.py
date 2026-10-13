@@ -3,7 +3,6 @@
 import pytest
 
 from reposeer.technology.agent import LightweightTechAgent
-from reposeer.technology.registry import TechnologyRegistry
 
 
 def test_agent_extracts_headers_and_install_commands():
@@ -67,3 +66,51 @@ def test_agent_penalizes_comparative_mentions():
     django_match = next((m for m in matches if m.spec.slug == "django"), None)
     if django_match:
         assert django_match.confidence <= 0.50
+
+
+def test_negative_historical_and_comparison_mentions_do_not_claim_usage():
+    agent = LightweightTechAgent()
+    for text in ("We do not use Flask.", "This works without Django.",
+                 "Migrated from FastAPI to our own implementation.",
+                 "Previously used Flask.", "Flask versus Django", "Alternative to FastAPI",
+                 "We do not use PyTorch (torch).", "Unlike Flask and Django", "# Feature Requests"):
+        assert agent.analyze_text(text) == []
+    assert agent.analyze_text("Click here to send Requests to users.") == []
+    assert agent.analyze_text("uv radiation is measured here.") == []
+    matches = agent.analyze_text("![Flask](https://shields.io/badge/Flask-green)")
+    assert any(match.spec.slug == "flask" and match.signal_kind == "badge" for match in matches)
+    assert all(0 <= match.confidence <= 1 for match in matches)
+
+
+@pytest.mark.parametrize(
+    "text,expected_slugs",
+    [
+        ("import requests", {"requests"}),
+        ("    import flask, requests  # Django comparison", {"flask", "requests"}),
+        ("from pydantic import BaseModel", {"pydantic"}),
+        ("from requests.sessions import Session", {"requests"}),
+        ("import flask as requests", {"flask"}),
+        ("from django import requests", {"django"}),
+        ("`import requests`", {"requests"}),
+    ],
+)
+def test_import_signals_match_modules_not_aliases_symbols_or_comments(text, expected_slugs):
+    matches = LightweightTechAgent().analyze_text(text)
+    assert {match.spec.slug for match in matches} == expected_slugs
+    assert all(match.signal_kind == "import_code" and match.confidence >= 0.85 for match in matches)
+    assert all(match.context_snippet in text for match in matches)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "This module handles incoming HTTP requests from users.",
+        "Use requests from our users to prioritize work.",
+        "We import requests from users into the work queue.",
+    ],
+)
+def test_natural_language_from_or_import_does_not_create_import_signals(text):
+    matches = LightweightTechAgent().analyze_text(text)
+    assert all(match.signal_kind != "import_code" for match in matches)
+    requests_match = next((match for match in matches if match.spec.slug == "requests"), None)
+    assert requests_match is None or requests_match.confidence < 0.60

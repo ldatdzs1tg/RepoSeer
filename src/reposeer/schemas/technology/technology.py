@@ -1,10 +1,10 @@
-"""Canonical technology representation schema."""
+"""Legacy internal technology DTO; canonical entities live in reposeer.contracts."""
 
 from reposeer.schemas.common import BaseSchema
 
 
 class TechnologyEntity(BaseSchema):
-    """Canonical technology entity definition."""
+    """Legacy metadata DTO, outside the T-011 public exchange contract."""
 
     name: str  # Canonical name (e.g. "PyTorch", "React")
     category: str | None = None  # e.g. "Deep Learning", "Frontend Framework"

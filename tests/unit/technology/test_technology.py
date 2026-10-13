@@ -1,28 +1,21 @@
-"""Unit tests for TechnologyResolver and aliases."""
+"""Public T-015 API resolves curated aliases without inventing unknown concepts."""
 
-from reposeer.technology.aliases import canonicalize_technology
-from reposeer.technology.resolver import TechnologyResolver
+from reposeer.contracts import TechnologyEntity as CanonicalTechnologyEntity
+from reposeer.technology import TechnologyEntity, TechnologyRegistry, detect_technologies
 
 
 def test_technology_canonicalization():
-    assert canonicalize_technology("pytorch") == "PyTorch"
-    assert canonicalize_technology("torch") == "PyTorch"
-    assert canonicalize_technology("react.js") == "React"
-    assert canonicalize_technology("reactjs") == "React"
-    assert canonicalize_technology("docker") == "Docker"
-    assert canonicalize_technology("unknown_lib") == "unknown_lib"
+    registry = TechnologyRegistry()
+    assert TechnologyEntity is CanonicalTechnologyEntity
+    assert registry.lookup("pytorch").name == "PyTorch"
+    assert registry.lookup("torch").name == "PyTorch"
+    assert registry.lookup("docker").name == "Docker"
+    assert registry.lookup("unknown_lib") is None
 
 
 def test_technology_resolver_requirements():
-    resolver = TechnologyResolver()
-    content = """
-    flask>=2.0.0
-    torch>=2.1.0
-    requests
-    """
-    results = resolver.resolve_from_file("pallets/flask", "requirements.txt", content)
-    names = [r.name for r in results]
-
-    assert "Flask" in names
-    assert "PyTorch" in names
-    assert "Requests" in names
+    result = detect_technologies("pallets/flask", manifest_files={
+        "requirements.txt": "flask>=2.0.0\ntorch>=2.1.0\nrequests\nunknown_lib"})
+    assert {"Flask", "PyTorch", "Requests"} <= {spec.name for spec in result.resolved_specs}
+    assert result.entities == []
+    assert any("Unrecognized dependency: unknown-lib" in diagnostic for diagnostic in result.diagnostics)

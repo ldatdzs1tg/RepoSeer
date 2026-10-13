@@ -1,5 +1,6 @@
 """Technology detection, canonical entity synthesis, and external search terms generation."""
 
+from reposeer.contracts import TechnologyEntity
 from reposeer.technology.agent import AgentMatch, LightweightTechAgent
 from reposeer.technology.detector import TechnologyDetector, detect_technologies
 from reposeer.technology.manifest_parser import (
@@ -14,10 +15,11 @@ from reposeer.technology.models import (
     SearchPlatform,
     SearchTerm,
 )
-from reposeer.technology.registry import TechSpec, TechnologyRegistry
+from reposeer.technology.registry import TechnologyRegistry, TechSpec
 from reposeer.technology.search_terms import SearchTermGenerator
 
 __all__ = [
+    "TechnologyEntity",
     "TechnologyDetector",
     "detect_technologies",
     "TechnologyRegistry",

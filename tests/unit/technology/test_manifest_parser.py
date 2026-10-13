@@ -4,6 +4,7 @@ import pytest
 
 from reposeer.technology.manifest_parser import (
     parse_manifest_dependencies,
+    parse_manifests,
     parse_pyproject_toml,
     parse_requirements_txt,
     parse_setup_cfg_or_py,
@@ -126,3 +127,89 @@ def test_parse_manifest_dependencies_multi_manifest():
 
     all_deps = parse_manifest_dependencies(manifests)
     assert set(all_deps) == {"flask", "werkzeug", "pydantic", "pytest"}
+
+
+def test_requirements_urls_options_and_fragments():
+    content = """
+requests[security]>=2.0 ; python_version < '4' # legal comment
+Demo @ https://example.test/demo.whl#sha256=abc
+-e git+https://example.test/torch.git#egg=torch&subdirectory=src
+-r ignored.txt
+--requirement=base.txt
+-c constraints.txt
+--constraint=constraints.txt
+--find-links https://example.test/packages
+--trusted-host example.test
+--pre
+--no-index
+./local-folder
+https://example.test/unnamed.whl
+not a package
+"""
+    assert parse_requirements_txt(content) == ["requests", "demo", "torch"]
+    result = parse_manifests({"requirements.txt": content})
+    assert result.diagnostics  # Local/unnamed/malformed declarations remain unsupported.
+    assert all(dep.name not in {"ignored", "base", "constraints"} for dep in result.dependencies)
+
+
+def test_optional_dev_scopes_and_no_build_dependency_guessing():
+    result = parse_manifests({"pyproject.toml": """
+[build-system]
+requires = ["setuptools"]
+[project]
+name = "not-a-dependency"
+dependencies = ["requests"]
+[project.optional-dependencies]
+web = ["flask"]
+[tool.poetry.dependencies]
+python = "^3.12"
+httpx = "*"
+pydantic = {version="*", optional=true}
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+"""})
+    pairs = {(dep.name, dep.scope) for dep in result.dependencies}
+    assert pairs == {("requests", "runtime"), ("httpx", "runtime"),
+                     ("flask", "optional:web"), ("pydantic", "optional:poetry"), ("pytest", "dev:dev")}
+    assert result.diagnostics == []
+
+
+def test_malformed_toml_is_observable():
+    with pytest.raises(ValueError):
+        parse_pyproject_toml("[project\ndependencies = [")
+    result = parse_manifests({"pyproject.toml": "[project", "requirements.txt": "flask"})
+    assert [dep.name for dep in result.dependencies] == ["flask"]
+    assert any("pyproject.toml: parse error" in error for error in result.diagnostics)
+
+
+def test_setup_cfg_runtime_and_extras():
+    result = parse_manifests({"setup.cfg": """
+[options]
+install_requires =
+    requests>=2
+    click
+[options.extras_require]
+dev =
+    pytest
+"""})
+    assert {(dep.name, dep.scope) for dep in result.dependencies} == {
+        ("requests", "runtime"), ("click", "runtime"), ("pytest", "optional:dev")}
+    assert result.diagnostics == []
+
+
+def test_setup_py_is_static_and_dynamic_forms_report_unsupported(tmp_path):
+    sentinel = tmp_path / "executed.txt"
+    content = f"""
+from setuptools import setup
+from pathlib import Path
+Path({str(sentinel)!r}).write_text("executed")
+setup(install_requires=get_dependencies())
+"""
+    result = parse_manifests({"setup.py": content})
+    assert not sentinel.exists()
+    assert result.dependencies == []
+    assert any("unsupported dynamic install_requires" in error for error in result.diagnostics)
+    # Arbitrary calls named setup() without a verified setuptools import are unsupported.
+    result = parse_manifests({"setup.py": 'setup(install_requires=["flask"])'})
+    assert result.dependencies == []
+    assert result.diagnostics
