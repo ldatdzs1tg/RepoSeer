@@ -660,6 +660,7 @@ def test_cli_reports_batch_failures_and_nonzero_exit(batch_service, tmp_path, mo
         "neither",
         "pypi",
         "external",
+        "all",
     ],
 )
 def test_cli_invalid_inputs_fail_before_service_creation(tmp_path, monkeypatch, case):
@@ -684,10 +685,10 @@ def test_cli_invalid_inputs_fail_before_service_creation(tmp_path, monkeypatch, 
         args.append("Synthetic/Alpha")
     elif case == "neither":
         args = ["collect"]
-    elif case in {"pypi", "external"}:
+    elif case in {"pypi", "external", "all"}:
         args += ["--source", case]
     result = CliRunner().invoke(app, args, catch_exceptions=False)
-    assert result.exit_code == 1, result.output
+    assert result.exit_code == (2 if case in {"pypi", "external", "all"} else 1), result.output
 
 
 @pytest.mark.parametrize("target", ["Synthetic/Alpha", "https://github.com/Synthetic/Alpha"])
@@ -696,7 +697,7 @@ def test_cli_single_repository_compatibility(batch_service, monkeypatch, target)
 
     service, fake = batch_service
     monkeypatch.setattr("reposeer.pipelines.github.RepositoryService", lambda: service)
-    result = CliRunner().invoke(app, ["collect", target])
+    result = CliRunner().invoke(app, ["collect", target, "--source", "github"])
     assert result.exit_code == 0, result.output
     assert "completed successfully" in result.output
     assert fake.calls == [("Synthetic", "Alpha")]
@@ -1126,3 +1127,15 @@ def test_batch_atomic_replacement_failure_retains_raw_and_previous_processed(
     assert raw_path.read_bytes().startswith(previous_raw)
     assert len(raws(service)) == 3
     assert not list(service.paths.base_dir.rglob("*.tmp"))
+
+
+@pytest.mark.parametrize("source", ["pypi", "external", "all"])
+def test_single_unsupported_source_does_not_construct_pipeline(monkeypatch, source):
+    from reposeer.cli.app import app
+
+    def forbidden():
+        raise AssertionError("Unsupported source must not construct a pipeline")
+
+    monkeypatch.setattr("reposeer.pipelines.full.FullPipeline", forbidden)
+    result = CliRunner().invoke(app, ["collect", "Synthetic/Alpha", "--source", source])
+    assert result.exit_code == 2 and "Unsupported source" in result.output

@@ -1,13 +1,13 @@
 # RepoSeer: Repository & Open-Source Ecosystem Intelligence
 
-RepoSeer is an end-to-end data pipeline and intelligence system engineered to evaluate open-source software repository health, technology adoption, and external community trends.
+RepoSeer targets the probability that a **PyPI package** has confirmed maintenance abandonment in the next **12 calendar months** after `cutoff_at`. GitHub repositories supply observations; repository inactivity, archived status and LLM statements are candidate evidence, not labels or risk probabilities. This repository currently implements collection and resolution through T-015; features, labels, training and inference remain planned.
 
 ## Tech Stack (Sprint 2)
 
 - **Language & Runtime**: Python 3.12 managed via `uv`
 - **Data Contracts**: Pydantic v2
 - **Config Management**: `pydantic-settings` & PyYAML
-- **HTTP Client**: HTTPX with Tenacity exponential backoff retries & rate limiting
+- **HTTP Client**: HTTPX with shared bounded retry/backoff & rate limiting
 - **Upstream Data**: GitHub REST API, PyPI, Google deps.dev, OSV
 - **Web Extraction**: Trafilatura
 - **Data Processing**: Polars
@@ -57,7 +57,7 @@ uv venv --python 3.12
 source .venv/bin/activate
 
 # Install package in editable mode with development dependencies
-uv pip install -e ".[dev]"
+uv sync --extra dev --frozen
 ```
 
 ### 2. Environment Variables
@@ -75,33 +75,28 @@ cp .env.example .env
 # Display help
 reposeer --help
 
-# Collect repository metadata & activity
-reposeer collect pallets/flask
-
-# Normalize & process raw data into Parquet
-reposeer process
+# Collect current GitHub metadata (canonical raw -> processed Parquet)
+uv run reposeer collect pallets/flask --source github
+uv run reposeer collect --repos-file repositories.txt --source github
 
 # Resolve technologies & generate external search terms (T-015)
 reposeer detect-tech pallets/flask
 
-# Generate data quality profiling report
-reposeer profile
+# Offline vertical GitHub -> technology -> HN candidate -> canonical raw replay
+uv run python scripts/smoke_test.py --offline
 
-# Build feature tables
-reposeer build-features
+# Live smoke is explicitly opt-in; no HN hit reports external_unavailable
+uv run python scripts/smoke_test.py pallets/flask --live
 ```
 
 ### 4. Running Tests & Quality Checks
 
 ```bash
-# Run test suite
-pytest
-
-# Run linter
-ruff check .
-
-# Format code
-ruff format .
+uv sync --extra dev --frozen
+uv run python scripts/export_contract.py --check
+uv run python scripts/validate_examples.py
+uv run ruff check src tests scripts
+uv run pytest -q -m "not smoke"
 ```
 
 ### 5. Common Collector Utilities
@@ -162,7 +157,9 @@ psf/requests
 
 Blank lines and full-line comments are ignored; inline comments are not parsed.
 Supply either a positional target or `--repos-file`, with 1 to 1,000 batch entries.
-Batch mode accepts `--source github` or `all`; it collects only GitHub metadata.
+Both single and batch collection support only `--source github` (the default).
+`pypi`, `external`, `all` and other sources exit 2 as unsupported before creating a client.
+`collect-activity` is a separate supported command. `process` and `build-features` are stubs, not implemented workflows; `FullPipeline` currently delegates only GitHub metadata.
 URLs with credentials, ports, queries, fragments, clone suffixes or extra path segments
 are rejected. Invalid entries are reported without echoing potentially sensitive input.
 
@@ -198,7 +195,8 @@ a final Parquet write failure raises `CollectionError` and does not report succe
 Existing incompatible Parquet schemas require explicit migration. Alias/rename history
 is not verified: a conflicting provider name is rejected even when its ID is familiar.
 These are current observations, with exact raw retrieval provenance, not historical
-backfill. PyPI mapping, historical snapshots and activity collection remain later tasks.
+backfill. Current PyPI mapping is a separate pure resolver; historical snapshots remain planned.
+Activity collection is implemented through the separate T-014 service/CLI below.
 
 Run offline verification yourself in the existing Python 3.12 environment:
 
@@ -301,14 +299,14 @@ not establish that a repository uses the technology.
 Detection precedence is pins, exact curated upstream mapping, dependencies, topics, language,
 then README heuristics. Stronger evidence determines confidence; all distinct signal meanings
 remain visible. Results and queries have stable ordering and deduplication. Search priority 1
-is repository-specific discovery, 2 primary technology, 3 its ecosystem and 4 secondary integration.
+is verified repository-specific discovery, 2 primary technology, 3 its ecosystem and 4 secondary integration.
 `SearchTermGenerator(max_terms_per_intent=2)` limits each `(intent, platform)` across the entire
 call after priority sorting, rather than granting every dependency its own budget. Zero disables
 queries. Secondary concepts get ecosystem/integration queries only. Queries use contextual
 keywords without provider-specific Boolean operators or ambiguous aliases; ecosystem topics
 already covered by the primary name/category are omitted case-insensitively, while useful phrases
 such as `HTTP client` remain. With no primary,
-verified subject-only queries have `SearchTerm.tech_slug=None`; an unverified unknown subject
+verified subject-only queries have `SearchTerm.tech_slug=None`; curated names alone do not authorize exact repository queries. An unverified unknown subject
 produces no invented canonical slug or repository queries. This nullable field is an explicit
 resolver API refinement and does not change T-011.
 
@@ -353,3 +351,112 @@ python -m pytest -q -m "not smoke"
 python -m ruff check src/reposeer/technology src/reposeer/cli/detect_tech.py tests/unit/technology tests/integration/test_technology_detection.py
 reposeer detect-tech . --pinned tech:flask --json
 ```
+
+
+## Implementation boundary (architecture v3)
+
+| Task | Implemented | Limit / next step |
+| --- | --- | --- |
+| T-010 | Offline vertical metadata -> technology/query -> HN candidate -> canonical discovery JSONL replay, plus Parquet/DuckDB | Live is opt-in; a search hit is unverified, not full article evidence |
+| T-011 | Canonical 0.1.0 models, validators, generated artifacts and examples | Legacy DTOs remain internal; no new label/feature contract |
+| T-012 | Shared HTTP retries/rate limit/cache, ownership and run checkpoints | Fetch progress alone does not guarantee raw durability |
+| T-013 | Single/batch GitHub metadata, screening, dedup, raw-first Parquet | Current observation; github is the only collect source |
+| T-014 | Five activity groups, durable journal, batch start/resume, per-group coverage | Moving API pages cannot reconstruct history; errors/budgets retain partial coverage |
+| T-015 | Deterministic stack resolver, aliases/dependency scopes and bounded queries; optional extractive Functional Profiler | Technology queries are not D04 same-function search; profile is not a risk or abandonment label |
+
+`package_id=pypi:<PEP503-name>`, `repo_id=github:repository:<numeric-id>`;
+future ML grain is `(package_id, cutoff_at)` and `repo_group_id` groups packages sharing a repo.
+`event_at`, `available_at` and retrieval time are distinct. Current GitHub activity keeps
+`available_at=null`; event time before cutoff does not establish historical availability.
+Unknown/missing/partial counts stay distinct from zero. Contributors are current aggregates,
+PR state is observed at fetch, and GitHub releases are not PyPI releases. Archived repos remain
+collectable. Future product states are `already_abandoned`, `scheduled_cessation`,
+`status_unverified`; no label assignment is implemented here.
+
+Smoke search hits go to `data/raw/external/discovery.jsonl`, with
+`record_stage=discovery_candidate`, `discovery_status=unverified`, `content_status=not_fetched`
+and `discovery_provider=hackernews`. They are not crawled Articles, verified relevance or E1/E2
+features; the smoke does not write candidates to `data/raw/external/articles.jsonl`.
+
+### Durable activity start/resume
+
+```bash
+uv run reposeer collect-activity start --repos-file repositories.txt --groups commits,issues,pull_requests,contributors,releases --max-pages 5 --max-records 500
+# Use the run ID printed by start:
+uv run reposeer collect-activity resume --run-id <run-id>
+```
+
+Raw pages are synced before the durable checkpoint advances. Pending journals replay on resume
+without duplicate raw IDs or source records within a logical run. Exhausted budgets do not mean
+complete pagination. Prior HTTP/native errors remain in coverage after recovery.
+
+### Current package mapping (minimal D01 safety)
+
+`PackageRepositoryResolver.resolve_current(package_name, pypi_metadata, github_repository)`
+performs no network calls. Supply PyPI JSON (including `info.name` and `info.project_urls`) and
+an already fetched canonical GitHubRepository or native provider payload with validated numeric
+`id` and `full_name`. Only exact root GitHub URLs under Source/Repository/Code can verify a
+current association; conflicting URLs are ambiguous and Home alone is insufficient.
+Results keep `scope_quality=repo_only` and `historical_validity=unverified`; monorepo package
+subdirectories and historical mappings are not inferred. Legacy URL-only `map_package` raises
+`unverified_mapping_requires_source_evidence`.
+
+### Optional Functional Profiler (bounded D03 extension)
+
+Technology Resolver identifies stack relationships. Functional Profiler describes documented
+user problems, capabilities and use cases. It is called explicitly in Python; `detect-tech`
+and CORE never call an LLM or require its key.
+
+```bash
+uv sync --extra dev --extra functional --frozen
+# Configure both OPENAI_API_KEY and REPOSEER_FUNCTIONAL_MODEL explicitly for live profiling.
+# No model is selected automatically; absence returns typed unavailable.
+```
+
+```python
+from reposeer.technology.functional_profile import FunctionalSource
+from reposeer.technology.functional_profiler import FunctionalProfiler
+
+# sources: caller-recorded FunctionalSource objects, not fetched implicitly here.
+# verified mapping and repository identity must already be established by the caller.
+result = FunctionalProfiler().build_profile(
+    package_id="pypi:demo", repo_id="github:repository:900000001",
+    package_scope=None, sources=sources, cutoff_at=None,
+)
+```
+
+Each source needs its concrete revision, source URL/path, retrieval time, text and scope,
+plus explicit availability/proof fields. Supported official inputs are README/docs/quickstart/
+example prose at exact GitHub blob/raw revision URLs bound to a canonical repository identity,
+or versioned PyPI JSON `info.description` for the target package. Moving HEAD/main and arbitrary
+websites are rejected. Custom documentation domains and source-code inference are unsupported.
+Target-package GitHub scope requires matching `package_scope`/path boundaries plus an injected
+trusted backend `PackageScopeVerifier` binding package ID, repo ID and document revision/path.
+A caller-provided `scope_evidence_ref` string does not verify scope. Without accepted evidence,
+repository docs stay `repo_only`; verified package docs receive precedence after all gates pass.
+Versioned PyPI description URL/name/version/path matching identifies package-specific metadata,
+not independent content authenticity.
+
+Historical mode first validates every input's source metadata, declared availability at/before
+cutoff and archive/provider basis, then requires an injected trusted `HistoricalSourceVerifier`
+to independently bind identity, revision, exact bytes and availability to an evidence manifest.
+Missing/rejected verification returns `historical_revision_unverified` without calling an LLM.
+Metadata strings containing a revision/hash or resembling an archive URL, commit timestamps and
+fetch time cannot substitute for verification. Verifier objects are trusted backend dependencies,
+not request fields; no production archival verifier or mapping-history verifier is implemented.
+
+Passages remove badges/navigation/code and retain original offsets/hash. LLM output is strict
+Pydantic structured data; claims must quote supplied prose exactly and cite existing spans.
+Unsupported claims are removed; unsupported primary function returns unavailable. This conservative
+extractive implementation does not validate arbitrary paraphrases. Alternative candidates remain
+unverified. Fake LLMs cover all gates offline. The optional official OpenAI Responses adapter uses
+explicit model configuration, `store=False`, finite timeout, SDK retries disabled and at most one
+validation retry. Refusal, incomplete output and request errors return unavailable. Deterministic
+cache keys include identity, scope, source versions/hashes, temporal policy, model and profiler
+version and verified evidence fingerprints; raw self-declared proof references are not verified
+fingerprints. There is no new profile cache persistence layer. A `verified` profile means its
+claims are grounded in accepted text; current metadata alone does not authenticate Internet history.
+
+Full D01 historical mapping, T-016 discovery, T-017 full crawling, D04-D08 semantic relevance and
+specialist evidence agents, D09 labels/features, D10/D11 training/inference, D12 graph and
+D13-D15 reports/orchestration/lineage remain planned. See [v3 pipeline](docs/architecture/pipeline.md).

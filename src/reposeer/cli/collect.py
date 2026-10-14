@@ -9,7 +9,10 @@ from reposeer.exceptions import CollectionError
 from reposeer.services.repository_service import RepositoryService, parse_repository_target
 
 console = Console()
-collect_app = typer.Typer(help="Collect repository metadata, activity, and external signals.")
+collect_app = typer.Typer(
+    help="Collect current GitHub repository metadata (github only).",
+    context_settings={"allow_interspersed_args": True},
+)
 
 
 def _collect_batch(repos_file: Path) -> None:
@@ -65,19 +68,17 @@ def main(
         help="UTF-8 text file containing one GitHub repository target per line",
     ),
     source: str = typer.Option(
-        "all", "--source", "-s", help="Source to collect (github, pypi, external, all)"
+        "github", "--source", "-s", help="Supported source: github; pypi/external/all are not implemented"
     ),
 ) -> None:
     """Collect one repository or a batch of current GitHub repository metadata."""
+    if source != "github":
+        console.print(f"Unsupported source '{source}': only github is implemented.", style="bold red")
+        raise typer.Exit(code=2)
     if (target is None) == (repos_file is None):
         console.print("Provide exactly one target or --repos-file.", style="bold red")
         raise typer.Exit(code=1)
     if repos_file is not None:
-        if source not in {"github", "all"}:
-            console.print(
-                "Batch collection supports --source github or all only.", style="bold red"
-            )
-            raise typer.Exit(code=1)
         _collect_batch(repos_file)
         return
     try:

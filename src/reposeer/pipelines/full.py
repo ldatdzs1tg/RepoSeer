@@ -1,4 +1,4 @@
-"""Full end-to-end integrated pipeline according to T-020."""
+"""Compatibility entry point: current GitHub metadata only."""
 
 import logging
 
@@ -8,11 +8,11 @@ logger = logging.getLogger("reposeer.pipelines.full")
 
 
 class FullPipeline:
-    """Orchestrates metadata, activity, technology, and external collection."""
+    """Collect GitHub metadata; future orchestration is not implemented here."""
 
     def __init__(self):
         self.github_pipeline = GitHubPipeline()
 
     def run(self, repo_target: str) -> None:
-        logger.info("Executing full pipeline on target: %s", repo_target)
+        logger.info("Collecting GitHub metadata for target: %s", repo_target)
         self.github_pipeline.run(repo_target)

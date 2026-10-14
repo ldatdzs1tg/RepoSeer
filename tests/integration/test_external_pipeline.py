@@ -1,10 +1,12 @@
 """External providers and crawlers reuse the common HTTP layer."""
 
 import httpx
+import pytest
 
 from reposeer.clients.external.hackernews import HackerNewsClient
 from reposeer.collection import CollectionProgress, HTTPClient, ResponseCache, RunManager
 from reposeer.collectors.external.crawler.fetcher import HTMLFetcher
+from reposeer.exceptions import HTTPClientError
 
 
 def test_external_discovery_and_crawler_share_http_cache_and_progress(tmp_path):
@@ -63,9 +65,26 @@ def test_external_failure_is_logged_and_does_not_advance_checkpoint(tmp_path, ca
         HackerNewsClient(http_client=http, progress=progress) as discovery,
     ):
         assert fetcher.fetch("https://example.test/missing") is None
-        assert discovery.search("example") == []
+        with pytest.raises(HTTPClientError):
+            discovery.search("example")
     restored = manager.resume_run("external-errors")
     assert restored.error_count == 2
     assert restored.collected_count == 0
     assert restored.checkpoint_state == {}
     assert "Failed to collect data" in caplog.text
+
+
+@pytest.mark.parametrize("payload", [{}, {"hits": None}, {"hits": [{"title": "Bad", "url": "bad"}]}])
+def test_malformed_search_is_not_empty_success(payload):
+    with HTTPClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as http:
+        with pytest.raises(ValueError):
+            HackerNewsClient(http_client=http).search("example")
+
+
+def test_empty_search_and_unknown_score_are_distinct():
+    payload = {"hits": []}
+    with HTTPClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as http:
+        discovery = HackerNewsClient(http_client=http)
+        assert discovery.search("example") == []
+        payload["hits"] = [{"title": "Example", "objectID": "42"}]
+        assert discovery.search("example")[0].score is None

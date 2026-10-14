@@ -35,10 +35,7 @@ class SearchTermGenerator:
             candidates.append(SearchTerm(query=query, tech_slug=slug, intent=intent,
                                          platform=platform, priority=priority, keywords=query.split()))
 
-        curated_subject = isinstance(primary, TechSpec) and repo_full_name and any(
-            repo_full_name.casefold() == known.casefold() for known in primary.known_repo_slugs
-        )
-        if repo_full_name and (verified_subject or curated_subject):
+        if repo_full_name and verified_subject:
             target_slug = primary.slug if primary else None
             add(f"{repo_full_name} release announcement", target_slug, "announcement", priority=1)
             add(f"{repo_full_name} maintenance announcements", target_slug, "maintenance", priority=1)

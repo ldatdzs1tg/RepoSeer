@@ -10,5 +10,5 @@ class PackageRepositoryMapping(BaseSchema):
     package_name: str
     repo_full_name: str
     repository_url: str
-    confidence: float = 1.0
-    matched_by: str = "metadata"  # "metadata", "homepage", "heuristic"
+    confidence: float | None = None
+    matched_by: str = "unverified"

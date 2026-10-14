@@ -13,7 +13,7 @@ def test_primary_queries_intents_priority_and_platforms():
     specs = [registry.get_by_slug(slug) for slug in ("flask", "python", "werkzeug", "jinja2")]
     generator = SearchTermGenerator()
     terms = generator.generate(entities=specs, repo_full_name="pallets/flask", primary_slug="flask",
-                               topics=["python", "web"])
+                               topics=["python", "web"], verified_subject=True)
     assert {"announcement", "maintenance", "security", "ecosystem"} <= {term.intent for term in terms}
     assert "hackernews" in {term.platform for term in terms}
     assert [term.priority for term in terms] == sorted(term.priority for term in terms)
@@ -75,3 +75,14 @@ def test_ecosystem_topics_keep_useful_phrases_and_deterministic_budget():
     assert len(ecosystem) == 1
     assert ecosystem[0].query == "Flask Python web framework HTTP client wsgi ecosystem discussions"
     assert max(Counter((term.intent, term.platform) for term in terms).values()) == 1
+
+
+
+def test_curated_name_alone_cannot_generate_verified_exact_repository_queries():
+    spec = TechnologyRegistry().get_by_slug("flask")
+    generator = SearchTermGenerator()
+    manual = generator.generate(entities=[spec], primary_slug="flask", repo_full_name="pallets/flask")
+    assert all(term.priority != 1 and "pallets/flask" not in term.query for term in manual)
+    verified = generator.generate(entities=[spec], primary_slug="flask", repo_full_name="pallets/flask", verified_subject=True)
+    assert any(term.priority == 1 and "pallets/flask" in term.query for term in verified)
+    assert all(term.intent != "same_function" for term in verified)

@@ -759,3 +759,41 @@ def test_resume_isolates_recoverable_journal_storage_failure(environment, monkey
     third = restart(service, client).resume(first.run_id)
     assert third.raw_stored_count == 2 and len(calls) == 4
     assert not journals(service, first.run_id)
+
+
+
+def test_rate_limit_timeout_and_storage_interruption_resume_to_strict_raw_replay(environment, monkeypatch):
+    service, client, calls, pages = environment({
+        (SLUG, "commits", 1): [native("commits", i) for i in range(100)],
+        (SLUG, "commits", 2): httpx.Response(429, headers={"Retry-After": "0"}),
+    })
+    first = service.start([SLUG], groups=["commits"], max_pages_per_group=3)
+    assert first.resumable and first.raw_stored_count == 100
+    assert state(service, first.run_id)["cursor"] == "p:2:i:0"
+    pages[(SLUG, "commits", 2)] = httpx.ReadTimeout("Injected timeout")
+    timed_out = restart(service, client).resume(first.run_id)
+    assert timed_out.resumable and timed_out.raw_stored_count == 100
+    assert state(service, first.run_id)["error_count"] == 2
+    pages[(SLUG, "commits", 2)] = [native("commits", 100)]
+    interrupted = restart(service, client)
+    append = interrupted.activity_service.raw_storage.append_contract_records_durable
+
+    def interrupt(path, records):
+        append(path, list(records)[:1])
+        raise OSError("Injected after durable raw append")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(interrupted.activity_service.raw_storage, "append_contract_records_durable", interrupt)
+        pending = interrupted.resume(first.run_id)
+    assert pending.resumable and journals(service, first.run_id)
+    assert state(service, first.run_id)["records_stored"] == 100
+    before = len(calls)
+    final = restart(service, client).resume(first.run_id)
+    assert len(calls) == before and not journals(service, first.run_id)
+    assert final.raw_stored_count == 101 and not final.resumable
+    assert final.status == "partial" and final.groups[0]["pagination_complete"]
+    assert final.groups[0]["missing_reason"] == "collection_errors"
+    replay = raws(service)
+    assert_unique(replay)
+    assert len(replay) == 101 and all(record.available_at is None for record in replay)
+    assert all(record.run_id == first.run_id for record in replay)

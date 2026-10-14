@@ -85,3 +85,55 @@ def test_smoke_pipeline_live_to_duckdb(tmp_path: Path):
         assert archived is False
     finally:
         duckdb_engine.close()
+
+
+
+def test_offline_vertical_smoke_uses_mock_transport_and_replays_canonical_candidates(tmp_path):
+    import importlib.util
+
+    from reposeer.contracts import RawRecord, validate_record
+
+    spec = importlib.util.spec_from_file_location("vertical_smoke", Path(__file__).resolve().parents[2] / "scripts/smoke_test.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    transport = smoke.offline_transport("Synthetic/Demo")
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return transport.handle_request(request)
+
+    import httpx
+
+    summary = smoke.run_smoke_test("Synthetic/Demo", data_dir=tmp_path, transport=httpx.MockTransport(handler))
+    assert summary["status"] == "complete"
+    assert summary["github_raw_records"] == summary["external_raw_records"] == summary["processed_repositories"] == 1
+    assert len(calls) == 2 and calls[1].url.params["query"] == summary["query"]
+    raw = JsonlStorage().read_contract_records(tmp_path / "raw/external/discovery.jsonl")[0]
+    assert not (tmp_path / "raw/external/articles.jsonl").exists()
+    assert isinstance(validate_record(raw), RawRecord)
+    assert raw.source == "web_article" and raw.source_record_type == "article"
+    assert raw.source_url == "https://example.org/synthetic-story"
+    assert raw.payload["title"] == "Synthetic discovery candidate"
+    assert raw.payload["query"] == summary["query"]
+    assert {key: raw.payload[key] for key in (
+        "record_stage", "discovery_status", "content_status", "discovery_provider",
+    )} == {"record_stage": "discovery_candidate", "discovery_status": "unverified",
+          "content_status": "not_fetched", "discovery_provider": "hackernews"}
+    assert raw.payload["source"] == "hackernews" and raw.payload["url"] == raw.source_url
+    assert raw.payload["score"] is None and raw.payload["publication_date"] is None
+    assert {"body", "text", "article_body", "extracted_text", "content"}.isdisjoint(raw.payload)
+    assert raw.repo_id is raw.package_id is raw.event_at is raw.available_at is None
+    assert raw.http_status is raw.raw_body_sha256 is None
+    github = JsonlStorage().read_contract_records(tmp_path / "raw/github/repositories.jsonl")[0]
+    assert raw.run_id == github.run_id
+    assert raw.retrieved_at == "2024-02-29T12:00:00.000Z"
+
+    def no_hits(request):
+        return httpx.Response(200, json={"hits": []}) if request.url.host == "hn.algolia.com" else transport.handle_request(request)
+
+    empty = smoke.run_smoke_test("Synthetic/Demo", data_dir=tmp_path / "empty", transport=httpx.MockTransport(no_hits))
+    assert empty["status"] == "external_unavailable" and empty["external_raw_records"] == 0
+    assert len(calls) == 2  # No extra requests were made by replay.
+    assert not (tmp_path / "empty/raw/external/articles.jsonl").exists()
+    assert JsonlStorage().read_contract_records(tmp_path / "empty/raw/external/discovery.jsonl") == []
