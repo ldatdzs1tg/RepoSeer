@@ -19,6 +19,12 @@ external:
     - name: "hackernews"
       api_base_url: "https://hn.algolia.com/api/v1"
       enabled: true
+    - name: "stackexchange"
+      api_base_url: "https://api.stackexchange.com/2.3"
+      enabled: true
+    - name: "devto"
+      api_base_url: "https://dev.to/api"
+      enabled: true
     - name: "rss"
       enabled: true
     - name: "news"

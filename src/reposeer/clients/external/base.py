@@ -23,8 +23,25 @@ class DiscoveryPageResult(BaseModel):
 class DiscoveryProvider(ABC):
     """Abstract provider for external signals and news discovery."""
 
+    provider_name: str = "base"
+    supports_historical_window: bool = False
+
     @abstractmethod
+    def search_page(
+        self,
+        query: str,
+        *,
+        window_start: datetime | None = None,
+        window_end: datetime | None = None,
+        cursor: str | None = None,
+        page_size: int = 50,
+    ) -> DiscoveryPageResult:
+        """Search a single paginated page of external candidates."""
+        pass
+
     def search(self, query: str, limit: int = 50) -> list[ExternalCandidate]:
         """Search upstream provider for articles or mentions."""
-        pass
+        result = self.search_page(query, page_size=limit)
+        return result.candidates[:limit]
+
 

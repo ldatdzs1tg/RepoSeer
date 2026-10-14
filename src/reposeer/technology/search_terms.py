@@ -15,7 +15,6 @@ from reposeer.technology.models import (
 from reposeer.technology.registry import TechSpec
 
 
-
 class SearchTermGenerator:
     """Budget is per (intent, platform) across the whole generate() call.
 

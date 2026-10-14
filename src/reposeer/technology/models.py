@@ -1,8 +1,8 @@
 """Data models for technology detection and search terms generation."""
 
-from collections.abc import Sequence
 import hashlib
 import json
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator

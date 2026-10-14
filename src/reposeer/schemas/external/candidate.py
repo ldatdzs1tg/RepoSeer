@@ -1,7 +1,7 @@
 """External discovery candidate contract."""
 
-from datetime import datetime
 import re
+from datetime import datetime
 from typing import Literal
 from urllib.parse import urlsplit
 
