@@ -1,8 +1,23 @@
 """Base discovery provider interface according to T-016."""
 
 from abc import ABC, abstractmethod
+from datetime import datetime
+
+from pydantic import BaseModel, Field
 
 from reposeer.schemas.external.candidate import ExternalCandidate
+
+
+class DiscoveryPageResult(BaseModel):
+    """Paginated result for external discovery providers."""
+
+    candidates: list[ExternalCandidate] = Field(default_factory=list)
+    page_number: int = Field(default=1, ge=1)
+    has_more: bool = False
+    next_cursor: str | None = None
+    total_hits_reported: int | None = None
+    observed_from: datetime | None = None
+    observed_to: datetime | None = None
 
 
 class DiscoveryProvider(ABC):
@@ -12,3 +27,4 @@ class DiscoveryProvider(ABC):
     def search(self, query: str, limit: int = 50) -> list[ExternalCandidate]:
         """Search upstream provider for articles or mentions."""
         pass
+

@@ -12,8 +12,10 @@ from reposeer.technology.models import (
     DetectedSignal,
     DetectionResult,
     SearchIntent,
+    SearchPlan,
     SearchPlatform,
     SearchTerm,
+    compute_query_set_hash,
 )
 from reposeer.technology.registry import TechnologyRegistry, TechSpec
 from reposeer.technology.search_terms import SearchTermGenerator
@@ -28,6 +30,8 @@ __all__ = [
     "AgentMatch",
     "SearchTermGenerator",
     "SearchTerm",
+    "SearchPlan",
+    "compute_query_set_hash",
     "SearchIntent",
     "SearchPlatform",
     "DetectedSignal",
