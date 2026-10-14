@@ -32,6 +32,7 @@ SearchPlatform = Literal[
     "news",
     "stackexchange",
     "devto",
+    "rss",
     "all",
 ]
 
