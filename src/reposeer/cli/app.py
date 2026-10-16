@@ -6,6 +6,7 @@ from reposeer import __version__
 from reposeer.cli.build_features import build_features_app
 from reposeer.cli.collect import collect_app
 from reposeer.cli.collect_activity import collect_activity_app
+from reposeer.cli.crawl_external import crawl_external_app
 from reposeer.cli.detect_tech import detect_tech_app
 from reposeer.cli.discover_external import discover_external_app
 from reposeer.cli.process import process_app
@@ -42,6 +43,7 @@ def main(
 app.add_typer(collect_app, name="collect")
 app.add_typer(collect_activity_app, name="collect-activity")
 app.add_typer(discover_external_app, name="discover-external")
+app.add_typer(crawl_external_app, name="crawl-external")
 app.add_typer(detect_tech_app, name="detect-tech")
 app.add_typer(process_app, name="process")
 app.add_typer(profile_app, name="profile")

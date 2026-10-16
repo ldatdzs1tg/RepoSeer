@@ -10,6 +10,19 @@ from reposeer.config import settings
 from reposeer.exceptions import HTTPClientError, RateLimitExceededError
 
 
+def test_default_redirects_preserved_and_manual_redirect_mode():
+    def handler(request):
+        if request.url.path == "/start":
+            return httpx.Response(302, headers={"location": "/end"})
+        return httpx.Response(200, text="arrived")
+
+    with HTTPClient(transport=httpx.MockTransport(handler)) as http:
+        assert http.get("https://example.test/start").text == "arrived"
+        response = http.get("https://example.test/start", follow_redirects=False)
+        assert response.status_code == 302
+        assert str(response.url) == "https://example.test/start"
+
+
 def test_effective_headers_query_timeout_and_context_lifecycle():
     requests = []
 

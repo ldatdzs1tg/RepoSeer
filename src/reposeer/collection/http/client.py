@@ -115,16 +115,34 @@ class HTTPClient:
         headers: dict[str, str] | None = None,
         *,
         use_cache: bool = True,
+        follow_redirects: bool | None = None,
+        max_response_bytes: int | None = None,
+        public_request: bool = False,
     ) -> httpx.Response:
-        """Execute GET request with rate limiting and exponential backoff retry."""
+        """GET with shared retries; optionally bound decoded bytes and inspect redirects.
+
+        ``public_request`` removes inherited credentials/cookies. Callers fetching
+        arbitrary URLs must also validate destinations and disable auto redirects.
+        """
         if self._sync_client.is_closed:
             raise RuntimeError("HTTPClient is closed")
+        if max_response_bytes is not None and (
+            type(max_response_bytes) is not int or max_response_bytes < 1
+        ):
+            raise ValueError("max_response_bytes must be a positive integer")
         request = self._sync_client.build_request("GET", url, params=params, headers=headers)
+        if public_request:
+            # Crawling arbitrary origins must not forward session credentials/cookies.
+            for key in list(request.headers):
+                if key not in {"host", "accept", "accept-encoding", "user-agent", "connection"}:
+                    del request.headers[key]
         # Log the origin and path only, excluding credentials and query parameters.
         label = f"{request.url.scheme}://{request.url.host}{request.url.path}"
         if use_cache and self.cache is not None:
             cached = self.cache.get(request)
             if cached is not None:
+                if max_response_bytes is not None and len(cached.content) > max_response_bytes:
+                    raise HTTPClientError("Response exceeds byte limit")
                 logger.debug("HTTP GET cache hit: %s", label)
                 return cached
         origin = self._origin(request.url)
@@ -144,12 +162,44 @@ class HTTPClient:
         @retry_dec
         def _request() -> httpx.Response:
             rate_limiter.check_and_wait_if_needed()
-            response = self._sync_client.send(request)
+            response = self._sync_client.send(
+                request,
+                follow_redirects=(
+                    self._sync_client.follow_redirects
+                    if follow_redirects is None else follow_redirects
+                ),
+                stream=max_response_bytes is not None,
+            )
+            if max_response_bytes is not None:
+                try:
+                    body = bytearray()
+                    for chunk in response.iter_bytes():
+                        if len(body) + len(chunk) > max_response_bytes:
+                            raise HTTPClientError("Response exceeds byte limit")
+                        body.extend(chunk)
+                finally:
+                    response.close()
+                original_headers = response.headers
+                response = httpx.Response(
+                    response.status_code,
+                    headers=[
+                        (key, value)
+                        for key, value in original_headers.multi_items()
+                        if key not in {"content-encoding", "content-length"}
+                    ],
+                    content=bytes(body),
+                    request=response.request,
+                    extensions=response.extensions,
+                )
+                # Body is already decoded; preserve original metadata without
+                # applying HTTP content decoding for a second time.
+                response.headers = original_headers
             rate_limiter.update_from_headers(
                 response.headers, rate_limited=is_rate_limited_response(response)
             )
             logger.debug("HTTP GET %s -> %d", label, response.status_code)
-            response.raise_for_status()
+            if not (follow_redirects is False and response.is_redirect):
+                response.raise_for_status()
             return response
 
         try:

@@ -1,0 +1,11 @@
+{
+  "id": 42,
+  "type": "story",
+  "title": "Ask HN: Café &amp; Python?",
+  "by": "fixture_user",
+  "time": 1709251200,
+  "text": "<p>Café &amp; Python preserve MixedCase.</p><p>Second paragraph remains visible.</p><script>SCRIPT_NOISE_918</script>",
+  "score": 12,
+  "kids": [43],
+  "descendants": 1
+}

@@ -1,6 +1,6 @@
 # RepoSeer: Repository & Open-Source Ecosystem Intelligence
 
-RepoSeer targets the probability that a **PyPI package** has confirmed maintenance abandonment in the next **12 calendar months** after `cutoff_at`. GitHub repositories supply observations; repository inactivity, archived status and LLM statements are candidate evidence, not labels or risk probabilities. This repository currently implements collection and resolution through T-015; features, labels, training and inference remain planned.
+RepoSeer targets the probability that a **PyPI package** has confirmed maintenance abandonment in the next **12 calendar months** after `cutoff_at`. GitHub repositories supply observations; repository inactivity, archived status and LLM statements are candidate evidence, not labels or risk probabilities. This repository implements collection and resolution through T-015, external discovery (T-016) and current external crawling (T-017); features, labels, training and inference remain planned.
 
 ## Tech Stack (Sprint 2)
 
@@ -82,6 +82,9 @@ uv run reposeer collect --repos-file repositories.txt --source github
 # Resolve technologies & generate external search terms (T-015)
 reposeer detect-tech pallets/flask
 
+# Fetch external candidates into canonical raw document observations (T-017)
+uv run reposeer crawl-external --from-stored
+
 # Offline vertical GitHub -> technology -> HN candidate -> canonical raw replay
 uv run python scripts/smoke_test.py --offline
 
@@ -106,6 +109,20 @@ handling, optional TTL response caching, logging, and atomic run checkpoints.
 See [Common collector utilities](docs/architecture/collector_utilities.md) for
 configuration, shared-session usage, checkpoint semantics, and the offline smoke test.
 
+
+## External crawling (T-017)
+
+`crawl-external` consumes T-016 discovery JSONL, `ExternalCandidate` objects (Python),
+or a single public URL. It fetches bounded HTML/native API bodies, extracts metadata
+and text, and appends validated observations to `data/raw/external/documents.jsonl`.
+Timeouts, redirect failures, empty content and parser errors remain explicit in
+per-run manifests. Publication dates never prove historical content availability.
+See [crawler contract, CLI and T-018 handoff](docs/architecture/external_crawler.md).
+
+```bash
+uv run reposeer crawl-external --candidates-file data/raw/external/discovery.jsonl
+uv run python scripts/crawl_external_sample.py --data-dir /tmp/reposeer-t017-demo
+```
 
 ## Data contract (T-011)
 
@@ -363,6 +380,8 @@ reposeer detect-tech . --pinned tech:flask --json
 | T-013 | Single/batch GitHub metadata, screening, dedup, raw-first Parquet | Current observation; github is the only collect source |
 | T-014 | Five activity groups, durable journal, batch start/resume, per-group coverage | Moving API pages cannot reconstruct history; errors/budgets retain partial coverage |
 | T-015 | Deterministic stack resolver, aliases/dependency scopes and bounded queries; optional extractive Functional Profiler | Technology queries are not D04 same-function search; profile is not a risk or abandonment label |
+| T-016 | Multi-source external candidate discovery, query/window lineage and manifest | Candidates are unverified; discovery does not fetch article bodies |
+| T-017 | Bounded HTML/native API crawling, metadata/text extraction, durable raw capture and batch manifest | Current observations; historical content availability and relevance remain unverified |
 
 `package_id=pypi:<PEP503-name>`, `repo_id=github:repository:<numeric-id>`;
 future ML grain is `(package_id, cutoff_at)` and `repo_group_id` groups packages sharing a repo.
@@ -457,6 +476,6 @@ version and verified evidence fingerprints; raw self-declared proof references a
 fingerprints. There is no new profile cache persistence layer. A `verified` profile means its
 claims are grounded in accepted text; current metadata alone does not authenticate Internet history.
 
-Full D01 historical mapping, T-016 discovery, T-017 full crawling, D04-D08 semantic relevance and
+Full D01 historical mapping, historical external content reconstruction, D04-D08 semantic relevance and
 specialist evidence agents, D09 labels/features, D10/D11 training/inference, D12 graph and
 D13-D15 reports/orchestration/lineage remain planned. See [v3 pipeline](docs/architecture/pipeline.md).

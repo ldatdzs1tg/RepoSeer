@@ -1,0 +1,16 @@
+{
+  "items": [{
+    "question_id": 42,
+    "title": "Café &amp; Python",
+    "link": "https://stackoverflow.com/questions/42/fixture",
+    "creation_date": 1709251200,
+    "last_edit_date": 1709337600,
+    "body": "<p>Café &amp; Python preserve MixedCase.</p><p>Second paragraph remains visible.</p><script>SCRIPT_NOISE_918</script>",
+    "owner": {"display_name": "Fixture &amp; Author"},
+    "tags": ["python"],
+    "score": 3,
+    "answer_count": 1
+  }],
+  "has_more": false,
+  "quota_remaining": 299
+}

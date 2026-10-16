@@ -1,0 +1,12 @@
+{
+  "id": 42,
+  "title": "Café & Python",
+  "url": "https://dev.to/fixture/python-release",
+  "published_at": "2024-03-01T09:30:00+07:00",
+  "edited_at": "2024-03-02T10:00:00Z",
+  "body_html": "<p>Café &amp; Python preserve MixedCase.</p><p>Second paragraph remains visible.</p><script>SCRIPT_NOISE_918</script>",
+  "user": {"name": "Fixture Author", "username": "fixture"},
+  "tags": ["python", "testing"],
+  "positive_reactions_count": 3,
+  "comments_count": 0
+}

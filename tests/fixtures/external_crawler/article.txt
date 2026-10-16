@@ -1,0 +1,9 @@
+Synthetic release notes
+The Café parser preserves Unicode text and meaningful letter case. This synthetic release improves structured data imports while retaining compatibility with the previous public interface. Readers can inspect every paragraph in this fixture.
+The second paragraph explains a separate maintenance change. Contributors added validation for malformed records and documented the recovery workflow. It must appear exactly once in the extracted article, independently of navigation links.
+Usage and compatibility
+Call Client.parse to import records. The command keeps MixedCase identifiers intact and handles escaped characters such as A & B. Examples describe observable behavior rather than a prediction about the package's future maintenance.
+| Release | Runtime |
+|---|---|
+| VersionOne | PythonTwelve |
+The final paragraph records the limitations of the demonstration. All names and statements here are synthetic test data. Extraction must retain this closing explanation instead of stopping after the first paragraph or returning only a title.
