@@ -37,16 +37,55 @@ The Python pipeline also accepts `ExternalCandidate` instances and URL strings:
 from reposeer.pipelines.external_crawl import ExternalCrawlPipeline
 from reposeer.storage.raw.jsonl import JsonlStorage
 
-candidates = JsonlStorage().read_contract_records(candidate_path)
+from reposeer.contracts import validate_record
+
+candidates = (validate_record(row) for row in JsonlStorage().iter_records(candidate_path))
 with ExternalCrawlPipeline() as crawler:
     result = crawler.crawl(candidates, max_candidates=100)
 ```
 
-Input is validated before fetching. Batches contain 1–1,000 inputs; each call
-attempts at most `max_candidates` (default 100). A partial batch returns an offset
-`next_cursor`. Pass `--cursor` with the **same ordered, unchanged input file** to
-continue in a new run. This is not automatic recovery or content deduplication.
-Rerunning without a cursor appends new observations.
+All inputs are validated before fetching. JSONL is scanned incrementally, with no 1,000-line
+input limit; each invocation attempts at most `max_candidates` (1–1,000, default 100) unique
+groups. Groups are connected by exact canonical URL or stable candidate ID, retain the earliest
+input as primary, and preserve all distinct compact discovery references. This is request
+coalescing, not T-018 content deduplication or semantic relevance. Memory remains proportional
+to unique primaries and compact references; the whole input must be scanned to retain late
+associations. Canonical request subjects are bounded to the current batch.
+
+A partial batch returns `next_cursor`, an offset in the unique-group sequence, never a JSONL
+line offset. A cursor at or beyond the group count is rejected before any HTTP or storage
+side effects; no empty crawl run is created. Continue with the **same ordered, unchanged input file**. Reordering/replacement
+is not detected by this offset: it is not snapshot-safe or automatic durable recovery.
+Rerunning without a cursor appends new capture observations. Manifests distinguish
+`input_candidate_count`, `unique_candidate_count`, `deduplicated_candidate_count` and
+`attempted_candidate_count`; attempted groups retain error attribution even without a response.
+
+### Capture identity and discovery lineage (crawler 0.3.0)
+
+Discovery inputs require `payload.candidate_url`; provider observation `source_url` is never a
+fallback fetch target. Ordinary HTML uses capture `source=web`, `source_item_id=null` and
+canonical `RawRecord.source_record_id=null`. Genuine HN/DEV.to/Stack Exchange captures use
+the fetched native source and its own verified native ID. A discovery ID from another provider
+cannot become that native item's ID. `source_url` retains the selected candidate target;
+`fetched_url` records the actual response URL, including native endpoints and final redirects.
+
+Primary `candidate_raw_record_id` and the full `discovery` snapshot remain compatible. Separate
+`discovery_provider`, `discovery_source_item_id` and `discovery_source_url` identify the discovery
+observation. Compact `discovery_references` preserve contributing raw/run/candidate IDs,
+source item IDs, query/job associations, query-set and window references, including on a
+failed extraction with a real captured response. Source RawRecords are never edited. Failed
+fetches without responses create errors and group references in the manifest, not fake bodies.
+Old valid 0.2.x captures remain readable; their prior source meaning is not silently migrated.
+
+The optional repeatable CLI `--discovery-state PATH` (Python `discovery_state_paths=[path]`)
+loads only explicitly supplied T-016 state. Validate the state format, raw observation contents,
+run/candidate IDs and associations against admitted query jobs before enriching references.
+Validated projection unions can include queries absent from immutable raw payloads. References
+retain the state path and stable join IDs. `discovery_lineage_complete=true` is relative to
+those validated snapshots, not completeness of all discovery history. Missing/partial state
+keeps it false and preserves identifiers for T-018 lookup; arbitrary neighboring files are
+never searched automatically. The strict payload model keeps `extra=forbid` and defaults for
+new fields allow replay of existing captures.
 
 CLI exit codes: 0 for a complete batch, 1 for partial/failed collection or storage
 failure, 2 for invalid input/options. A batch with parser failures remains partial
@@ -128,7 +167,9 @@ version were changed.
 | `available_at` | Observation time: retained response bytes prove availability at fetch time |
 | `http_status` / `raw_body_sha256` | Actual final response status / SHA-256 of decoded body bytes |
 | `payload.record_stage=external_document` | Distinguishes captures from T-016 discovery candidates |
-| `payload.source`, `source_item_id` | Discovery source/provider and native source item ID |
+| `payload.source`, `source_item_id` | Actual capture source and its native ID; `web` / null for ordinary HTML |
+| `payload.discovery_provider`, `discovery_source_item_id`, `discovery_source_url` | Separate attribution to the upstream discovery observation |
+| `payload.discovery_references`, `discovery_lineage_complete` | Grouped compact lineage; completeness only with explicitly validated projection snapshots |
 | `payload.source_url`, `url`, `fetched_url` | Original URL, document/final website URL, actual fetched endpoint (native API when applicable) |
 | `payload.response_body_base64` | Exact HTTP-decoded bytes for independent hash checks/replay |
 | `payload.html` / `native_payload` | Source HTML text / native JSON, without renaming provider fields |

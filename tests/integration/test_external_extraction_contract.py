@@ -99,7 +99,8 @@ def test_complete_html_text_and_metadata_survive_raw_replay(tmp_path, source):
             "FOOTER_NOISE_918",
         ]
     )
-    assert p["source"] == source
+    assert p["source"] == "web" and raw.source_record_id is None
+    assert p["discovery_provider"] == source
     assert p["title"] == "Synthetic release notes"
     assert p["author"] == "Fixture Author"
     assert p["published_at"] == "2024-03-02T04:30:00.000Z"
@@ -628,3 +629,16 @@ def test_exhausted_timeout_per_source_continues_batch(tmp_path, source, error_ty
     assert result.collection_result.errors[0].code == "network_error"
     assert result.collection_result.errors[0].retryable
     validate_external_document_record(result.collection_result.records[0])
+
+
+def test_capture_identity_rejects_borrowed_native_id_and_allows_legacy_replay(captured_record):
+    altered = captured_record.model_copy(deep=True)
+    altered.source_record_id = altered.payload["source_item_id"] = "hn:42"
+    with pytest.raises(ValueError, match="borrow"):
+        validate_external_document_record(altered)
+    altered.payload["crawler_version"] = "0.2.2"
+    altered.payload["source"] = "hackernews"
+    for key in ("candidate_id", "discovery_provider", "discovery_source_item_id", "discovery_source_url",
+                "discovery_references", "discovery_lineage_complete"):
+        altered.payload.pop(key, None)
+    validate_external_document_record(altered)

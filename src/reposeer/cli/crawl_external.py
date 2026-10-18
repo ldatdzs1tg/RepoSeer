@@ -5,6 +5,7 @@ from typing import Annotated
 
 import typer
 
+from reposeer.contracts import validate_record
 from reposeer.pipelines.external_crawl import ExternalCrawlPipeline
 from reposeer.storage.paths import StoragePaths, paths
 from reposeer.storage.raw.jsonl import JsonlStorage
@@ -21,6 +22,9 @@ def main(
     from_stored: Annotated[
         bool, typer.Option("--from-stored", help="Read data/raw/external/discovery.jsonl.")
     ] = False,
+    discovery_state: Annotated[
+        list[Path] | None, typer.Option("--discovery-state", help="Explicit matching T-016 state; repeat for multiple runs.")
+    ] = None,
     data_dir: Annotated[Path | None, typer.Option("--data-dir")] = None,
     max_candidates: Annotated[int, typer.Option("--max-candidates", min=1, max=1000)] = 100,
     cursor: Annotated[
@@ -41,13 +45,14 @@ def main(
             path = candidates_file or storage_paths.raw_dir / "external" / "discovery.jsonl"
             if not path.is_file():
                 raise ValueError("candidate_file_missing")
-            candidates = JsonlStorage().read_contract_records(path)
+            candidates = (validate_record(value) for value in JsonlStorage().iter_records(path))
         with ExternalCrawlPipeline(
             storage_paths=storage_paths,
             max_redirects=max_redirects,
             max_response_bytes=max_response_bytes,
         ) as pipeline:
-            result = pipeline.crawl(candidates, max_candidates=max_candidates, cursor=cursor)
+            kwargs = {"discovery_state_paths": discovery_state} if discovery_state else {}
+            result = pipeline.crawl(candidates, max_candidates=max_candidates, cursor=cursor, **kwargs)
     except (ValueError, TypeError):
         # Do not print validation errors containing untrusted URL/payload input.
         typer.echo("Invalid candidate input, file or cursor.", err=True)

@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -116,7 +117,14 @@ def test_discovery_to_crawl_raw_replay_and_append(tmp_path):
     validate_external_document_record(raw)
     assert raw.payload["record_stage"] == "external_document"
     assert raw.repo_id is raw.package_id is None
-    assert raw.source_record_id == "hn:42"
+    assert raw.source_record_id is None
+    assert raw.payload["discovery_provider"] == "hackernews"
+    assert raw.payload["discovery_source_item_id"] == "hn:42"
+    assert raw.payload["discovery_source_url"] == candidates[0].source_url
+    assert not raw.payload["discovery_lineage_complete"]
+    assert {ref["candidate_raw_record_id"] for ref in raw.payload["discovery_references"]} == {
+        candidates[0].raw_record_id, newer.raw_record_id,
+    }
     assert calls.count("https://blog.example/article") == 2
     assert not any("firebaseio.com" in url or "news.ycombinator.com" in url for url in calls)
     assert raw.source_url == "https://blog.example/article"
@@ -126,7 +134,7 @@ def test_discovery_to_crawl_raw_replay_and_append(tmp_path):
     assert raw.available_at == raw.payload["content_available_at"] == raw.retrieved_at
     assert raw.payload["historical_version_status"] == "observation_only"
     assert raw.payload["url"] == "https://blog.example/final"
-    assert raw.payload["source"] == "hackernews"
+    assert raw.payload["source"] == "web"
     assert raw.payload["discovery"] == original
     assert raw.payload["candidate_raw_record_id"] == candidates[0].raw_record_id
     assert raw.payload["html"] == HTML
@@ -321,6 +329,43 @@ def test_budget_cursor_and_failed_batch(tmp_path):
         for cursor in ["-1", "bad", "3"]:
             with pytest.raises(ValueError):
                 crawler.crawl(urls, cursor=cursor)
+
+
+@pytest.mark.parametrize(
+    "candidate_paths,cursor,expected_path",
+    [
+        (["1", "2", "3"], "3", None),
+        (["1", "2", "3"], "4", None),
+        (["1", "2", "3"], "2", "/3"),
+        (["1", "1", "2"], "2", None),
+        (["1", "2", "3"], None, "/1"),
+        (["1", "2", "3"], "0", "/1"),
+        ([], None, None),
+    ],
+)
+def test_cursor_requires_remaining_candidate_groups(tmp_path, candidate_paths, cursor, expected_path):
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+
+    with HTTPClient(transport=httpx.MockTransport(handler)) as http:
+        crawler = pipeline(tmp_path, http)
+        candidates = [f"https://blog.example/{path}" for path in candidate_paths]
+        if expected_path is None:
+            reason = "no_remaining_candidates" if candidates else "provide_at_least_one_candidate"
+            with pytest.raises(ValueError, match=f"^{reason}$"):
+                crawler.crawl(candidates, max_candidates=1, cursor=cursor)
+            assert calls == []
+            assert not (tmp_path / "raw" / "external" / "documents.jsonl").exists()
+            assert not list(tmp_path.rglob("crawl_manifest_*.json"))
+        else:
+            result = crawler.crawl(candidates, max_candidates=1, cursor=cursor)
+            assert calls == [expected_path]
+            assert len(result.collection_result.records) == 1
+            assert result.collection_result.records[0].source_url == f"https://blog.example{expected_path}"
+            assert result.collection_result.metadata.pagination_complete == (cursor == "2")
 
 
 @pytest.mark.parametrize(
@@ -657,3 +702,168 @@ def test_invalid_discovery_candidate_url_has_no_observation_url_fallback(tmp_pat
             pipeline(tmp_path, http).crawl([candidate])
     assert candidate.model_dump(mode="json") == original
     assert not StoragePaths(tmp_path).raw_path("external", "documents").exists()
+
+
+def discovery_observation(url, *, provider="hackernews", item_id="hn:42", query_id="query:a"):
+    candidate = ExternalCandidate(title="Unverified hit", url=url, source=provider,
+                                  source_item_id=item_id, query_id=query_id, query="Python packages",
+                                  query_intent="direct_package", query_associations=[
+                                      {"query_id": query_id, "job_id": "job:" + query_id, "provider": provider}])
+    return RawRecord(
+        schema_version="0.1.0", record_type="raw_record", raw_record_id=f"raw:{uuid4()}",
+        run_id=str(uuid4()), source="web_article", source_record_type="article", source_record_id=item_id,
+        source_url={"hackernews": "https://hn.algolia.com/api/v1/search",
+                    "devto": "https://dev.to/api/articles/search",
+                    "stackexchange": "https://api.stackexchange.com/2.3/search/advanced"}[provider],
+        repo_id=None, package_id=None,
+        retrieved_at="2026-10-16T06:00:00.000Z", event_at=None, available_at=None,
+        http_status=None, raw_body_sha256=None,
+        payload=dict(candidate.model_dump(mode="json"), record_stage="discovery_candidate",
+                     discovery_provider=provider, candidate_url=url),
+    )
+
+
+@pytest.mark.parametrize("failure", [None, "content_type", "timeout"])
+def test_grouped_observations_preserve_all_lineage_and_failure_attribution(tmp_path, failure):
+    url = "https://blog.example/article"
+    candidates = [discovery_observation(url), discovery_observation(url, query_id="query:b"),
+                  discovery_observation(url, provider="devto", item_id="devto:9", query_id="query:c"),
+                  discovery_observation("https://blog.example/other", item_id="hn:88")]
+    originals = [candidate.model_dump_json() for candidate in candidates]
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        if request.url.path == "/article" and failure == "timeout":
+            raise httpx.ReadTimeout("injected", request=request)
+        if request.url.path == "/article" and failure == "content_type":
+            return httpx.Response(200, json={"unexpected": "body"})
+        return httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+
+    with HTTPClient(transport=httpx.MockTransport(handler), max_retries=1) as http:
+        result = pipeline(tmp_path, http).crawl(iter([*candidates, candidates[0]]))
+    assert calls == ["/article", "/other"]
+    manifest = json.loads(result.manifest_path.read_text())
+    group = manifest["candidate_groups"][0]
+    references = group["discovery_references"]
+    assert bool(group["errors"]) is bool(failure)
+    if failure:
+        assert group["errors"] == [result.collection_result.errors[0].model_dump(mode="json")]
+    assert len(references) == 3 and not group["discovery_lineage_complete"]
+    assert {ref["candidate_raw_record_id"] for ref in references} == {r.raw_record_id for r in candidates[:3]}
+    assert {ref["query_id"] for ref in references} == {"query:a", "query:b", "query:c"}
+    assert {ref["discovery_provider"] for ref in references} == {"hackernews", "devto"}
+    if failure == "timeout":
+        assert len(result.collection_result.records) == 1 and result.collection_result.errors
+    else:
+        raw = result.collection_result.records[0]
+        assert raw.payload["discovery_references"] == references
+        assert raw.payload["source"] == "web" and raw.source_record_id is None
+        assert raw.payload["content_status"] == ("unavailable" if failure else "full")
+        validate_external_document_record(raw)
+    assert [candidate.model_dump_json() for candidate in candidates] == originals
+
+
+@pytest.mark.parametrize("state_mode", ["available", "missing", "wrong_query", "wrong_raw", "missing_union", "missing_raw"])
+def test_explicit_projection_state_retains_final_query_union(tmp_path, monkeypatch, state_mode):
+    from reposeer.technology.models import SearchPlan, SearchTerm
+
+    plan = SearchPlan(terms=[SearchTerm(query=query, intent="direct_package", platform="hackernews")
+                            for query in ("query a", "query b")])
+    monkeypatch.setattr("reposeer.pipelines.external.SearchTermGenerator.build_search_plan", lambda self, **kw: plan)
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.host)
+        if request.url.host == "hn.algolia.com":
+            return httpx.Response(200, json={"hits": [{"objectID": "42", "title": "Hit",
+                                                       "url": "https://blog.example/article"}], "nbPages": 1})
+        return httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+
+    with HTTPClient(transport=httpx.MockTransport(handler)) as http:
+        discovery = ExternalPipeline(http_client=http, storage_paths=StoragePaths(tmp_path), clock=lambda: NOW)
+        found = discovery.discover("pypi:flask", sources=["hackernews"])
+        candidates = JsonlStorage().read_contract_records(found.output_path)
+        source_bytes = found.output_path.read_bytes()
+        assert len(candidates) == 1 and len(candidates[0].payload["query_associations"]) == 1
+        state_path = Path(found.discovery_manifest["candidate_projection_path"])
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if state_mode == "wrong_query":
+            state["candidate_projections"][0]["query_associations"][0]["query"] = "forged"
+        if state_mode == "wrong_raw":
+            state["records"][0]["payload"]["title"] = "Altered snapshot"
+        if state_mode == "missing_union":
+            state["candidate_projections"][0]["query_associations"].pop()
+        if state_mode == "missing_raw":
+            state["candidate_projections"] = []
+        if state_mode.startswith("wrong") or state_mode in {"missing_union", "missing_raw"}:
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            with pytest.raises(ValueError, match="projection"):
+                pipeline(tmp_path, http).crawl(candidates, discovery_state_paths=[state_path])
+            assert calls == ["hn.algolia.com", "hn.algolia.com"]
+        else:
+            result = pipeline(tmp_path, http).crawl(
+                candidates, discovery_state_paths=[state_path] if state_mode == "available" else [])
+            raw = result.collection_result.records[0]
+            references = raw.payload["discovery_references"]
+            assert raw.payload["discovery_lineage_complete"] is (state_mode == "available")
+            assert references[0]["discovery_run_id"] == found.run_id
+            assert references[0]["candidate_id"] == candidates[0].payload["candidate_id"]
+            assert len(references[0]["query_associations"]) == (2 if state_mode == "available" else 1)
+            assert calls == ["hn.algolia.com", "hn.algolia.com", "blog.example"]
+        assert found.output_path.read_bytes() == source_bytes
+
+
+def test_large_stored_discovery_streams_bounded_unique_batches(tmp_path, monkeypatch):
+    import reposeer.cli.crawl_external as command
+
+    paths = StoragePaths(tmp_path)
+    source_path = paths.raw_path("external", "discovery")
+    JsonlStorage().append_contract_records_durable(source_path, (
+        discovery_observation(f"https://blog.example/{index % 7}", item_id=f"hn:{index % 7 + 1}",
+                              query_id=f"query:{index}") for index in range(1005)))
+    source_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+
+    class StreamingStorage(JsonlStorage):
+        def read_contract_records(self, path):
+            raise AssertionError("Stored CLI must use the incremental JSONL iterator")
+
+    monkeypatch.setattr(command, "JsonlStorage", StreamingStorage)
+    with HTTPClient(transport=httpx.MockTransport(handler)) as http:
+        monkeypatch.setattr(command, "ExternalCrawlPipeline", lambda **kw: pipeline(tmp_path, http))
+        args = ["crawl-external", "--from-stored", "--data-dir", str(tmp_path), "--max-candidates", "5"]
+        first = CliRunner().invoke(app, args)
+        assert first.exit_code == 1, first.output  # More unique groups remain.
+        assert calls == [f"/{index}" for index in range(5)]
+        second = CliRunner().invoke(app, args + ["--cursor", "5"])
+        assert second.exit_code == 0, second.output
+    assert calls == [f"/{index}" for index in range(7)]
+    manifests = [json.loads(path.read_text()) for path in (paths.metadata_dir / "collection_runs").glob("crawl_manifest_*.json")]
+    assert {manifest["attempted_candidate_count"] for manifest in manifests} == {2, 5}
+    assert all(manifest["input_candidate_count"] == 1005 and manifest["unique_candidate_count"] == 7
+               and manifest["deduplicated_candidate_count"] == 998 for manifest in manifests)
+    assert hashlib.sha256(source_path.read_bytes()).hexdigest() == source_hash
+    assert len(JsonlStorage().read_contract_records(paths.raw_path("external", "documents"))) == 7
+
+
+@pytest.mark.parametrize("url,native,capture_id,response", [
+    ("https://news.ycombinator.com/item?id=42", "hackernews", "hn:42",
+     {"id": 42, "text": "<p>A native Hacker News discussion body.</p>"}),
+    ("https://stackoverflow.com/questions/42/example", "stackexchange", "se:42",
+     {"items": [{"question_id": 42, "body": "<p>A native Stack Exchange question body.</p>"}]}),
+])
+def test_foreign_discovery_id_is_not_native_capture_identity(tmp_path, url, native, capture_id, response):
+    candidate = discovery_observation(url, provider="devto", item_id="devto:9")
+    with HTTPClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=response))) as http:
+        result = pipeline(tmp_path, http).crawl([candidate])
+    raw = result.collection_result.records[0]
+    assert result.collection_result.status == "complete"
+    assert raw.payload["source"] == native and raw.source_record_id == capture_id
+    assert raw.payload["discovery_provider"] == "devto"
+    assert raw.payload["discovery_source_item_id"] == "devto:9"
+    validate_external_document_record(raw)

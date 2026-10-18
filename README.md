@@ -119,11 +119,26 @@ Timeouts, redirect failures, empty content and parser errors remain explicit in
 per-run manifests. Publication dates never prove historical content availability.
 For discovery RawRecords, the fetch target is required `payload.candidate_url`; missing or
 invalid URLs fail before fetching, with no fallback to the provider observation `source_url`.
-Each batch keeps the first observation per candidate ID or canonical URL in input order,
-preserving that observation's raw ID/native ID and discovery lineage without rewriting raw.
-Cursor offsets address this deduplicated batch; resume with the same ordered inputs.
-Manifests retain original, unique and deduplicated candidate counts. Native routing and URL
-safety checks still apply to every selected fetch and redirect.
+Candidate groups join exact canonical URLs/candidate IDs and keep the first input as the
+primary fetch target. One fetch attempt per group retains all compact `discovery_references`,
+including raw/run/candidate IDs and query/job associations, without rewriting T-016 raw.
+For an HN-discovered blog, capture `source=web` and `source_record_id=null`; HN identity stays
+in `discovery_provider`, `discovery_source_item_id`, `discovery_source_url` and lineage. Genuine
+native captures retain only their own verified native item ID; final redirects stay in `fetched_url`.
+
+The CLI scans JSONL incrementally and accepts more than 1,000 observations; `--max-candidates`
+(1–1,000) bounds attempted groups, not input lines. Canonical requests contain only the current
+batch. Counts distinguish input observations, unique groups and attempts. Grouping still uses
+memory proportional to unique primaries and compact references, and scans the whole input to
+retain later associations. Cursor offsets address the deterministic unique sequence and require
+the same ordered, unchanged inputs; the offset is not a durable snapshot checkpoint.
+
+Pass `--discovery-state PATH` (repeatable; Python: `discovery_state_paths=[path]`) only for
+explicitly known T-016 states. Version, raw integrity, candidate IDs and query/job associations
+are checked before use. Without them `discovery_lineage_complete=false`; stable run/raw/candidate
+IDs support later projection joins. Complete means relative to the supplied projection snapshots,
+not a globally exhaustive discovery history. No neighboring metadata files are loaded implicitly.
+Native routing, URL safety, redirect and response-size limits remain enforced.
 See [crawler contract, CLI and T-018 handoff](docs/architecture/external_crawler.md).
 
 ```bash

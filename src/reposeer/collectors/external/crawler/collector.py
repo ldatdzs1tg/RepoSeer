@@ -6,6 +6,7 @@ import html
 import json
 import re
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -40,7 +41,7 @@ from reposeer.exceptions import ExtractionError, HTTPClientError, RateLimitExcee
 from reposeer.schemas.external.candidate import ExternalCandidate
 
 CandidateInput = RawRecord | ExternalCandidate | str
-CRAWLER_VERSION = "0.2.2"
+CRAWLER_VERSION = "0.3.0"
 EXTRACTION_REASONS = {
     "empty_response",
     "unsupported_content_type",
@@ -56,8 +57,44 @@ EXTRACTION_REASONS = {
 }
 
 
-def candidate_data(value: CandidateInput) -> dict[str, Any]:
+
+@dataclass
+class CandidateGroup:
+    """One primary fetch and compact references to every contributing observation."""
+
+    primary: CandidateInput
+    references: dict[str, dict[str, Any]] = field(default_factory=dict)
+    errors: list[dict[str, Any]] = field(default_factory=list)
+
+
+def discovery_reference(data: dict[str, Any]) -> dict[str, Any]:
+    snapshot = data.get("discovery") or {}
+    payload = snapshot.get("payload", snapshot)
+    values = {
+        "candidate_raw_record_id": data.get("candidate_raw_record_id"),
+        "candidate_id": data.get("candidate_id"),
+        "discovery_run_id": snapshot.get("run_id"),
+        "discovery_provider": data.get("discovery_provider"),
+        "discovery_source_item_id": data.get("discovery_source_item_id"),
+        "discovery_source_url": data.get("discovery_source_url"),
+    }
+    for name in ("query_id", "query_intent", "query_associations", "query_set_hash",
+                 "query_version", "context_level", "raw_record_ids", "window_start", "window_end", "cutoff_at"):
+        if name in payload:
+            values[name] = payload[name]
+    return {name: value for name, value in values.items() if value is not None}
+
+
+def candidate_data(value: CandidateInput | CandidateGroup) -> dict[str, Any]:
     """Retain discovery lineage verbatim; association is not verified relevance."""
+    if isinstance(value, CandidateGroup):
+        data = candidate_data(value.primary)
+        references = sorted(value.references.values(), key=lambda ref: json.dumps(ref, sort_keys=True))
+        data["discovery_references"] = references
+        data["discovery_lineage_complete"] = bool(references) and all(
+            ref.get("projection_verified") is True for ref in references
+        )
+        return data
     if isinstance(value, RawRecord):
         value = validate_record(value)
         if (
@@ -73,10 +110,11 @@ def candidate_data(value: CandidateInput) -> dict[str, Any]:
         return {
             "url": candidate_url,
             "candidate_id": value.payload.get("candidate_id"),
-            "source": value.payload.get("discovery_provider")
-            or value.payload.get("source")
-            or "web",
-            "source_item_id": value.source_record_id,
+            "source": "web",
+            "source_item_id": None,
+            "discovery_provider": value.payload.get("discovery_provider") or value.payload.get("source"),
+            "discovery_source_item_id": value.source_record_id,
+            "discovery_source_url": value.source_url,
             "title": value.payload.get("title"),
             "repo_id": value.repo_id,
             "package_id": value.package_id,
@@ -85,7 +123,9 @@ def candidate_data(value: CandidateInput) -> dict[str, Any]:
         }
     if isinstance(value, ExternalCandidate):
         data = ExternalCandidate.model_validate(value.model_dump()).model_dump(mode="json")
-        return {**data, "discovery": dict(data)}
+        return {**data, "discovery": dict(data), "source": "web", "source_item_id": None,
+                "discovery_provider": data["source"], "discovery_source_item_id": data["source_item_id"],
+                "discovery_source_url": data.get("source_item_url")}
     if isinstance(value, str):
         # This validates syntax, not identity, DNS or package relevance.
         canonical_article_url(value)
@@ -98,15 +138,16 @@ def native_endpoint(data: dict[str, Any]) -> tuple[str, str | None, str | None]:
     url = data["url"]
     parts = urlsplit(url)
     host = parts.hostname.lower()
-    source_id = data.get("source_item_id") or ""
+    provider = data.get("discovery_provider") or data.get("source")
+    source_id = data.get("discovery_source_item_id") or data.get("source_item_id") or ""
     if host == "news.ycombinator.com" and parts.path == "/item":
         item_id = parse_qs(parts.query).get("id", [""])[0]
         if not re.fullmatch(r"[1-9][0-9]*", item_id):
             raise ValueError("invalid_hn_item_id")
-        if source_id and source_id not in {item_id, f"hn:{item_id}"}:
+        if provider == "hackernews" and source_id and source_id not in {item_id, f"hn:{item_id}"}:
             raise ValueError("native_identity_mismatch")
         return f"https://hacker-news.firebaseio.com/v0/item/{item_id}.json", "hackernews", item_id
-    if host == "dev.to" and data.get("source") == "devto":
+    if host == "dev.to" and provider == "devto":
         match = re.fullmatch(r"(?:devto:)?([1-9][0-9]*)", source_id)
         if match:
             return f"https://dev.to/api/articles/{match[1]}", "devto", match[1]
@@ -114,7 +155,7 @@ def native_endpoint(data: dict[str, Any]) -> tuple[str, str | None, str | None]:
         match = re.match(r"^/questions/([1-9][0-9]*)(?:/|$)", parts.path)
         if match:
             item_id = match[1]
-            if source_id and source_id not in {item_id, f"se:{item_id}"}:
+            if provider == "stackexchange" and source_id and source_id not in {item_id, f"se:{item_id}"}:
                 raise ValueError("native_identity_mismatch")
             site = "stackoverflow" if host == "stackoverflow.com" else host.split(".")[0]
             return (
@@ -165,7 +206,7 @@ class ExternalCrawlerCollector:
             self.repository_scopes[package] = scope
 
     def collect(
-        self, request: CollectionRequest, candidates: Sequence[CandidateInput]
+        self, request: CollectionRequest, candidates: Sequence[CandidateInput | CandidateGroup]
     ) -> CollectionResult:
         request = validate_record(request)
         if not isinstance(request, CollectionRequest):
@@ -198,10 +239,10 @@ class ExternalCrawlerCollector:
                 # Check the candidate too, even when fetching a fixed native endpoint.
                 self.policy.validate(data["url"])
                 endpoint, native, item_id = native_endpoint(data)
+                data["source"] = native or "web"
                 if native:
-                    data["source"] = native
                     prefix = {"hackernews": "hn", "devto": "devto", "stackexchange": "se"}[native]
-                    data["source_item_id"] = data.get("source_item_id") or f"{prefix}:{item_id}"
+                    data["source_item_id"] = f"{prefix}:{item_id}"
                 response = self.fetcher.fetch_response(
                     endpoint,
                     policy=self.policy,
@@ -224,6 +265,12 @@ class ExternalCrawlerCollector:
                     "source_item_id": data.get("source_item_id"),
                     "candidate_raw_record_id": data.get("candidate_raw_record_id"),
                     "discovery": data.get("discovery"),
+                    "candidate_id": data.get("candidate_id"),
+                    "discovery_provider": data.get("discovery_provider"),
+                    "discovery_source_item_id": data.get("discovery_source_item_id"),
+                    "discovery_source_url": data.get("discovery_source_url"),
+                    "discovery_references": data.get("discovery_references", [discovery_reference(data)] if data.get("discovery") else []),
+                    "discovery_lineage_complete": data.get("discovery_lineage_complete", False),
                     "response_body_base64": base64.b64encode(response.content).decode("ascii"),
                     "content_type": response.headers.get("content-type", "").strip() or None,
                     "etag": response.headers.get("etag", "").strip() or None,
@@ -369,6 +416,8 @@ class ExternalCrawlerCollector:
                         raw_record_id=raw.raw_record_id if raw else None,
                     )
                 )
+                if isinstance(candidate, CandidateGroup):
+                    candidate.errors.append(errors[-1].model_dump(mode="json"))
             if raw is not None:
                 # RawRecord construction copies payload; attach the completed capture explicitly.
                 raw.payload = payload

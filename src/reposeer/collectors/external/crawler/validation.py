@@ -36,6 +36,12 @@ class ExternalDocumentPayload(BaseModel):
     source_item_id: NonEmpty | None
     candidate_raw_record_id: RawRecordId | None
     discovery: dict[str, JsonValue] | None
+    candidate_id: NonEmpty | None = None
+    discovery_provider: NonEmpty | None = None
+    discovery_source_item_id: NonEmpty | None = None
+    discovery_source_url: HttpUrl | None = None
+    discovery_references: list[dict[str, JsonValue]] = Field(default_factory=list)
+    discovery_lineage_complete: bool = False
     response_body_base64: NonEmpty
     content_type: NonEmpty | None
     etag: NonEmpty | None
@@ -104,6 +110,19 @@ class ExternalDocumentPayload(BaseModel):
                 or self.discovery.get("raw_record_id") != self.candidate_raw_record_id
             ):
                 raise ValueError("candidate lineage mismatch")
+        if self.crawler_version == "0.3.0":
+            if self.source == "web" and self.source_item_id is not None:
+                raise ValueError("web captures cannot borrow discovery native IDs")
+            if self.candidate_raw_record_id is not None and not any(
+                ref.get("candidate_raw_record_id") == self.candidate_raw_record_id
+                for ref in self.discovery_references
+            ):
+                raise ValueError("primary observation missing from discovery references")
+        if self.discovery_lineage_complete and (
+            not self.discovery_references
+            or not all(ref.get("projection_verified") is True for ref in self.discovery_references)
+        ):
+            raise ValueError("complete discovery lineage requires validated projection references")
         return self
 
 
