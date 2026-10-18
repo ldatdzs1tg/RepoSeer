@@ -112,6 +112,7 @@ class FunctionalProfiler:
                 TypeAdapter(UtcTimestamp).validate_python(cutoff_at, strict=True)
             except ValidationError:
                 return unavailable("invalid_cutoff")
+        base["cutoff_at"] = cutoff_at
         if not sources:
             return unavailable("no_source")
         try:

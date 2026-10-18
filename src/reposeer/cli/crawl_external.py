@@ -24,7 +24,7 @@ def main(
     data_dir: Annotated[Path | None, typer.Option("--data-dir")] = None,
     max_candidates: Annotated[int, typer.Option("--max-candidates", min=1, max=1000)] = 100,
     cursor: Annotated[
-        str | None, typer.Option("--cursor", help="Offset in the same input batch.")
+        str | None, typer.Option("--cursor", help="Offset in the same deduplicated candidate batch.")
     ] = None,
     max_redirects: Annotated[int, typer.Option("--max-redirects", min=0, max=20)] = 5,
     max_response_bytes: Annotated[

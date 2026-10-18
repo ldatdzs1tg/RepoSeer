@@ -95,6 +95,8 @@ def test_hackernews_client_search_page_with_window(tmp_path):
     assert c1.url == "https://palletsprojects.com/blog/flask-3"
     assert c1.source == "hackernews"
     assert c1.source_item_id == "hn:1001"
+    assert c1.source_item_url == "https://news.ycombinator.com/item?id=1001"
+    assert c1.native_payload["objectID"] == "1001"
     assert c1.score == 42.0
     assert c1.author == "davidism"
     assert c1.comment_count == 15
@@ -301,7 +303,7 @@ def test_devto_client_search_page_with_window_cutoff(tmp_path):
         )
 
     assert len(captured_requests) == 1
-    assert captured_requests[0].url.path == "/api/articles"
+    assert captured_requests[0].url.path == "/api/articles/search"
     assert captured_requests[0].url.params["q"] == "flask python"
     assert captured_requests[0].url.params["per_page"] == "10"
     assert captured_requests[0].url.params["page"] == "1"
@@ -309,6 +311,7 @@ def test_devto_client_search_page_with_window_cutoff(tmp_path):
     # Only Article 2 should survive both cutoff (future) and start (past) filtering
     assert len(result.candidates) == 1
     c = result.candidates[0]
+    assert result.native_items_observed == 3
     assert c.title == "Building REST APIs with Flask"
     assert c.source == "devto"
     assert c.source_item_id == "devto:202"
@@ -319,7 +322,7 @@ def test_devto_client_search_page_with_window_cutoff(tmp_path):
     assert c.snippet == "Step by step Flask guide"
     assert c.publication_date == datetime(2024, 6, 15, 10, 0, 0, tzinfo=UTC)
 
-    # Reached past window_start, so has_more must be False
+    # The native page is shorter than per_page, so pagination is exhausted.
     assert result.has_more is False
     assert result.next_cursor is None
 
@@ -392,3 +395,27 @@ def test_providers_backward_compatible_search():
         items = client.search("test", limit=5)
         assert len(items) == 1
         assert isinstance(items[0], ExternalCandidate)
+
+
+def test_devto_old_relevance_hit_does_not_end_pagination():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        first_page = request.url.params["page"] == "1"
+        return httpx.Response(200, json=[{
+            "id": 1 if first_page else 2, "title": "DEV search hit",
+            "url": "https://dev.to/author/story",
+            "published_timestamp": "2020-01-01T00:00:00Z" if first_page else "2024-06-01T00:00:00Z",
+        }])
+
+    with HTTPClient(transport=httpx.MockTransport(handler)) as http:
+        client = DevToClient(http_client=http)
+        first = client.search_page("flask", window_start=datetime(2024, 1, 1, tzinfo=UTC), page_size=1)
+        assert first.candidates == [] and first.has_more and first.next_cursor == "2"
+        second = client.search_page("flask", window_start=datetime(2024, 1, 1, tzinfo=UTC),
+                                    cursor=first.next_cursor, page_size=1)
+    assert second.candidates[0].source_item_id == "devto:2"
+    assert requests[0].url.path == "/api/articles/search"
+    assert requests[1].url.params["q"] == "flask" and requests[1].url.params["page"] == "2"
+    assert not client.supports_historical_window

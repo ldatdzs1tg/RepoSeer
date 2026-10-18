@@ -20,6 +20,7 @@ class StackExchangeClient(DiscoveryProvider):
 
     provider_name: str = "stackexchange"
     supports_historical_window: bool = True
+    search_filters = {"sort": "creation", "order": "desc", "endpoint": "search/advanced"}
 
     def __init__(
         self,
@@ -83,10 +84,13 @@ class StackExchangeClient(DiscoveryProvider):
             if not isinstance(data, dict):
                 raise ValueError("invalid_stackexchange_payload")
             if data.get("error_id"):
-                msg = data.get("error_message", "Unknown StackExchange error")
+                # Native error text may echo request credentials; retain only safe error categories.
                 error_name = data.get("error_name")
-                detail = f"{error_name}: {msg}" if error_name else msg
-                raise HTTPClientError(f"StackExchange API error {data['error_id']} ({detail})")
+                safe_name = error_name if error_name in {
+                    "throttle_violation", "access_denied", "key_required", "invalid_access_token",
+                    "temporarily_unavailable", "internal_error", "bad_parameter",
+                } else "provider_error"
+                raise HTTPClientError(f"StackExchange API error ({safe_name})")
 
             items = data.get("items")
             if not isinstance(items, list):
@@ -142,10 +146,16 @@ class StackExchangeClient(DiscoveryProvider):
                         author=author,
                         comment_count=comment_count,
                         snippet=snippet,
+                        source_item_url=url,
+                        native_payload={key: item[key] for key in (
+                            "question_id", "title", "link", "creation_date", "tags", "score", "answer_count",
+                        ) if key in item},
                     )
                 )
 
-            has_more = bool(data.get("has_more", False))
+            if type(data.get("has_more")) is not bool:
+                raise ValueError("invalid_stackexchange_pagination")
+            has_more = data["has_more"]
             next_cursor = str(page + 1) if has_more else None
             total_hits_reported = data.get("total") if isinstance(data.get("total"), int) else None
 
@@ -155,6 +165,7 @@ class StackExchangeClient(DiscoveryProvider):
 
             result = DiscoveryPageResult(
                 candidates=candidates,
+                native_items_observed=len(items),
                 page_number=page,
                 has_more=has_more,
                 next_cursor=next_cursor,

@@ -11,6 +11,7 @@ class RSSProvider(DiscoveryProvider):
 
     provider_name: str = "rss"
     supports_historical_window: bool = False
+    is_available: bool = False
 
     def __init__(self, feed_urls: list[str] | None = None):
         self.feed_urls = feed_urls or []

@@ -2,8 +2,10 @@
 
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
+import pytest
 from typer.testing import CliRunner
 
 from reposeer.cli.app import app
@@ -69,10 +71,12 @@ def test_cli_discover_external_target(tmp_path: Path, monkeypatch):
     assert discovery_file.exists()
     records = JsonlStorage().read_contract_records(discovery_file)
     assert len(records) > 0
+    assert all(raw.repo_id is None and raw.payload["search_target_repo_id"] is None for raw in records)
 
 
-def test_cli_discover_external_from_stored(tmp_path: Path, monkeypatch):
-    """Test CLI discover-external reading stored raw repositories."""
+@pytest.mark.parametrize("damage", [None, "missing", "conflicting_id", "modified", "wrong_repository", "legacy_state"])
+def test_cli_discover_external_from_stored(tmp_path: Path, monkeypatch, damage):
+    """Resume selects exact raw A despite raw B for the same repo; corrupt/missing A fails closed."""
     transport = _mock_hn_transport()
     from reposeer.collection.http.client import HTTPClient
 
@@ -109,6 +113,54 @@ def test_cli_discover_external_from_stored(tmp_path: Path, monkeypatch):
     assert discovery_file.exists()
     records = JsonlStorage().read_contract_records(discovery_file)
     assert len(records) > 0
+    manifest_file = next((tmp_path / "metadata/collection_runs").glob("discovery_manifest_*.json"))
+    run_id = json.loads(manifest_file.read_text(encoding="utf-8"))["run_id"]
+    state_file = paths.metadata_dir / "collection_runs" / f"discovery_state_{run_id}.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state["scope"]["input_raw_record_id"] == raw_record.raw_record_id
+    assert state["scope"]["input_repo_id"] == raw_record.repo_id
+    assert state["scope"]["input_observation_fingerprint"]
+    other = raw_record.model_copy(update={"raw_record_id": f"raw:{uuid4()}",
+                                          "payload": dict(raw_record.payload, description="A newer repository observation")})
+    JsonlStorage().append_contract_record(raw_repo_path, other)
+    if damage in {"missing", "modified", "wrong_repository"}:
+        raw_repo_path.write_text("", encoding="utf-8")
+        JsonlStorage().append_contract_record(raw_repo_path, other)
+    if damage in {"conflicting_id", "modified", "wrong_repository"}:
+        payload = dict(raw_record.payload, description="Altered input snapshot")
+        if damage == "wrong_repository":
+            payload["full_name"] = "other/repository"
+        altered = raw_record.model_copy(update={"payload": payload})
+        JsonlStorage().append_contract_record(raw_repo_path, altered)
+    elif damage == "legacy_state":
+        state.pop("state_format_version")
+        state_file.write_text(json.dumps(state), encoding="utf-8")
+    elif damage is None:
+        # Identical duplicate physical lines are harmless; selection checks their full contents.
+        JsonlStorage().append_contract_record(raw_repo_path, raw_record)
+
+    def unexpected_http(*args, **kwargs):
+        from reposeer.collection.http.client import HTTPClient
+
+        def handler(request):
+            raise AssertionError("Stored resume must not refetch completed jobs or use a different input")
+
+        return HTTPClient(*args, **kwargs, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr("reposeer.pipelines.external.HTTPClient", unexpected_http)
+    original_bytes = discovery_file.read_bytes()
+    resumed = runner.invoke(app, ["discover-external", "--from-stored", "--resume", run_id, "--data-dir", str(tmp_path)])
+    if damage is not None:
+        assert resumed.exit_code == 2, resumed.output
+        message = {"missing": "Original upstream RawRecord is unavailable", "legacy_state": "start a new run"}.get(damage, "integrity")
+        assert message in resumed.output
+        assert discovery_file.read_bytes() == original_bytes
+        return
+    assert resumed.exit_code == 0, resumed.output
+    assert discovery_file.read_bytes() == original_bytes
+    replayed = JsonlStorage().read_contract_records(discovery_file)
+    assert len(replayed) == len(records)
+    assert {raw.raw_record_id for raw in replayed} == {raw.raw_record_id for raw in records}
 
 
 def test_cli_discover_external_no_args_fails(tmp_path: Path):
@@ -124,3 +176,34 @@ def test_cli_discover_external_no_args_fails(tmp_path: Path):
     )
     assert result.exit_code == 1
     assert "Provide a repository target or specify --from-stored" in result.output
+
+
+@pytest.mark.parametrize("include_technology_context", [False, True])
+def test_cli_explicit_resume_uses_saved_jobs_without_repeating_search(tmp_path, monkeypatch, include_technology_context):
+    from reposeer.collection.http.client import HTTPClient
+
+    calls = []
+    transport = _mock_hn_transport()
+
+    def handler(request):
+        calls.append(request)
+        return transport.handle_request(request)
+
+    def custom_http(*args, **kwargs):
+        return HTTPClient(*args, **kwargs, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr("reposeer.pipelines.external.HTTPClient", custom_http)
+    runner = CliRunner()
+    args = ["discover-external", "octocat/Hello-World", "--data-dir", str(tmp_path)]
+    if include_technology_context:
+        args.append("--include-technology-context")
+    first = runner.invoke(app, args)
+    assert first.exit_code == 0, first.output
+    manifest_file = next((tmp_path / "metadata/collection_runs").glob("discovery_manifest_*.json"))
+    run_id = json.loads(manifest_file.read_text(encoding="utf-8"))["run_id"]
+    before_resume = len(calls)
+    resumed = runner.invoke(app, args + ["--resume", run_id])
+    assert resumed.exit_code == 0, resumed.output
+    assert len(calls) == before_resume
+    unknown = runner.invoke(app, args + ["--sources", "typo"])
+    assert unknown.exit_code == 2 and "Unsupported" in unknown.output

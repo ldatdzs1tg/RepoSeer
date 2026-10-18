@@ -18,6 +18,7 @@ from reposeer.collectors.external.crawler.safety import URLPolicy
 from reposeer.collectors.external.crawler.scope import RepositoryScopeEvidence
 from reposeer.collectors.external.crawler.validation import validate_external_document_record
 from reposeer.contracts import CollectionRequest, CollectionResult, CollectionSubject
+from reposeer.contracts.identity import canonical_article_url
 from reposeer.storage.paths import StoragePaths, paths
 from reposeer.storage.raw.jsonl import JsonlStorage
 
@@ -79,8 +80,23 @@ class ExternalCrawlPipeline:
             raise ValueError("provide_between_1_and_1000_candidates")
         if type(max_candidates) is not int or not 1 <= max_candidates <= 1000:
             raise ValueError("max_candidates_must_be_between_1_and_1000")
-        # Validate all inputs before any network or persistence side effects.
-        data = [candidate_data(value) for value in candidates]
+        # Validate every observation, including duplicates, before any side effects.
+        data = []
+        selected: list[CandidateInput] = []
+        seen_urls: set[str] = set()
+        seen_ids: set[str] = set()
+        for candidate in candidates:
+            value = candidate_data(candidate)
+            url = canonical_article_url(value["url"])
+            candidate_id = value.get("candidate_id")
+            if url in seen_urls or isinstance(candidate_id, str) and candidate_id in seen_ids:
+                continue
+            # Stable first-observation selection preserves its lineage verbatim.
+            seen_urls.add(url)
+            if isinstance(candidate_id, str):
+                seen_ids.add(candidate_id)
+            selected.append(candidate)
+            data.append(value)
         run_id = str(uuid4())
         request = CollectionRequest(
             schema_version="0.1.0",
@@ -105,7 +121,7 @@ class ExternalCrawlPipeline:
             max_pages=max_candidates,
             max_records=max_candidates,
         )
-        result = self.collector.collect(request, candidates)
+        result = self.collector.collect(request, selected)
         for record in result.records:
             validate_external_document_record(record)
         output_path = self.paths.raw_path("external", "documents")
@@ -119,6 +135,8 @@ class ExternalCrawlPipeline:
                 **result.model_dump(mode="json", exclude={"records"}),
                 "output_path": str(output_path),
                 "input_candidate_count": len(candidates),
+                "unique_candidate_count": len(selected),
+                "deduplicated_candidate_count": len(candidates) - len(selected),
                 "raw_record_ids": [r.raw_record_id for r in result.records],
                 "documents_extracted": sum(
                     r.payload["content_status"] == "full" for r in result.records

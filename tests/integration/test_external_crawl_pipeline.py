@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import json
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -14,6 +15,7 @@ from reposeer.cli.app import app
 from reposeer.collection.http.client import HTTPClient
 from reposeer.collectors.external.crawler.extractor import ArticleExtractor
 from reposeer.collectors.external.crawler.safety import URLPolicy
+from reposeer.collectors.external.crawler.validation import validate_external_document_record
 from reposeer.contracts import RawRecord, validate_record
 from reposeer.pipelines.external import ExternalPipeline
 from reposeer.pipelines.external_crawl import ExternalCrawlPipeline
@@ -90,9 +92,20 @@ def test_discovery_to_crawl_raw_replay_and_append(tmp_path):
         assert len(candidates) == 1
         assert all("blog.example" not in url for url in calls)
         original = candidates[0].model_dump(mode="json")
+        assert candidates[0].source_url == "https://news.ycombinator.com/item?id=42"
+        assert candidates[0].payload["candidate_url"] == "https://blog.example/article"
+        assert candidates[0].repo_id is candidates[0].package_id is None
+        newer = candidates[0].model_copy(update={
+            "raw_record_id": f"raw:{uuid4()}",
+            "payload": dict(candidates[0].payload, title="A newer discovery observation",
+                            url="https://blog.example/updated", candidate_url="https://blog.example/updated"),
+        })
+        newer_before = newer.model_dump(mode="json")
+        # Two immutable observations of one candidate must fetch only once per crawl batch.
+        batch = [*candidates, newer, "https://blog.example/article?utm_source=duplicate"]
         with pipeline(tmp_path, http) as crawler:
-            first = crawler.crawl(candidates)
-            second = crawler.crawl(candidates)
+            first = crawler.crawl(batch)
+            second = crawler.crawl(batch)
         assert not http._sync_client.is_closed
     replay = JsonlStorage().read_contract_records(first.output_path)
     assert len(replay) == 2
@@ -100,6 +113,13 @@ def test_discovery_to_crawl_raw_replay_and_append(tmp_path):
     assert first.run_id != second.run_id
     raw = replay[0]
     assert isinstance(validate_record(raw.model_dump_json()), RawRecord)
+    validate_external_document_record(raw)
+    assert raw.payload["record_stage"] == "external_document"
+    assert raw.repo_id is raw.package_id is None
+    assert raw.source_record_id == "hn:42"
+    assert calls.count("https://blog.example/article") == 2
+    assert not any("firebaseio.com" in url or "news.ycombinator.com" in url for url in calls)
+    assert raw.source_url == "https://blog.example/article"
     assert raw.source == "web_article" and raw.source_record_type == "article"
     assert raw.retrieved_at == raw.payload["fetched_at"] == "2026-10-16T06:00:00.000Z"
     assert raw.event_at == raw.payload["published_at"] == "2024-03-01T02:30:00.000Z"
@@ -117,9 +137,12 @@ def test_discovery_to_crawl_raw_replay_and_append(tmp_path):
         raw.payload["content_sha256"] == hashlib.sha256(raw.payload["content"].encode()).hexdigest()
     )
     assert candidates[0].model_dump(mode="json") == original
+    assert newer.model_dump(mode="json") == newer_before
     assert first.collection_result.status == "complete"
     manifest = json.loads(first.manifest_path.read_text())
     assert manifest["documents_extracted"] == 1
+    assert manifest["input_candidate_count"] == 3
+    assert manifest["unique_candidate_count"] == 1 and manifest["deduplicated_candidate_count"] == 2
     assert manifest["coverage_scope"] == "requested_candidate_batch_only"
 
 
@@ -179,8 +202,9 @@ def test_discovery_to_crawl_raw_replay_and_append(tmp_path):
         ),
     ],
 )
+@pytest.mark.parametrize("recorded", [False, True])
 def test_native_api_body_and_revision_metadata(
-    tmp_path, source, url, item_id, native_payload, endpoint
+    tmp_path, source, url, item_id, native_payload, endpoint, recorded
 ):
     calls = []
 
@@ -194,6 +218,23 @@ def test_native_api_body_and_revision_metadata(
     candidate = ExternalCandidate(
         title="Discovery title", url=url, source=source, source_item_id=item_id
     )
+    original = None
+    if recorded:
+        observation_url = {
+            "hackernews": "https://news.ycombinator.com/item?id=42",
+            "devto": "https://dev.to/api/articles/search",
+            "stackexchange": "https://api.stackexchange.com/2.3/search/advanced",
+        }[source]
+        candidate = RawRecord(
+            schema_version="0.1.0", record_type="raw_record", raw_record_id=f"raw:{uuid4()}",
+            run_id=str(uuid4()), source="web_article", source_record_type="article",
+            source_record_id=item_id, source_url=observation_url, repo_id=None, package_id=None,
+            retrieved_at="2026-10-16T06:00:00.000Z", event_at=None, available_at=None,
+            http_status=None, raw_body_sha256=None,
+            payload=dict(candidate.model_dump(mode="json"), record_stage="discovery_candidate",
+                         discovery_provider=source, candidate_url=url),
+        )
+        original = candidate.model_dump(mode="json")
     with HTTPClient(transport=httpx.MockTransport(handler)) as http:
         result = pipeline(tmp_path, http).crawl([candidate])
     assert len(calls) == 1
@@ -204,6 +245,12 @@ def test_native_api_body_and_revision_metadata(
     assert raw.payload["published_precision"] == "timestamp"
     assert raw.source_record_id == item_id
     assert raw.available_at == raw.retrieved_at
+    if recorded:
+        assert raw.payload["candidate_raw_record_id"] == candidate.raw_record_id
+        assert raw.payload["discovery"] == original
+        assert candidate.model_dump(mode="json") == original
+        assert raw.repo_id is raw.package_id is None
+        validate_external_document_record(raw)
 
 
 def test_mixed_failures_retain_raw_and_continue(tmp_path, monkeypatch):
@@ -545,7 +592,8 @@ def test_verified_scope_fills_repo_without_modifying_discovery(tmp_path):
             "source_record_type": "article",
             "source_url": "https://blog.example/article",
             "source_record_id": None,
-            "payload": {"record_stage": "discovery_candidate", "source": "web", "title": "Article"},
+            "payload": {"record_stage": "discovery_candidate", "source": "web", "title": "Article",
+                        "candidate_url": "https://blog.example/article"},
         }
     )
     before = candidate.model_dump(mode="json")
@@ -584,3 +632,28 @@ def test_unverified_mapping_evidence_rejected(case):
         pypi.source_url = "https://blog.example/pypi.json"
     with pytest.raises(ValueError):
         RepositoryScopeEvidence(pypi, github).resolve()
+
+
+@pytest.mark.parametrize("candidate_url", [None, "", "not-a-url", "ftp://blog.example/article",
+                                            "https://user:secret@blog.example/article", 123])
+def test_invalid_discovery_candidate_url_has_no_observation_url_fallback(tmp_path, candidate_url):
+    payload = {"record_stage": "discovery_candidate", "discovery_provider": "hackernews"}
+    if candidate_url is not None:
+        payload["candidate_url"] = candidate_url
+    candidate = RawRecord(
+        schema_version="0.1.0", record_type="raw_record", raw_record_id=f"raw:{uuid4()}",
+        run_id=str(uuid4()), source="web_article", source_record_type="article",
+        source_record_id="hn:42", source_url="https://news.ycombinator.com/item?id=42",
+        repo_id=None, package_id=None, retrieved_at="2026-10-16T06:00:00.000Z",
+        event_at=None, available_at=None, http_status=None, raw_body_sha256=None, payload=payload,
+    )
+    original = candidate.model_dump(mode="json")
+
+    def unexpected_fetch(request):
+        raise AssertionError("Invalid candidate URL must fail before any HTTP fetch")
+
+    with HTTPClient(transport=httpx.MockTransport(unexpected_fetch)) as http:
+        with pytest.raises(ValueError):
+            pipeline(tmp_path, http).crawl([candidate])
+    assert candidate.model_dump(mode="json") == original
+    assert not StoragePaths(tmp_path).raw_path("external", "documents").exists()

@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+import pytest
+
 from reposeer.clients.external import (
     DiscoveryPageResult,
     DiscoveryProvider,
@@ -24,6 +26,7 @@ from reposeer.contracts.identity import (
     canonical_github_url,
     repo_id,
 )
+from reposeer.contracts.validation import validate_collection_pair
 from reposeer.exceptions import HTTPClientError
 from reposeer.schemas.external.candidate import ExternalCandidate
 from reposeer.storage.raw.jsonl import JsonlStorage
@@ -32,6 +35,8 @@ from reposeer.technology.models import SearchPlan, SearchTerm
 
 class MockDiscoveryProvider(DiscoveryProvider):
     """Mock discovery provider for unit tests."""
+
+    initial_cursor = "0"
 
     def __init__(
         self,
@@ -196,11 +201,14 @@ def test_contract_compliance():
         assert raw.record_type == "raw_record"
         assert raw.source == "web_article"
         assert raw.source_record_type == "article"
-        assert raw.repo_id == repo_id_obj.repo_id
-        assert raw.package_id == "pypi:flask"
+        assert raw.repo_id is raw.package_id is None
+        assert raw.payload["search_target_repo_id"] == repo_id_obj.repo_id
+        assert raw.payload["search_target_package_id"] == "pypi:flask"
+        assert raw.source_url.startswith("https://news.ycombinator.com/item?id=")
+        assert raw.payload["candidate_url"] == raw.payload["url"]
         assert raw.available_at is None
-        assert raw.http_status == 200
-        assert raw.raw_body_sha256 is not None
+        assert raw.http_status is None
+        assert raw.raw_body_sha256 is None
         assert raw.retrieved_at == "2024-02-01T00:00:00.000Z"
         assert raw.payload["record_stage"] == "discovery_candidate"
         assert raw.payload["discovery_status"] == "unverified"
@@ -210,13 +218,23 @@ def test_contract_compliance():
         assert raw.payload["matched_queries"] == ["pallets/flask release"]
         assert raw.payload["discovery_provider"] == "hackernews"
 
+    # The canonical observation pair refers to provider item URLs, not unverified search subjects.
+    observation_request = request.model_copy(update={"subjects": [
+        CollectionSubject(repo_id=None, repo_full_name=None, package_id=None, url=raw.source_url) for raw in result.records]})
+    validate_collection_pair(observation_request, result)
+    ExternalDiscoveryCollector.validate_observation_pair(request, result, job_count=1)
+    corrupted_raw = result.records[0].model_copy(update={"payload": dict(result.records[0].payload, search_target_package_id="pypi:unrelated")})
+    corrupted = result.model_copy(update={"records": [corrupted_raw, *result.records[1:]]})
+    with pytest.raises(ValueError, match="lineage"):
+        ExternalDiscoveryCollector.validate_observation_pair(request, corrupted, job_count=1)
+
     # 3. Manifest audit
     assert manifest["query_set_hash"] == plan.query_set_hash
     assert manifest["completeness_status"] == "complete"
     assert manifest["records_observed"] == 2
     assert manifest["records_rejected"] == 0
     assert len(manifest["per_query_stats"]) == 1
-    assert manifest["per_query_stats"][0]["status"] == "ok"
+    assert manifest["per_query_stats"][0]["status"] == "complete"
 
 
 def test_cutoff_safety_gate():
@@ -270,7 +288,7 @@ def test_cutoff_safety_gate():
 
 
 def test_multi_query_upsert_and_provenance():
-    """Verify that when 2 queries find the same source item, 1 RawRecord is emitted, matched_queries accumulates both, and subject_match upgrades."""
+    """Different native snippets create immutable observations and one enriched projection."""
     # Query 1: broad alternative query
     # Candidate discovered first via generic query
     c_from_q1 = ExternalCandidate(
@@ -324,22 +342,23 @@ def test_multi_query_upsert_and_provenance():
     )
     repo_id_obj = _make_repo_identity()
 
-    result, _ = collector.collect_discovery(request, plan, repo_identity=repo_id_obj)
+    result, manifest = collector.collect_discovery(request, plan, repo_identity=repo_id_obj)
 
-    # Exactly 1 RawRecord must be emitted
-    assert len(result.records) == 1
-    raw = result.records[0]
-    assert raw.source_record_id == "hn:3001"
-
-    # Both queries must be in matched_queries
-    matched = raw.payload["matched_queries"]
-    assert term1.query in matched
-    assert term2.query in matched
-
-    # Status must upgrade from function_or_alternative_only to exact_url_match
-    assert raw.payload["subject_match_status"] == "exact_url_match"
-
-    assert isinstance(validate_record(raw), RawRecord)
+    assert len(result.records) == 2  # The provider returned genuinely different snippet content.
+    assert result.metadata.records_emitted == 2 and manifest["candidate_count"] == 1
+    first, second = result.records
+    assert first.raw_record_id != second.raw_record_id
+    assert first.payload["snippet"] == c_from_q1.snippet
+    assert first.payload["matched_queries"] == [term1.query]
+    assert second.payload["matched_queries"] == [term2.query]
+    projection, = manifest["candidate_projections"]
+    assert projection["matched_queries"] == sorted([term1.query, term2.query])
+    assert projection["subject_match_status"] == "exact_url_match"
+    assert set(projection["raw_record_ids"]) == {first.raw_record_id, second.raw_record_id}
+    assert {link["query_id"] for link in projection["query_associations"]} == {term1.query_id, term2.query_id}
+    assert {link["job_id"] for link in projection["query_associations"]} == {job["job_id"] for job in manifest["per_job_stats"]}
+    assert all(raw.repo_id is raw.package_id is None for raw in result.records)
+    assert all(isinstance(validate_record(raw), RawRecord) for raw in result.records)
     assert isinstance(validate_record(result), CollectionResult)
 
 
@@ -485,7 +504,8 @@ def test_save_discovery_records_persists_to_jsonl(tmp_path):
     assert len(stored_records) == 1
     assert isinstance(stored_records[0], RawRecord)
     assert stored_records[0].source_record_id == "hn:5001"
-    assert stored_records[0].source_url == "https://example.com/flask-save-test"
+    assert stored_records[0].source_url == "https://news.ycombinator.com/item?id=5001"
+    assert stored_records[0].payload["candidate_url"] == "https://example.com/flask-save-test"
 
 
 def test_invalid_url_candidate_is_rejected():
@@ -606,3 +626,157 @@ def test_collect_method_alias():
     assert isinstance(result, CollectionResult)
     assert len(result.records) == 1
 
+
+
+def test_missing_provider_and_completed_zero_have_independent_statuses():
+    provider = MockDiscoveryProvider(pages=[DiscoveryPageResult()])
+    plan = SearchPlan(terms=[SearchTerm(query="flask", intent="direct_package", platform="hackernews"),
+                             SearchTerm(query="flask", intent="direct_package", platform="devto")])
+    result, manifest = ExternalDiscoveryCollector({"hackernews": provider}).collect_discovery(_make_request(), plan)
+    jobs = {job["provider"]: job for job in manifest["per_job_stats"]}
+    assert jobs["hackernews"]["status"] == "complete" and jobs["hackernews"]["candidates_found"] == 0
+    assert jobs["devto"]["status"] == "unavailable" and jobs["devto"]["missing_reason"] == "no_provider"
+    assert result.status != "complete" and not manifest["pagination_complete"]
+
+
+def test_current_rolling_window_is_not_historical_and_future_dates_are_not_clamped():
+    now = datetime(2024, 2, 1, tzinfo=UTC)
+    valid = ExternalCandidate(title="Current", url="https://example.org/current", source="devto",
+                              source_item_id="devto:1", source_item_url="https://dev.to/author/current",
+                              publication_date=datetime(2024, 1, 30, tzinfo=UTC))
+    future = valid.model_copy(update={"source_item_id": "devto:2", "publication_date": datetime(2024, 3, 1, tzinfo=UTC)})
+    provider = MockDiscoveryProvider(supports_historical=False, pages=[DiscoveryPageResult(candidates=[valid, future])])
+    plan = SearchPlan(terms=[SearchTerm(query="flask", intent="direct_package", platform="devto")])
+    request = _make_request(cutoff_at="2024-01-31T23:59:59.999Z", time_range=TimeRange(start_at="2024-01-01T00:00:00.000Z", end_at="2024-01-31T23:59:59.999Z"))
+    result, manifest = ExternalDiscoveryCollector({"devto": provider}, clock=lambda: now).collect_discovery(request, plan)
+    assert manifest["temporal_mode"] == "current" and len(provider.calls) == 1
+    assert len(result.records) == 1 and result.metadata.records_rejected == 1
+    assert result.records[0].event_at == "2024-01-30T00:00:00.000Z"
+    assert future.publication_date == datetime(2024, 3, 1, tzinfo=UTC)
+
+
+def test_per_job_page_budget_and_global_record_budget_are_explicit():
+    def candidate(number):
+        return ExternalCandidate(title="Hit", url=f"https://example.org/{number}", source="hackernews", source_item_id=f"hn:{number}")
+
+    plan = SearchPlan(terms=[SearchTerm(query=query, intent="direct_package", platform="hackernews") for query in ("one", "two")])
+    provider = MockDiscoveryProvider(pages=[DiscoveryPageResult(candidates=[candidate(1)], has_more=True, next_cursor="1"),
+                                           DiscoveryPageResult(candidates=[candidate(2)], has_more=True, next_cursor="2")])
+    result, manifest = ExternalDiscoveryCollector({"hackernews": provider}).collect_discovery(_make_request(max_pages=1), plan)
+    assert len(provider.calls) == 2 and all(job["pages_fetched"] == 1 for job in manifest["per_job_stats"])
+    assert not result.metadata.pagination_complete and all(job["status"] == "partial" for job in manifest["per_job_stats"])
+    provider = MockDiscoveryProvider(pages=[DiscoveryPageResult(candidates=[candidate(1), candidate(2)])])
+    result, manifest = ExternalDiscoveryCollector({"hackernews": provider}).collect_discovery(_make_request(max_records=1), plan)
+    assert len(result.records) == 1 and len(provider.calls) == 1
+    assert manifest["per_job_stats"][0]["next_cursor"] is None  # Replays initial unfinished native page.
+    assert manifest["per_job_stats"][1]["status"] == "skipped_budget"
+    assert not manifest["pagination_complete"]
+    limited = manifest
+    provider = MockDiscoveryProvider(pages=[DiscoveryPageResult(candidates=[candidate(1), candidate(2)]), DiscoveryPageResult()])
+    _, full = ExternalDiscoveryCollector({"hackernews": provider}).collect_discovery(_make_request(max_records=100), plan)
+    assert limited["planned_query_set_hash"] == full["planned_query_set_hash"]
+    assert limited["actual_query_set_hash"] != full["actual_query_set_hash"]
+    assert limited["execution_policy_hash"] == full["execution_policy_hash"]
+
+
+def test_ambiguous_bare_cursor_is_rejected_before_provider_calls():
+    provider = MockDiscoveryProvider()
+    plan = SearchPlan(terms=[SearchTerm(query=query, intent="direct_package", platform="hackernews") for query in ("one", "two")])
+    with pytest.raises(ValueError, match="ambiguous"):
+        ExternalDiscoveryCollector({"hackernews": provider}).collect_discovery(_make_request(cursor="1"), plan)
+    assert provider.calls == []
+
+
+def test_historical_api_pagination_does_not_claim_verified_historical_corpus():
+    provider = MockDiscoveryProvider(pages=[DiscoveryPageResult()])
+    plan = SearchPlan(terms=[SearchTerm(query="flask", intent="direct_package", platform="hackernews")])
+    result, manifest = ExternalDiscoveryCollector({"hackernews": provider}, clock=lambda: datetime(2024, 2, 1, tzinfo=UTC)).collect_discovery(
+        _make_request(cutoff_at="2022-01-01T00:00:00.000Z"), plan)
+    assert manifest["pagination_complete"] and manifest["retrieval_complete"]
+    assert not manifest["historical_content_verified"] and manifest["completeness_status"] == "partial"
+    assert result.metadata.coverage[0].missing_reason == "historical_unavailable"
+
+
+@pytest.mark.parametrize("context,intent", [
+    ("function_level", "functional_demand"), ("alternative_level", "alternatives"),
+    ("technology_level", "ecosystem"),
+])
+def test_unrelated_function_or_alternative_hit_has_no_canonical_subject(context, intent):
+    candidate = ExternalCandidate(title="Flask framework ecosystem discussion" if context == "technology_level" else "Django ORM discussion", url="https://example.org/frameworks", source="hackernews", source_item_id="hn:42")
+    provider = MockDiscoveryProvider(pages=[DiscoveryPageResult(candidates=[candidate])])
+    plan = SearchPlan(package_id="pypi:flask", repo_full_name="pallets/flask", terms=[
+        SearchTerm(query="Python web frameworks", intent=intent, platform="hackernews", context_level=context, tech_slug="flask", keywords=["framework"])])
+    result, manifest = ExternalDiscoveryCollector({"hackernews": provider}).collect_discovery(_make_request(), plan, repo_identity=_make_repo_identity())
+    raw = result.records[0]
+    assert raw.repo_id is raw.package_id is None
+    assert raw.payload["search_target_package_id"] == "pypi:flask"
+    expected = "technology_context_only" if context == "technology_level" else "function_or_alternative_only"
+    assert raw.payload["subject_match_status"] == expected
+    if context == "technology_level":
+        assert raw.payload["context_level"] == "technology_level" and raw.payload["tech_slug"] == "flask"
+        projection, = manifest["candidate_projections"]
+        assert projection["query_associations"][0]["tech_slug"] == "flask"
+        assert projection["query_associations"][0]["context_level"] == "technology_level"
+
+
+def test_explicit_single_job_cursor_does_not_claim_unobserved_prefix_complete():
+    provider = MockDiscoveryProvider(pages=[DiscoveryPageResult()])
+    plan = SearchPlan(terms=[SearchTerm(query="flask", intent="direct_package", platform="hackernews")])
+    result, manifest = ExternalDiscoveryCollector({"hackernews": provider}).collect_discovery(_make_request(cursor="1"), plan)
+    assert provider.calls[0]["cursor"] == "1"
+    assert not manifest["pagination_complete"] and result.status == "partial"
+    assert manifest["per_job_stats"][0]["missing_reason"] == "cursor_prefix_not_collected"
+
+
+def test_raw_immutability_projection_lineage_and_append_only_replay(tmp_path):
+    candidate = ExternalCandidate(title="Flask library discussion", url="https://example.org/one",
+                                  source="hackernews", source_item_id="hn:1")
+    blocked = True
+    now = datetime(2024, 2, 1, tzinfo=UTC)
+
+    class Provider(MockDiscoveryProvider):
+        def search_page(self, query, **kwargs):
+            if blocked and query == "second query":
+                raise HTTPClientError("injected interruption", status_code=500)
+            return super().search_page(query, **kwargs)
+
+    manager = RunManager(tmp_path)
+    context = manager.start_run(str(uuid4()))
+    progress = CollectionProgress(context, manager)
+    provider = Provider(pages=[DiscoveryPageResult(candidates=[candidate])] * 2)
+    plan = SearchPlan(terms=[SearchTerm(query=query, intent="direct_package", platform="hackernews")
+                             for query in ("first query", "second query")])
+    request = _make_request(run_id=context.run_id)
+    collector = ExternalDiscoveryCollector({"hackernews": provider}, progress=progress, clock=lambda: now)
+    first, _ = collector.collect_discovery(request, plan)
+    original = first.records[0].model_dump_json()
+    path = tmp_path / "discovery.jsonl"
+    unrelated = first.records[0].model_copy(update={"run_id": str(uuid4()), "raw_record_id": f"raw:{uuid4()}"})
+    JsonlStorage().append_contract_records_durable(path, [unrelated])
+    collector.save_discovery_records(first, path)
+    prefix = path.read_bytes()
+
+    blocked = False
+    now = datetime(2024, 2, 2, tzinfo=UTC)
+    resumed, manifest = ExternalDiscoveryCollector({"hackernews": provider}, progress=progress, clock=lambda: now).collect_discovery(request, plan)
+    assert len(provider.calls) == 2  # Completed query A was not fetched again.
+    assert len(resumed.records) == 1 and resumed.records[0].model_dump_json() == original
+    projection, = manifest["candidate_projections"]
+    assert projection["matched_queries"] == ["first query", "second query"]
+    assert len(projection["query_associations"]) == 2
+    assert projection["raw_record_ids"] == [first.records[0].raw_record_id]
+    collector.save_discovery_records(resumed, path)
+    collector.save_discovery_records(resumed, path)
+    assert path.read_bytes() == prefix
+
+    # A separate observation can append; neither this run nor unrelated runs are rewritten.
+    provider = MockDiscoveryProvider(pages=[DiscoveryPageResult(candidates=[candidate])])
+    other, _ = ExternalDiscoveryCollector({"hackernews": provider}).collect_discovery(_make_request(), plan)
+    collector.save_discovery_records(other, path)
+    appended = path.read_bytes()
+    assert appended.startswith(prefix) and len(JsonlStorage().read_contract_records(path)) == 3
+    altered = resumed.records[0].model_copy(update={"payload": dict(resumed.records[0].payload, title="Changed")})
+    conflicting = resumed.model_copy(update={"records": [altered]})
+    with pytest.raises(ValueError, match="integrity conflict"):
+        collector.save_discovery_records(conflicting, path)
+    assert path.read_bytes() == appended

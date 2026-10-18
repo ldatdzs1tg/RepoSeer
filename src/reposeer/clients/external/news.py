@@ -11,6 +11,7 @@ class NewsAPIProvider(DiscoveryProvider):
 
     provider_name: str = "news"
     supports_historical_window: bool = True
+    is_available: bool = False
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key

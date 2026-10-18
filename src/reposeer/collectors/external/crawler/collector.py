@@ -66,8 +66,13 @@ def candidate_data(value: CandidateInput) -> dict[str, Any]:
             or value.payload.get("record_stage") != "discovery_candidate"
         ):
             raise ValueError("expected_discovery_candidate")
+        candidate_url = value.payload.get("candidate_url")
+        if not isinstance(candidate_url, str):
+            raise ValueError("discovery_candidate_url_required")
+        candidate_url = canonical_article_url(candidate_url)
         return {
-            "url": value.source_url,
+            "url": candidate_url,
+            "candidate_id": value.payload.get("candidate_id"),
             "source": value.payload.get("discovery_provider")
             or value.payload.get("source")
             or "web",

@@ -47,7 +47,7 @@ class SearchTerm(BaseModel):
     priority: int = Field(default=3, ge=1, le=5, description="Priority weight (1 highest, 5 lowest)")
     keywords: list[str] = Field(default_factory=list, description="Constituent keywords in the query")
     query_id: str | None = Field(default=None, description="Deterministic ID computed from platform, intent, and normalized query")
-    context_level: Literal["package_specific", "function_level", "alternative_level"] = Field(
+    context_level: Literal["package_specific", "function_level", "alternative_level", "technology_level"] = Field(
         default="package_specific", description="Context level of the search query"
     )
     query_version: str = Field(default="1.0.0", description="Query generation policy version")
@@ -84,7 +84,9 @@ class SearchPlan(BaseModel):
     package_id: str | None = None
     repo_id: str | None = None
     repo_full_name: str | None = None
+    include_technology_context: bool = False
     profile_status: Literal["verified", "unavailable", "not_provided"] = "not_provided"
+    diagnostics: list[str] = Field(default_factory=list)
     query_version: str = "1.0.0"
     query_set_hash: str = Field(
         default="",

@@ -187,3 +187,35 @@ def test_evaluate_subject_match_ambiguous_requires_crawl():
         package_name="flask",
     ) == "ambiguous_requires_crawl"
 
+
+
+@pytest.mark.parametrize("url,exact", [
+    ("https://github.com/pallets/flask", True),
+    ("https://github.com/pallets/flask/tree/main", True),
+    ("https://github.com/pallets/flask/blob/main/README.md", True),
+    ("https://github.com/pallets/flask-example", False),
+    ("https://notgithub.com/pallets/flask", False),
+    ("https://github.com/other/flask", False),
+    ("https://github.com.evil.test/pallets/flask", False),
+    ("https://pypi.org/project/flask-other/", False),
+])
+def test_subject_url_matching_has_host_and_path_boundaries(url, exact):
+    for candidate_url, snippet in [(url, None), ("https://example.org/story", f"Repository: {url}.")]:
+        status = evaluate_subject_match(url=candidate_url, title="Discussion", snippet=snippet,
+                                        repo_full_name="pallets/flask", package_name="flask")
+        assert (status == "exact_url_match") is exact
+
+
+def test_candidate_identity_and_publication_adapter_are_stable():
+    from datetime import UTC, datetime
+
+    first = ExternalCandidate(title="First", url="https://example.org/story", source="hackernews", source_item_id="hn:123")
+    second = first.model_copy(update={"query": "different", "title": "Updated"})
+    assert first.candidate_id == second.candidate_id
+    assert first.candidate_id != first.model_copy(update={"source": "devto"}).candidate_id
+    assert first.model_dump(mode="json")["published_at"] is None
+    first.publication_date = datetime(2024, 1, 1, tzinfo=UTC)
+    assert first.model_dump(mode="json")["published_at"] == "2024-01-01T00:00:00.000Z"
+    a = ExternalCandidate(title="A", url="https://example.org/story?utm_source=x", source="devto")
+    b = ExternalCandidate(title="B", url="https://example.org/story", source="devto")
+    assert a.candidate_id == b.candidate_id
