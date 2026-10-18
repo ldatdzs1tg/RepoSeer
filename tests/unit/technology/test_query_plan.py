@@ -1,9 +1,14 @@
 """Unit tests for T-016 Function-Aware Query Planning and Query Set Hash."""
 
+import hashlib
+
+import pytest
+
 from reposeer.technology.functional_profile import (
-    FunctionalClaim,
     FunctionalProfileResult,
+    FunctionalSource,
 )
+from reposeer.technology.functional_profiler import FunctionalProfiler
 from reposeer.technology.models import (
     SearchPlan,
     SearchTerm,
@@ -34,46 +39,7 @@ def test_search_term_query_id_generation():
 
 
 def test_build_search_plan_with_verified_functional_profile():
-    claim_func = FunctionalClaim(
-        text="lightweight WSGI web application framework",
-        evidence_span_ids=["span:1"],
-    )
-    claim_prob = FunctionalClaim(
-        text="building web APIs and microservices",
-        evidence_span_ids=["span:2"],
-    )
-    claim_use = FunctionalClaim(
-        text="REST API development",
-        evidence_span_ids=["span:3"],
-    )
-    claim_syn = FunctionalClaim(
-        text="Python microframework",
-        evidence_span_ids=["span:4"],
-    )
-    claim_cat = FunctionalClaim(
-        text="web framework",
-        evidence_span_ids=["span:5"],
-    )
-    claim_alt1 = FunctionalClaim(
-        text="FastAPI",
-        evidence_span_ids=["span:6"],
-    )
-    claim_alt2 = FunctionalClaim(
-        text="Django",
-        evidence_span_ids=["span:7"],
-    )
-
-    profile = FunctionalProfileResult(
-        status="verified",
-        package_id="pypi:flask",
-        repo_id="github:repository:12345",
-        primary_function=claim_func,
-        solved_problems=[claim_prob],
-        use_cases=[claim_use],
-        synonyms=[claim_syn],
-        functional_category=claim_cat,
-        alternative_candidates=[claim_alt1, claim_alt2],
-    )
+    profile = _grounded_profile()
 
     generator = SearchTermGenerator(max_terms_per_intent=3)
     spec = TechnologyRegistry().get_by_slug("flask")
@@ -92,7 +58,9 @@ def test_build_search_plan_with_verified_functional_profile():
     assert len(plan.query_set_hash) == 64
 
     intents = {term.intent for term in plan.terms}
-    assert {"direct_package", "functional_demand", "alternatives", "migration_adoption"} <= intents
+    assert {"direct_package", "functional_demand"} <= intents
+    assert not intents & {"alternatives", "migration_adoption"}
+    assert "alternatives_unverified" in plan.diagnostics
 
     for term in plan.terms:
         assert term.query_id is not None
@@ -104,10 +72,6 @@ def test_build_search_plan_with_verified_functional_profile():
         elif term.intent in ("alternatives", "migration_adoption"):
             assert term.context_level == "alternative_level"
 
-    # Verify migration terms pair subject with alternative
-    migration_terms = [t.query for t in plan.terms if t.intent == "migration_adoption"]
-    assert any("flask vs FastAPI" in q or "flask vs fastapi" in q.lower() for q in migration_terms)
-    assert any("migrate from flask to" in q.lower() for q in migration_terms)
 
 
 def test_build_search_plan_with_unavailable_or_none_functional_profile():
@@ -192,3 +156,115 @@ def test_search_plan_with_platform_filter():
     assert len(plan.terms) > 0
     for term in plan.terms:
         assert term.platform in ("hackernews", "stackexchange", "all")
+
+
+def _grounded_profile(cutoff_at=None):
+    text = "Lightweight WSGI web application framework. Django is an unverified alternative candidate."
+    document = FunctionalSource(source_id="description", source_path="info.description", source_revision="3.0.0",
+                                source_available_at="2020-01-01T00:00:00.000Z" if cutoff_at else None,
+                                availability_basis="versioned_archive" if cutoff_at else "current_observation",
+                                availability_evidence_ref=None, retrieved_at="2024-02-20T00:00:00.000Z",
+                                text=text, scope="target_package", source_url="https://pypi.org/pypi/flask/3.0.0/json")
+
+    class ExtractiveLLM:
+        model_id = "offline-test"
+
+        def generate(self, **kwargs):
+            span = kwargs["spans"][0]
+            claim = {"text": "Lightweight WSGI web application framework.", "evidence_span_ids": [span.span_id]}
+            return dict(primary_function=claim, solved_problems=[], capabilities=[], use_cases=[], functional_category=claim,
+                        synonyms=[], alternative_candidates=[{"text": "Django", "evidence_span_ids": [span.span_id]}])
+
+    # Fixture-owned immutable capture manifest, separate from the D03 request metadata.
+    manifest = (document.source_id, document.source_url, document.source_revision,
+                hashlib.sha256(text.encode("utf-8")).hexdigest(), "2020-01-01T00:00:00.000Z")
+
+    class ArchiveVerifier:
+        def verify(self, source, asof):
+            observed = (source.source_id, source.source_url, source.source_revision,
+                        hashlib.sha256(source.text.encode("utf-8")).hexdigest(), source.source_available_at)
+            return hashlib.sha256(repr(manifest).encode()).hexdigest() if observed == manifest and manifest[-1] <= asof else None
+
+    return FunctionalProfiler().build_profile(package_id="pypi:flask", repo_id="github:repository:12345",
+                                              package_scope=None, sources=[document], llm=ExtractiveLLM(),
+                                              cutoff_at=cutoff_at, historical_verifier=ArchiveVerifier() if cutoff_at else None)
+
+
+@pytest.mark.parametrize("change,reason", [
+    ({"package_id": "pypi:django"}, "profile_subject_mismatch"),
+    ({"repo_id": "github:repository:98765"}, "profile_subject_mismatch"),
+    ({"scope_quality": "repo_only"}, "profile_scope_unverified"),
+    ({"source_revision_keys": []}, "profile_scope_unverified"),
+])
+def test_ineligible_profile_has_direct_only_fallback(change, reason):
+    profile = _grounded_profile().model_copy(update=change)
+    plan = SearchTermGenerator().build_search_plan(package_id="pypi:flask", repo_id="github:repository:12345",
+                                                   repo_full_name="pallets/flask", functional_profile=profile)
+    assert {term.intent for term in plan.terms} == {"direct_package"}
+    assert reason in plan.diagnostics and plan.profile_status == "unavailable"
+
+
+def test_current_profile_cannot_be_used_for_historical_cutoff_or_missing_identity():
+    generator = SearchTermGenerator()
+    profile = _grounded_profile()
+    plan = generator.build_search_plan(package_id="pypi:flask", repo_id="github:repository:12345",
+                                       functional_profile=profile, cutoff_at="2022-01-01T00:00:00.000Z", historical_mode=True)
+    assert "profile_historical_unavailable" in plan.diagnostics
+    assert all(term.intent == "direct_package" for term in plan.terms)
+    for identity in ({"package_id": "pypi:flask"}, {"repo_id": "github:repository:12345", "repo_full_name": "pallets/flask"}):
+        plan = generator.build_search_plan(functional_profile=profile, **identity)
+        assert "profile_subject_mismatch" in plan.diagnostics
+        assert all(term.intent == "direct_package" for term in plan.terms)
+
+
+def test_profile_claim_mutation_cannot_supply_ungrounded_function_queries():
+    from reposeer.technology.functional_profile import FunctionalClaim
+
+    profile = _grounded_profile().model_copy(update={"primary_function": FunctionalClaim(
+        text="Invented user problem", evidence_span_ids=["span:missing"])})
+    plan = SearchTermGenerator().build_search_plan(package_id="pypi:flask", repo_id="github:repository:12345", functional_profile=profile)
+    assert "profile_claims_unverified" in plan.diagnostics
+    assert all(term.intent == "direct_package" for term in plan.terms)
+
+
+def test_matching_historical_d03_output_is_eligible_only_for_its_verified_cutoff():
+    cutoff = "2022-01-01T00:00:00.000Z"
+    profile = _grounded_profile(cutoff_at=cutoff)
+    assert profile.status == "verified" and profile.cutoff_at == cutoff
+    assert profile.historical_evidence_fingerprints
+    generator = SearchTermGenerator()
+    inputs = dict(package_id="pypi:flask", repo_id="github:repository:12345", functional_profile=profile, historical_mode=True)
+    eligible = generator.build_search_plan(cutoff_at=cutoff, **inputs)
+    assert eligible.profile_status == "verified" and any(term.intent == "functional_demand" for term in eligible.terms)
+    mismatched = generator.build_search_plan(cutoff_at="2023-01-01T00:00:00.000Z", **inputs)
+    assert "profile_historical_unavailable" in mismatched.diagnostics
+    assert all(term.intent == "direct_package" for term in mismatched.terms)
+
+
+@pytest.mark.parametrize("slug,repo", [("flask", "pallets/flask"), ("requests", "psf/requests")])
+def test_technology_context_is_opt_in_bounded_and_deterministic(slug, repo):
+    generator = SearchTermGenerator()
+    spec = TechnologyRegistry().get_by_slug(slug)
+    assert spec is not None
+    kwargs = dict(repo_full_name=repo, specs=[spec, spec], primary_spec=spec)
+    direct = generator.build_search_plan(**kwargs)
+    enriched = generator.build_search_plan(**kwargs, include_technology_context=True)
+    assert all(term.context_level == "package_specific" for term in direct.terms)
+    technology = [term for term in enriched.terms if term.context_level == "technology_level"]
+    assert technology and all(term.tech_slug == slug for term in technology)
+    expected = generator.generate(entities=[spec], primary_slug=slug)
+    assert {term.query for term in technology} == {term.query for term in expected}
+    assert all(repo not in term.query for term in technology)
+    keys = [(term.query.casefold(), term.platform, term.intent) for term in enriched.terms]
+    assert len(keys) == len(set(keys))
+    assert enriched.query_set_hash != direct.query_set_hash
+    assert enriched.model_dump() == generator.build_search_plan(**kwargs, include_technology_context=True).model_dump()
+
+
+def test_technology_context_without_recognized_concepts_keeps_direct_plan():
+    generator = SearchTermGenerator()
+    direct = generator.build_search_plan(package_id="pypi:unknown-package")
+    enriched = generator.build_search_plan(package_id="pypi:unknown-package", include_technology_context=True)
+    assert enriched.terms == direct.terms and enriched.query_set_hash == direct.query_set_hash
+    assert enriched.include_technology_context
+    assert "technology_context_unavailable" in enriched.diagnostics

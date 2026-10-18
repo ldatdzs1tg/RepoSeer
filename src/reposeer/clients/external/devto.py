@@ -19,6 +19,7 @@ class DevToClient(DiscoveryProvider):
 
     provider_name: str = "devto"
     supports_historical_window: bool = False
+    search_filters = {"endpoint": "articles/search", "ordering": "not_guaranteed_chronological"}
 
     def __init__(
         self,
@@ -55,7 +56,7 @@ class DevToClient(DiscoveryProvider):
                 raise ValueError("cursor must be a positive integer string")
             page = int(cursor)
 
-        endpoint = f"{self.base_url}/articles"
+        endpoint = f"{self.base_url}/articles/search"
         per_page = min(page_size, 100)
         params: dict[str, Any] = {
             "per_page": per_page,
@@ -64,7 +65,7 @@ class DevToClient(DiscoveryProvider):
         if query:
             params["q"] = query
 
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/vnd.forem.api-v1+json"}
         if self.api_key:
             headers["api-key"] = self.api_key
 
@@ -74,7 +75,6 @@ class DevToClient(DiscoveryProvider):
                 raise ValueError("invalid_devto_payload")
 
             candidates = []
-            reached_past_window_start = False
 
             for item in data:
                 if not isinstance(item, dict):
@@ -100,10 +100,9 @@ class DevToClient(DiscoveryProvider):
                     except ValueError:
                         pub_date = None
 
-                # Check window filtering bounds in reverse-chronological stream
+                # Search ranking is not chronological: filter items without terminating pagination.
                 if pub_date is not None:
                     if window_start is not None and pub_date < window_start:
-                        reached_past_window_start = True
                         continue
                     if window_end is not None and pub_date > window_end:
                         continue
@@ -136,11 +135,16 @@ class DevToClient(DiscoveryProvider):
                         author=author,
                         comment_count=comment_count,
                         snippet=snippet,
+                        source_item_url=url,
+                        native_payload={key: item[key] for key in (
+                            "id", "title", "url", "published_timestamp", "published_at",
+                            "description", "positive_reactions_count", "comments_count",
+                        ) if key in item},
                     )
                 )
 
-            # Determine has_more based on page size and window boundaries
-            if len(data) < per_page or reached_past_window_start:
+            # Only an incomplete native page establishes the end of this search stream.
+            if len(data) < per_page:
                 has_more = False
             else:
                 has_more = True
@@ -152,6 +156,7 @@ class DevToClient(DiscoveryProvider):
 
             result = DiscoveryPageResult(
                 candidates=candidates,
+                native_items_observed=len(data),
                 page_number=page,
                 has_more=has_more,
                 next_cursor=next_cursor,

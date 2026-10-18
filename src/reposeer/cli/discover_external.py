@@ -7,6 +7,10 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from reposeer.collectors.external.discovery.base import (
+    input_observation_scope,
+    load_discovery_state,
+)
 from reposeer.pipelines.external import ExternalPipeline
 from reposeer.storage.paths import StoragePaths, paths
 from reposeer.storage.raw.jsonl import JsonlStorage
@@ -32,7 +36,7 @@ def main(
     ] = False,
     cutoff_at: Annotated[
         str | None,
-        typer.Option("--cutoff-at", help="UTC cutoff timestamp ISO-8601 (e.g. 2024-03-01T00:00:00Z)"),
+        typer.Option("--cutoff-at", help="UTC cutoff timestamp ISO-8601 (e.g. 2024-03-01T00:00:00.000Z)"),
     ] = None,
     window_days: Annotated[
         int | None,
@@ -40,11 +44,11 @@ def main(
     ] = None,
     max_pages: Annotated[
         int,
-        typer.Option("--max-pages", help="Max pages per search query"),
+        typer.Option("--max-pages", help="Max pages per provider-query job on each start/resume invocation"),
     ] = 5,
     max_records: Annotated[
         int,
-        typer.Option("--max-records", help="Max records per run"),
+        typer.Option("--max-records", help="Max immutable raw observations per logical run"),
     ] = 100,
     sources: Annotated[
         str,
@@ -54,6 +58,17 @@ def main(
         bool,
         typer.Option("--historical", help="Enable historical mode (guards sources lacking window support)"),
     ] = False,
+    include_technology_context: Annotated[
+        bool,
+        typer.Option("--include-technology-context", help=(
+            "Include T-015 technology-level broad context, not verified package/repository evidence; "
+            "repeat this flag when resuming an enriched run"
+        )),
+    ] = False,
+    resume: Annotated[
+        str | None,
+        typer.Option("--resume", help="Resume the saved run ID with the same target, query policy and sources"),
+    ] = None,
     data_dir: Annotated[
         Path | None,
         typer.Option("--data-dir", help="Base storage directory"),
@@ -65,22 +80,42 @@ def main(
     source_list = [s.strip() for s in sources.split(",") if s.strip()]
 
     pipeline = ExternalPipeline(storage_paths=sp, storage=storage)
-
-    targets_to_run: list[Any] = []
-    if from_stored:
-        raw_repo_path = sp.raw_path("github", "repositories")
-        records = storage.read_contract_records(raw_repo_path)
-        if not records:
-            console.print(f"No stored raw repositories found at {raw_repo_path}.", style="bold yellow")
-            raise typer.Exit(code=1)
-        targets_to_run.extend(records)
-    elif target is not None:
-        targets_to_run.append(target)
-    else:
-        console.print("Provide a repository target or specify --from-stored.", style="bold red")
-        raise typer.Exit(code=1)
-
     try:
+        if resume is not None and from_stored:
+            context = pipeline.run_manager.resume_run(resume)
+            if context is None:
+                raise ValueError("No saved discovery run exists for --resume")
+            state_path = pipeline.run_manager.checkpoints_dir / f"discovery_state_{context.run_id}.json"
+            if not state_path.exists():
+                raise ValueError("No durable discovery job state exists for --resume")
+            scope = load_discovery_state(state_path)["scope"]
+
+        targets_to_run: list[Any] = []
+        if from_stored:
+            raw_repo_path = sp.raw_path("github", "repositories")
+            records = storage.read_contract_records(raw_repo_path)
+            if not records and resume is None:
+                console.print(f"No stored raw repositories found at {raw_repo_path}.", style="bold yellow")
+                raise typer.Exit(code=1)
+            targets_to_run.extend(records)
+        elif target is not None:
+            targets_to_run.append(target)
+        else:
+            console.print("Provide a repository target or specify --from-stored.", style="bold red")
+            raise typer.Exit(code=1)
+
+        if resume is not None and from_stored:
+            input_id = scope.get("input_raw_record_id")
+            if input_id is None:
+                raise ValueError("Saved run has no recorded upstream identity; use its manual target or start a new run")
+            matches = [record for record in targets_to_run if record.raw_record_id == input_id]
+            if not matches:
+                raise ValueError("Original upstream RawRecord is unavailable; restore it or start a new run")
+            expected_input = {key: scope.get(key) for key in input_observation_scope(None)}
+            fingerprints = {input_observation_scope(record)["input_observation_fingerprint"] for record in matches}
+            if len(fingerprints) != 1 or input_observation_scope(matches[0]) != expected_input:
+                raise ValueError("Original upstream RawRecord integrity or repository identity mismatch")
+            targets_to_run = [matches[0]]
         for subj in targets_to_run:
             display_name = subj if isinstance(subj, str) else getattr(subj, "source_url", str(subj))
             console.print(f"Discovering external candidates for: {display_name}", style="bold cyan")
@@ -92,6 +127,9 @@ def main(
                 max_records=max_records,
                 sources=source_list,
                 historical_mode=historical,
+                include_technology_context=include_technology_context,
+                run_id=resume,
+                resume=resume is not None,
             )
 
             manifest = res.discovery_manifest
@@ -120,5 +158,8 @@ def main(
             console.print(table)
             console.print(f"Persisted to: {res.output_path}\n", style="green")
 
+    except (ValueError, TypeError) as error:
+        console.print(str(error), style="bold red")
+        raise typer.Exit(code=2) from error
     finally:
         pipeline.close()

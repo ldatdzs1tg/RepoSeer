@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     # API keys and tokens
     github_token: str | None = Field(default=None, alias="GITHUB_TOKEN")
     news_api_key: str | None = Field(default=None, alias="NEWS_API_KEY")
+    devto_api_key: str | None = Field(default=None, alias="DEVTO_API_KEY")
+    stackexchange_api_key: str | None = Field(default=None, alias="STACKEXCHANGE_API_KEY")
 
     # Sub-configurations
     storage: StorageConfig = Field(default_factory=StorageConfig)

@@ -1,6 +1,6 @@
 # RepoSeer: Repository & Open-Source Ecosystem Intelligence
 
-RepoSeer targets the probability that a **PyPI package** has confirmed maintenance abandonment in the next **12 calendar months** after `cutoff_at`. GitHub repositories supply observations; repository inactivity, archived status and LLM statements are candidate evidence, not labels or risk probabilities. This repository currently implements collection and resolution through T-015; features, labels, training and inference remain planned.
+RepoSeer targets the probability that a **PyPI package** has confirmed maintenance abandonment in the next **12 calendar months** after `cutoff_at`. GitHub repositories supply observations; repository inactivity, archived status and LLM statements are candidate evidence, not labels or risk probabilities. This repository currently implements collection, resolution and external discovery through T-016; features, labels, training and inference remain planned.
 
 ## Tech Stack (Sprint 2)
 
@@ -363,6 +363,7 @@ reposeer detect-tech . --pinned tech:flask --json
 | T-013 | Single/batch GitHub metadata, screening, dedup, raw-first Parquet | Current observation; github is the only collect source |
 | T-014 | Five activity groups, durable journal, batch start/resume, per-group coverage | Moving API pages cannot reconstruct history; errors/budgets retain partial coverage |
 | T-015 | Deterministic stack resolver, aliases/dependency scopes and bounded queries; optional extractive Functional Profiler | Technology queries are not D04 same-function search; profile is not a risk or abandonment label |
+| T-016 | HN/DEV.to/Stack Exchange discovery, query/job lineage and durable run resume | Candidates remain unverified; source pagination is not historical content proof |
 
 `package_id=pypi:<PEP503-name>`, `repo_id=github:repository:<numeric-id>`;
 future ML grain is `(package_id, cutoff_at)` and `repo_group_id` groups packages sharing a repo.
@@ -377,6 +378,73 @@ Smoke search hits go to `data/raw/external/discovery.jsonl`, with
 `record_stage=discovery_candidate`, `discovery_status=unverified`, `content_status=not_fetched`
 and `discovery_provider=hackernews`. They are not crawled Articles, verified relevance or E1/E2
 features; the smoke does not write candidates to `data/raw/external/articles.jsonl`.
+
+### External discovery (T-016)
+
+```cmd
+uv run reposeer discover-external pypi:flask --sources hackernews,devto --window-days 30 --max-pages 2
+uv run reposeer discover-external pypi:flask --sources hackernews,devto --resume RUN_ID --max-pages 2
+uv run reposeer discover-external --from-stored --resume RUN_ID --sources hackernews
+uv run reposeer discover-external pallets/flask --sources hackernews,devto --include-technology-context --max-pages 2
+```
+
+`--max-pages` bounds each provider-query job on each invocation; `--max-records` bounds immutable raw
+observations across the logical run (including distinct native metadata for the same candidate).
+`records_emitted`/`records_observed` count those logical-run observations; `candidate_count` counts
+unique projected candidates. Replaying existing observations does not append them again.
+Resume uses saved job cursors, target, provider policy and window; changed plans/policies/windows are rejected. A bare API cursor is supported only for
+one unambiguous job and cannot claim that a skipped prefix was observed. Legacy runs without
+durable job state must start a new run rather than guess cursors. RSS/news remain unavailable stubs; unknown source names are errors.
+A rolling lookback ending now is current discovery (five-minute request/start clock tolerance).
+An explicit historical flag or genuinely past upper bound requires historical-window support.
+Exhausting today's API pagination does not verify a historical corpus or historical content.
+
+`source_url` identifies the provider item/observation endpoint. T-017 must fetch
+`payload.candidate_url` (also retained as `payload.url`), not infer an article fetch from that
+source URL. `http_status`, `raw_body_sha256`, `available_at` and canonical candidate subject IDs
+remain null; search targets, native item fields, match heuristics and query associations stay
+in payload/manifest metadata. Exact links are discovery hints, not verified relevance.
+
+Raw observations are immutable. Rediscovery of identical native metadata reuses the original
+observation without changing its raw ID, first-query payload or timestamps. Different native
+metadata can produce a new observation with a new ID; this does not assert a native revision.
+Only the derived candidate projection merges query associations and best match metadata.
+
+The fsynced `metadata/collection_runs/discovery_state_<run_id>.json` (state format 1) stores
+immutable `records`, mutable `candidate_projections` and per-job cursors atomically before the
+RunManager checkpoint advances. Projections reference their `raw_record_ids` and query/job IDs;
+they are also exposed through `result.discovery_manifest["candidate_projections"]`, with a
+`candidate_projection_path` pointing to durable state. T-017 can use these aggregates separately
+from immutable raw observations. The raw discovery JSONL is append-only under one writer:
+existing identical IDs are skipped, conflicting contents for an ID raise an integrity error,
+and records from every run are preserved. Resume appends missing durable observations once,
+including after an interrupted publication/acknowledgement, without refetching completed pages.
+Legacy unversioned mutable-raw states are rejected; start a new run rather than migrate them.
+
+For recorded GitHub inputs, scope saves the exact upstream raw ID, source/type, repository
+identity and a fingerprint of the validated input snapshot. `--from-stored --resume` selects
+that exact record even when newer observations of the same repo exist. Identical duplicate
+lines are harmless; missing originals, conflicting IDs or changed contents fail without
+switching input. Manual-target runs continue to resume with their explicit target.
+`planned_query_set_hash` identifies terms, `actual_query_set_hash` identifies attempted resolved
+provider/query/window/filter jobs, and `execution_policy_hash` binds all resolved jobs for resume.
+
+D04 expands functions only from a matching, grounded D03 backend output with verified package
+scope. Historical expansion also requires the same D03 `cutoff_at` and source fingerprints.
+Without technology opt-in, missing/ineligible profiles produce direct-only queries with
+diagnostics. Unverified alternatives never produce alternatives/migration queries. Direct discovery remains the default.
+`--include-technology-context` optionally reuses T-015 `generate()` with resolved catalog
+concepts, without repository identity expansion or GitHub API calls. Technology-level results
+are broad context, not verified package- or repository-specific evidence. Their terms,
+query associations and jobs carry `context_level=technology_level` and the technology slug;
+keywords alone cannot produce exact-URL matches. No recognized concepts means direct queries
+plus `technology_context_unavailable`, with no guessed technology. A plain manual target does
+not fetch GitHub metadata to detect its stack. Mode is bound to the saved execution scope;
+repeat the flag on resume of an enriched run. Conflicting modes are rejected, including when
+no additional technology queries were generated. Added queries change planned/actual hashes.
+Canonical request/result validation uses an observation-scope adapter because T-011's generic
+subject/as-of pair rules describe verified evidence; discovery independently validates target
+lineage and publication-window filtering without inventing subject matches or availability.
 
 ### Durable activity start/resume
 
@@ -457,6 +525,6 @@ version and verified evidence fingerprints; raw self-declared proof references a
 fingerprints. There is no new profile cache persistence layer. A `verified` profile means its
 claims are grounded in accepted text; current metadata alone does not authenticate Internet history.
 
-Full D01 historical mapping, T-016 discovery, T-017 full crawling, D04-D08 semantic relevance and
+Full D01 historical mapping, T-017 full crawling, D05/D06 relevance/temporal workflows and
 specialist evidence agents, D09 labels/features, D10/D11 training/inference, D12 graph and
 D13-D15 reports/orchestration/lineage remain planned. See [v3 pipeline](docs/architecture/pipeline.md).

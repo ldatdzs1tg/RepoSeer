@@ -11,8 +11,12 @@ import pytest
 from reposeer.contracts.identity import text_sha256
 from reposeer.contracts.models import RepoIdentity
 from reposeer.technology.functional_profile import (
+    EvidenceRef,
+    EvidenceSpan,
+    FunctionalDraft,
     FunctionalSource,
     SourceVerificationError,
+    ground_claims,
     prepare_passages,
     profile_cache_key,
 )
@@ -159,6 +163,25 @@ def test_grounded_profile_preserves_exact_original_offsets_and_repo_only_scope()
         assert evidence.content_sha256 == text_sha256(evidence.text)
     assert all("shields.io" not in span.text and "requests" not in span.text for span in prepare_passages([source()]))
     assert sum(len(span.text) for span in prepare_passages([source()], max_characters=20)) == 20
+
+
+def test_ground_claims_reconstructs_existing_evidence_refs_from_base_span_fields():
+    spans = prepare_passages([source()])
+    original = FunctionalDraft.model_validate(draft(spans))
+    _, existing_refs, _ = ground_claims(original, spans)
+    # Reuse the same source span for a different supported quote, rather than copying old offsets.
+    quote = "user-submitted documents"
+    updated = original.model_copy(update={"primary_function": original.primary_function.model_copy(update={"text": quote})})
+    fields, refs, diagnostics = ground_claims(updated, existing_refs)
+    assert fields["primary_function"].text == quote and diagnostics == []
+    assert len(refs) == 2 and all(isinstance(ref, EvidenceRef) for ref in refs)
+    by_id = {ref.span_id: ref for ref in existing_refs}
+    for ref in refs:
+        assert {name: getattr(ref, name) for name in EvidenceSpan.model_fields} == {
+            name: getattr(by_id[ref.span_id], name) for name in EvidenceSpan.model_fields
+        }
+        assert TEXT[ref.quote_start:ref.quote_end] == ref.quote
+    assert next(ref for ref in refs if ref.quote == quote).quote_start == TEXT.index(quote)
 
 
 @pytest.mark.parametrize("changes", [

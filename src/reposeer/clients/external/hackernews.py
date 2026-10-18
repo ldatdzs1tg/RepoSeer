@@ -19,6 +19,8 @@ class HackerNewsClient(DiscoveryProvider):
 
     provider_name: str = "hackernews"
     supports_historical_window: bool = True
+    initial_cursor: str = "0"
+    search_filters = {"tags": "story", "endpoint": "search_by_date_if_window_else_search"}
 
     def __init__(
         self,
@@ -132,11 +134,20 @@ class HackerNewsClient(DiscoveryProvider):
                         author=author,
                         comment_count=comment_count,
                         snippet=snippet,
+                        source_item_url=(f"https://news.ycombinator.com/item?id={object_id}"
+                                         if object_id.isdecimal() and int(object_id) > 0 else None),
+                        native_payload={key: hit[key] for key in (
+                            "objectID", "title", "url", "created_at_i", "created_at",
+                            "author", "points", "num_comments",
+                        ) if key in hit},
                     )
                 )
 
-            nb_pages = data.get("nbPages", 0) if isinstance(data.get("nbPages"), int) else 0
-            has_more = (current_page + 1) < nb_pages
+            nb_pages = data.get("nbPages")
+            if nb_pages is not None and (type(nb_pages) is not int or nb_pages < 0):
+                raise ValueError("invalid_hackernews_pagination")
+            has_more = ((current_page + 1) < nb_pages if nb_pages is not None
+                        else len(data["hits"]) >= page_size)
             next_cursor = str(current_page + 1) if has_more else None
             total_hits_reported = data.get("nbHits") if isinstance(data.get("nbHits"), int) else None
 
@@ -146,6 +157,7 @@ class HackerNewsClient(DiscoveryProvider):
 
             result = DiscoveryPageResult(
                 candidates=candidates,
+                native_items_observed=len(data["hits"]),
                 page_number=current_page + 1,
                 has_more=has_more,
                 next_cursor=next_cursor,

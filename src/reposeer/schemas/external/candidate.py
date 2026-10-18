@@ -1,12 +1,19 @@
 """External discovery candidate contract."""
 
+import hashlib
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, computed_field
 
+from reposeer.contracts.identity import (
+    canonical_article_url,
+    canonical_github_url,
+    format_utc_timestamp,
+    normalize_pypi_name,
+)
 from reposeer.schemas.common import BaseSchema, utc_now
 
 SubjectMatchStatus = Literal[
@@ -14,10 +21,11 @@ SubjectMatchStatus = Literal[
     "high_confidence_metadata",
     "ambiguous_requires_crawl",
     "function_or_alternative_only",
+    "technology_context_only",
     "rejected_noise",
 ]
 
-ContextLevel = Literal["package_specific", "function_level", "alternative_level"]
+ContextLevel = Literal["package_specific", "function_level", "alternative_level", "technology_level"]
 
 
 class ExternalCandidate(BaseSchema):
@@ -37,8 +45,26 @@ class ExternalCandidate(BaseSchema):
     query_id: str | None = None
     query_intent: str | None = None
     context_level: ContextLevel = "package_specific"
+    tech_slug: str | None = None
+    raw_record_ids: list[str] = Field(default_factory=list)
     subject_match_status: SubjectMatchStatus = "ambiguous_requires_crawl"
     matched_queries: list[str] = Field(default_factory=list)
+    query_associations: list[dict[str, str]] = Field(default_factory=list)
+    source_item_url: str | None = None
+    native_payload: dict[str, Any] = Field(default_factory=dict)
+
+    @computed_field
+    @property
+    def candidate_id(self) -> str:
+        native_key = self.source_item_id or canonical_article_url(self.url)
+        identity = f"{self.source.casefold()}:{native_key}"
+        return "candidate:sha256:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+    @computed_field
+    @property
+    def published_at(self) -> str | None:
+        """T-008 serialization name; publication_date remains compatible with provider callers."""
+        return format_utc_timestamp(self.publication_date) if self.publication_date is not None else None
 
 
 def evaluate_subject_match(
@@ -54,7 +80,7 @@ def evaluate_subject_match(
     primary_keywords: list[str] | set[str] | None = None,
     known_urls: list[str] | set[str] | None = None,
 ) -> SubjectMatchStatus:
-    """Evaluate subject match status for an external discovery candidate."""
+    """Discovery heuristics only: even an exact link does not verify article relevance."""
     if isinstance(url, ExternalCandidate):
         candidate = url
         url = candidate.url
@@ -75,51 +101,54 @@ def evaluate_subject_match(
             parsed = urlsplit(url_clean)
             if parsed.scheme.lower() in ("http", "https") and parsed.netloc:
                 url_is_valid = True
-        except Exception:
+        except ValueError:
             url_is_valid = False
 
     if not title_clean and not url_is_valid:
         return "rejected_noise"
 
-    cand_url_lower = url_clean.lower()
     cand_snippet_lower = snippet_clean.lower()
     cand_title_lower = title_clean.lower()
 
-    # 2. Exact URL match
-    target_url_substrings: list[str] = []
+    # Parse complete URL tokens, including schemeless official links, with host/path boundaries.
+    links = [url_clean] if url_is_valid else []
+    links.extend(match.group().rstrip(".,;:!?)\"'>]") for match in re.finditer(
+        r"(?<![\w./@-])(?:https?://[^\s<>\"']+|(?:github\.com|pypi\.org)/[^\s<>\"']+)",
+        snippet_clean + " " + title_clean,
+    ))
+    target_repo = None
+    try:
+        if repo_full_name:
+            target_repo = canonical_github_url(repo_full_name)
+        elif repo_url:
+            parsed_target = urlsplit(canonical_article_url(repo_url))
+            if parsed_target.hostname == "github.com" and parsed_target.port is None:
+                target_repo = canonical_github_url(parsed_target.path.strip("/").removesuffix(".git"))
+    except ValueError:
+        pass
+    for link in links:
+        try:
+            parsed = urlsplit(canonical_article_url(link if "://" in link else "https://" + link))
+            parts = parsed.path.strip("/").split("/")
+            if parsed.hostname == "github.com" and parsed.port is None and len(parts) >= 2 and target_repo:
+                if canonical_github_url("/".join(parts[:2]).removesuffix(".git")) == target_repo:
+                    return "exact_url_match"
+            if (parsed.hostname == "pypi.org" and parsed.port is None and len(parts) >= 2
+                    and parts[0] == "project" and package_name
+                    and normalize_pypi_name(parts[1]) == normalize_pypi_name(package_name)):
+                return "exact_url_match"
+            for known in known_urls or []:
+                upstream = urlsplit(canonical_article_url(known))
+                root = upstream.path.rstrip("/")
+                if (parsed.scheme == upstream.scheme and parsed.netloc == upstream.netloc
+                        and (parsed.path.rstrip("/") == root or parsed.path.startswith(root + "/"))
+                        and (not upstream.query or parsed.query == upstream.query)):
+                    return "exact_url_match"
+        except ValueError:
+            continue
 
-    if repo_full_name:
-        fn_clean = repo_full_name.strip().lower()
-        if "/" in fn_clean:
-            target_url_substrings.append(f"github.com/{fn_clean}")
-
-    if repo_url:
-        ru = repo_url.strip().lower().rstrip("/")
-        if ru.endswith(".git"):
-            ru = ru[:-4]
-        if "://" in ru:
-            ru = ru.split("://", 1)[1]
-        if ru:
-            target_url_substrings.append(ru)
-
-    if package_name:
-        pn = package_name.strip().lower()
-        target_url_substrings.append(f"pypi.org/project/{pn}")
-        pn_norm = re.sub(r"[-_.]+", "-", pn)
-        if pn_norm != pn:
-            target_url_substrings.append(f"pypi.org/project/{pn_norm}")
-
-    if known_urls:
-        for ku in known_urls:
-            ku_clean = ku.strip().lower().rstrip("/")
-            if "://" in ku_clean:
-                ku_clean = ku_clean.split("://", 1)[1]
-            if ku_clean:
-                target_url_substrings.append(ku_clean)
-
-    for target in target_url_substrings:
-        if target and (target in cand_url_lower or (cand_snippet_lower and target in cand_snippet_lower)):
-            return "exact_url_match"
+    if context_level == "technology_level":
+        return "technology_context_only"
 
     # 3. High confidence metadata
     if repo_full_name:

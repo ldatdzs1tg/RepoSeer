@@ -120,6 +120,7 @@ class FunctionalProfileResult(ProfileModel):
     package_id: PackageId
     repo_id: RepoId
     scope_quality: Literal["target_package", "repo_only", "unknown"] = "unknown"
+    cutoff_at: UtcTimestamp | None = None
     primary_function: FunctionalClaim | None = None
     solved_problems: list[FunctionalClaim] = Field(default_factory=list)
     capabilities: list[FunctionalClaim] = Field(default_factory=list)
@@ -251,7 +252,8 @@ def ground_claims(draft: FunctionalDraft, spans: Sequence[EvidenceSpan]) -> tupl
             return None
         for span in selected:
             position = span.start + span.text.index(claim.text)
-            refs[(span.span_id, claim.text)] = EvidenceRef(**span.model_dump(), quote=claim.text,
+            base_fields = {name: getattr(span, name) for name in EvidenceSpan.model_fields}
+            refs[(span.span_id, claim.text)] = EvidenceRef(**base_fields, quote=claim.text,
                                                          quote_start=position, quote_end=position + len(claim.text))
         return claim
 
