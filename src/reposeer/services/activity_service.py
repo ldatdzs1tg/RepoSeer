@@ -114,8 +114,11 @@ def _logical_key(record: RawRecord) -> tuple[str, str | None, str] | None:
     return record.run_id, record.repo_id, record.source_record_id
 
 
-def _validate_activity_raw(record: RawRecord, group: ActivityGroup) -> None:
-    """Check group identity using the existing Phase 2 extraction functions."""
+def extract_activity_entity(record: RawRecord, group: ActivityGroup) -> (
+    activity.GitHubCommit | activity.GitHubIssue | activity.GitHubPullRequest
+    | activity.GitHubContributorObservation | activity.GitHubRelease
+):
+    """Validate a persisted T-014 observation and return its existing typed entity."""
     repo_id = record.repo_id
     if (
         repo_id is None or record.source != "github_rest"
@@ -151,6 +154,12 @@ def _validate_activity_raw(record: RawRecord, group: ActivityGroup) -> None:
         or not parts.path.endswith("/" + endpoint)
     ):
         raise ValueError("Invalid activity raw identity, endpoint or event mapping")
+
+    return entity
+
+
+# Preserve the recovery validator boundary; existing callers ignore its return value.
+_validate_activity_raw = extract_activity_entity
 
 
 @dataclass(slots=True)

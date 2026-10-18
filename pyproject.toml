@@ -69,6 +69,9 @@ ignore = [
     "B008",  # do not perform function calls in argument defaults (standard Typer pattern)
 ]
 
+[tool.ruff.lint.isort]
+known-first-party = ["reposeer"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]

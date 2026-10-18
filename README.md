@@ -2,6 +2,8 @@
 
 RepoSeer targets the probability that a **PyPI package** has confirmed maintenance abandonment in the next **12 calendar months** after `cutoff_at`. GitHub repositories supply observations; repository inactivity, archived status and LLM statements are candidate evidence, not labels or risk probabilities. This repository implements collection and resolution through T-015, external discovery (T-016) and current external crawling (T-017); features, labels, training and inference remain planned.
 
+T-018 adds offline canonical normalization, observation-preserving deduplication and target-specific relevance. See [data normalization and T-019/T-020 handoff](docs/architecture/data_normalization.md).
+
 ## Tech Stack (Sprint 2)
 
 - **Language & Runtime**: Python 3.12 managed via `uv`
