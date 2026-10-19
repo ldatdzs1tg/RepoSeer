@@ -13,6 +13,8 @@ from tests.unit.processing.test_normalization import (
     repository_raw,
     target,
 )
+from typer.core import TyperOption
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from reposeer.cli.app import app
@@ -239,7 +241,16 @@ def test_cli_default_discovery_targets_and_failure_exit(tmp_path):
     invalid = runner.invoke(app, ["process", "--data-dir", str(tmp_path), "--targets-file", str(targets)])
     assert invalid.exit_code == 2
     help_result = runner.invoke(app, ["process", "--help"])
-    assert help_result.exit_code == 0 and "--cutoff-at" in help_result.output
+    assert help_result.exit_code == 0, help_result.output
+
+    process_command = get_command(app).commands["process"]
+    registered_options = {
+        option
+        for parameter in process_command.params
+        if isinstance(parameter, TyperOption)
+        for option in (*parameter.opts, *parameter.secondary_opts)
+    }
+    assert {"--data-dir", "--raw", "--targets-file", "--cutoff-at"}.issubset(registered_options)
 
 
 def test_manifest_write_failure_is_not_success_and_replay_recovers(tmp_path, monkeypatch):
