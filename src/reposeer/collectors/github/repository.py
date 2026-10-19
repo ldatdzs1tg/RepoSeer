@@ -5,8 +5,23 @@ from typing import Any
 from reposeer.clients.github import GitHubClient
 from reposeer.collection.errors import handle_collection_error
 from reposeer.collection.progress import CollectionProgress
+from reposeer.contracts import GitHubRepository
 from reposeer.exceptions import HTTPClientError
 from reposeer.schemas.github.repository import RepositoryRecord
+
+
+def repository_exclusion_reasons(repository: GitHubRepository) -> tuple[str, ...]:
+    return tuple(
+        reason
+        for excluded, reason in (
+            (repository.visibility == "private", "private_repository"),
+            (repository.visibility == "internal", "internal_repository"),
+            (repository.is_fork, "fork_repository"),
+            (repository.is_template, "template_repository"),
+            (repository.mirror_url is not None, "mirror_repository"),
+        )
+        if excluded
+    )
 
 
 class RepositoryCollector:

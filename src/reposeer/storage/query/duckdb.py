@@ -1,5 +1,6 @@
 """DuckDB analytics and query engine layer."""
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +25,15 @@ class DuckDBQueryEngine:
         return pl.from_arrow(arrow_table)  # type: ignore[return-value]
 
     def register_parquet(self, view_name: str, parquet_path: Path | str) -> None:
-        """Register a parquet file or directory as a queryable SQL view."""
-        self.conn.execute(
-            f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{parquet_path}')"
-        )
+        """Register an existing Parquet file as a queryable SQL view."""
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", view_name):
+            raise ValueError("invalid_sql_view_identifier")
+        if not str(parquet_path).strip():
+            raise ValueError("empty_parquet_path")
+        path = Path(parquet_path)
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        self.conn.from_parquet(str(path)).create_view(view_name, replace=True)
 
     def close(self) -> None:
         """Close connection."""

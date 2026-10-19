@@ -2,14 +2,17 @@
 
 from pathlib import Path
 
+from pydantic import TypeAdapter
+
 from reposeer.config import settings
+from reposeer.contracts.models import UuidText
 
 
 class StoragePaths:
     """Manages canonical paths for raw, processed, features, and reports data."""
 
     def __init__(self, base_dir: Path | None = None):
-        self.base_dir = base_dir or settings.storage.base_dir
+        self.base_dir = Path(base_dir if base_dir is not None else settings.storage.base_dir)
         self.raw_dir = self.base_dir / "raw"
         self.processed_dir = self.base_dir / "processed"
         self.features_dir = self.base_dir / "features"
@@ -33,6 +36,17 @@ class StoragePaths:
         target = self.features_dir / dataset_name / f"{dataset_name}.parquet"
         target.parent.mkdir(parents=True, exist_ok=True)
         return target
+
+    def processing_manifest_path(self, processing_run_id: str) -> Path:
+        TypeAdapter(UuidText).validate_python(processing_run_id, strict=True)
+        return self.metadata_dir / "collection_runs" / f"processing_{processing_run_id}.json"
+
+    def processing_inputs(self) -> list[Path]:
+        """Discover existing normalized-source inputs only; never discovery candidates."""
+        inputs = [self.raw_dir / "github" / f"{name}.jsonl" for name in
+                  ("repositories", "commits", "issues", "pull_requests", "contributors", "releases")]
+        inputs.append(self.raw_dir / "external" / "documents.jsonl")
+        return [path for path in inputs if path.is_file()]
 
 
 paths = StoragePaths()

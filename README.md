@@ -148,6 +148,60 @@ uv run reposeer crawl-external --candidates-file data/raw/external/discovery.jso
 uv run python scripts/crawl_external_sample.py --data-dir /tmp/reposeer-t017-demo
 ```
 
+## Offline processed datasets (T-019)
+
+T-019 replays saved canonical JSONL through the unchanged T-018 normalizer, then
+writes explicit-schema Zstd Parquet and a processing manifest. It calls no API or
+LLM and does not modify raw inputs. `StoragePaths(--data-dir)` controls all outputs.
+
+~~~bash
+uv run reposeer process --help
+uv run reposeer process --data-dir data
+uv run reposeer process --data-dir data --raw data/raw/github/repositories.jsonl --raw data/raw/external/documents.jsonl
+uv run reposeer process --data-dir data --targets-file verified_targets.json --cutoff-at 2024-01-01T00:00:00.000Z
+uv run python scripts/rebuild_processed.py --data-dir data
+~~~
+
+Default discovery uses existing GitHub repository/activity JSONL and external
+documents, never external discovery candidates. Missing explicit files fail.
+Optional targets must be a strict JSON array of upstream `VerifiedTargetContext`
+objects; none are inferred. Without targets, documents persist without relevance.
+An empty/no-eligible run fails; mixed accepted/rejected inputs are partial and the
+CLI exits 1. Invalid arguments/target files exit 2 before processing starts.
+Once a run starts, input/persistence failures exit 2 and record a failed manifest
+when the destination is writable.
+
+Seven datasets live at `<data-dir>/processed/<name>/<name>.parquet`:
+`repositories`, `github_activity`, `github_activity_details`,
+`external_documents`, `external_relevance`, `external_lineage`,
+`processing_audit`. Optional empty datasets do not create schemaless files or erase
+old rows. Nullable counters/availability remain null; observations and content
+revisions are retained. Replay inserts zero existing observation rows; audit history
+is separate per processing run. Conflicting keys/raw UUID fingerprints fail.
+
+Manifests are `<data-dir>/metadata/collection_runs/processing_<UUID>.json`.
+`processing_status=complete` means successful local processing, while
+`source_coverage=not_verified` makes no completeness claim about upstream data.
+Atomicity is per Parquet file, not a multi-file transaction; a failed run records
+written/failed/pending datasets and can be replayed idempotently. Use one writer at a
+time for a storage root. A cutoff only requests T-018 diagnostics, not historical proof.
+
+~~~python
+from pathlib import Path
+from reposeer.storage.query.duckdb import DuckDBQueryEngine
+
+engine = DuckDBQueryEngine()
+try:
+    engine.register_parquet("repositories", Path("data/processed/repositories/repositories.parquet"))
+    print(engine.execute_sql("SELECT repo_id, retrieved_at FROM repositories"))
+finally:
+    engine.close()
+~~~
+
+See [dataset grains, APIs and manifest semantics](docs/architecture/data_architecture.md).
+T-020 receives processed paths/counts and manifests; full collection orchestration,
+D09 features/labels, D10 training and D11 inference remain unimplemented.
+
 ## Data contract (T-011)
 
 Canonical exchange contract `0.1.0` aligns with T-008 architecture v0.3. Models, identity helpers, strict record/pair validation and typed GitHub adapters live in `src/reposeer/contracts/`; `src/reposeer/schemas/` remains legacy/internal DTOs.
@@ -200,7 +254,7 @@ Blank lines and full-line comments are ignored; inline comments are not parsed.
 Supply either a positional target or `--repos-file`, with 1 to 1,000 batch entries.
 Both single and batch collection support only `--source github` (the default).
 `pypi`, `external`, `all` and other sources exit 2 as unsupported before creating a client.
-`collect-activity` is a separate supported command. `process` and `build-features` are stubs, not implemented workflows; `FullPipeline` currently delegates only GitHub metadata.
+`collect-activity` is a separate supported command. `process` now runs offline T-019 persistence; `build-features` remains a stub; `FullPipeline` currently delegates only GitHub metadata.
 URLs with credentials, ports, queries, fragments, clone suffixes or extra path segments
 are rejected. Invalid entries are reported without echoing potentially sensitive input.
 

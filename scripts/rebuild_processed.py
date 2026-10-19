@@ -1,28 +1,11 @@
 #!/usr/bin/env python3
-"""Script to rebuild processed Parquet tables from raw JSONL storage."""
+"""Rebuild via the same offline processing implementation/options as reposeer process."""
 
-import logging
-
-from reposeer.storage.paths import paths
-from reposeer.storage.processed.parquet import ParquetStorage
-from reposeer.storage.raw.jsonl import JsonlStorage
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("rebuild_processed")
+from reposeer.cli.process import process_app
 
 
 def main() -> None:
-    jsonl = JsonlStorage()
-    parquet = ParquetStorage()
-
-    raw_file = paths.raw_path("github", "repositories")
-    if raw_file.exists():
-        records = jsonl.read(raw_file)
-        target = paths.processed_path("repositories")
-        parquet.write(target, records)
-        logger.info("Rebuilt %d records into %s", len(records), target)
-    else:
-        logger.info("No raw repositories found at %s", raw_file)
+    process_app()
 
 
 if __name__ == "__main__":

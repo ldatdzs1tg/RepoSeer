@@ -8,6 +8,9 @@ from uuid import uuid4
 
 import polars as pl
 
+from reposeer.collectors.github.repository import (
+    repository_exclusion_reasons as _repository_exclusion_reasons,
+)
 from reposeer.contracts import (
     SCHEMA_VERSION,
     CollectionRequest,
@@ -26,7 +29,12 @@ from reposeer.contracts.adapters import (
 from reposeer.contracts.identity import canonical_github_url, validate_http_url
 from reposeer.exceptions import CollectionError, StorageError
 from reposeer.storage.paths import StoragePaths, paths
-from reposeer.storage.processed.parquet import ParquetStorage
+from reposeer.storage.processed.dataset_writer import (
+    ProcessedDatasetWriter,
+)
+from reposeer.storage.processed.dataset_writer import (
+    repository_row as _repository_row,
+)
 from reposeer.storage.raw.jsonl import JsonlStorage
 
 
@@ -97,47 +105,10 @@ def _repository_public_scope(
     return "unverified", ()
 
 
-def _repository_exclusion_reasons(repository: GitHubRepository) -> tuple[str, ...]:
-    return tuple(
-        reason
-        for excluded, reason in (
-            (repository.visibility == "private", "private_repository"),
-            (repository.visibility == "internal", "internal_repository"),
-            (repository.is_fork, "fork_repository"),
-            (repository.is_template, "template_repository"),
-            (repository.mirror_url is not None, "mirror_repository"),
-        )
-        if excluded
-    )
-
-
 def _batch_failure(
     target: str, code: str, message: str, repo_id: str | None = None
 ) -> RepositoryBatchItem:
     return RepositoryBatchItem(target, "failed", repo_id, (), code, message)
-
-
-def _repository_row(record: GitHubRepository) -> dict:
-    return {
-        "schema_version": record.schema_version,
-        "repo_id": record.identity.repo_id,
-        "github_repo_id": record.identity.github_repo_id,
-        "repo_full_name": record.identity.repo_full_name,
-        "repo_url": record.identity.repo_url,
-        "retrieved_at": record.provenance.retrieved_at,
-        "valid_at": record.provenance.valid_at,
-        "available_at": record.provenance.available_at,
-        "temporal_basis": record.provenance.temporal_basis,
-        "source": record.provenance.source,
-        "source_url": record.provenance.source_url,
-        "raw_record_id": record.provenance.raw_record_ids[0],
-        "is_archived": record.is_archived,
-        "is_fork": record.is_fork,
-        "is_template": record.is_template,
-        "stargazers_count": record.stargazers_count,
-        "forks_count": record.forks_count,
-        "open_issues_and_prs_count": record.open_issues_and_prs_count,
-    }
 
 
 class RepositoryService:
@@ -146,7 +117,8 @@ class RepositoryService:
         self.normalizer = GitHubRepositoryContractNormalizer()
         self.paths = storage_paths if storage_paths is not None else paths
         self.raw_storage = JsonlStorage()
-        self.parquet_storage = ParquetStorage()
+        self.dataset_writer = ProcessedDatasetWriter(self.paths)
+        self.parquet_storage = self.dataset_writer.parquet_storage
 
     def close(self) -> None:
         self.collector.close()
@@ -197,31 +169,16 @@ class RepositoryService:
         return normalized.records[0]
 
     def _write_processed_rows(self, rows: list[dict]) -> int:
-        if not rows:
-            return 0
-        schema = {key: pl.String for key in rows[0]}
-        schema.update({key: pl.Boolean for key in ("is_archived", "is_fork", "is_template")})
-        schema.update(
-            {
-                key: pl.Int64
-                for key in ("stargazers_count", "forks_count", "open_issues_and_prs_count")
-            }
-        )
         try:
-            frame = pl.DataFrame(rows, schema=schema)
-            processed_file = self.paths.processed_path("repositories")
-            existing = self.parquet_storage.read(processed_file)
-            # An existing empty table also needs the canonical schema.
-            if processed_file.exists() or existing.width:
-                if existing.schema != frame.schema:
-                    raise CollectionError(
-                        "Existing processed repository schema requires explicit migration"
-                    )
-                frame = pl.concat([existing, frame])
-            self.parquet_storage.write(processed_file, frame)
+            return self.dataset_writer.upsert_repositories(rows)
+        except ValueError as error:
+            if "explicit migration" in str(error):
+                raise CollectionError(
+                    "Existing processed repository schema requires explicit migration"
+                ) from error
+            raise CollectionError("Unable to persist processed repository data") from error
         except (OSError, StorageError, pl.exceptions.PolarsError) as error:
             raise CollectionError("Unable to persist processed repository data") from error
-        return len(rows)
 
     def collect_and_store(self, owner: str, repo: str) -> GitHubRepository:
         collected = self._collect_repository(f"{owner}/{repo}", str(uuid4()))
