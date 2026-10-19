@@ -1,0 +1,55 @@
+name: RepoSeer Regression
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: Python 3.12 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install frozen dependencies
+        run: uv sync --extra dev --frozen
+
+      - name: Validate canonical contract
+        run: uv run --frozen python scripts/export_contract.py --check
+
+      - name: Validate contract examples
+        run: uv run --frozen python scripts/validate_examples.py
+
+      - name: Check Ruff
+        run: uv run --frozen ruff check src tests scripts
+
+      - name: Run offline regression
+        run: uv run --frozen pytest -q -m "not smoke"

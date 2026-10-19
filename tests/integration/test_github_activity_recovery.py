@@ -10,6 +10,8 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from typer.core import TyperOption
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from reposeer.cli import collect_activity as cli
@@ -593,8 +595,17 @@ def test_cli_start_resume_and_original_collect_remain_available(environment, tmp
     assert resumed.exit_code == 0 and len(calls) == before
     assert len(services) == 2
     help_result = runner.invoke(app, ["collect", "--help"])
-    assert help_result.exit_code == 0 and "--repos-file" in help_result.output
-    assert "--source" in help_result.output
+    assert help_result.exit_code == 0, help_result.output
+
+    collect_command = get_command(app).commands["collect"]
+    registered_options = {
+        option
+        for parameter in collect_command.params
+        if isinstance(parameter, TyperOption)
+        for option in (*parameter.opts, *parameter.secondary_opts)
+    }
+    assert "--repos-file" in registered_options
+    assert "--source" in registered_options
     assert SECRET not in result.output + resumed.output
 
 
