@@ -186,6 +186,21 @@ Atomicity is per Parquet file, not a multi-file transaction; a failed run record
 written/failed/pending datasets and can be replayed idempotently. Use one writer at a
 time for a storage root. A cutoff only requests T-018 diagnostics, not historical proof.
 
+Each dataset entry adds optional `content_sha256` (streamed SHA-256 of the physical
+Parquet bytes) and `relative_path` (POSIX `processed/<dataset>/<dataset>.parquet`).
+Resolve portable paths as `storage_root / Path(entry.relative_path)`; the existing
+`path` remains compatibility/debug metadata for the original environment. Missing
+optional files have a null hash and their expected relative path. Legacy manifests
+without these fields remain readable and are never silently migrated.
+
+A fingerprint describes bytes at that run, not an immutable snapshot: later
+incremental writes change the current file while earlier manifests retain their
+original hashes. Comparing an old hash with current bytes does not establish
+corruption. Hash-read failure after a successful write fails the run, preserves the
+valid file and its actual row counts, and permits idempotent replay. T-020 can use
+these paths and fingerprints; they verify neither source coverage nor historical
+validity. Full T-020 orchestration remains planned.
+
 ~~~python
 from pathlib import Path
 from reposeer.storage.query.duckdb import DuckDBQueryEngine

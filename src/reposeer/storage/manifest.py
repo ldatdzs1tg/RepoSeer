@@ -1,14 +1,23 @@
 """Typed processing manifests; collection checkpoints remain owned by RunManager."""
 
-from pathlib import Path
+import hashlib
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from reposeer.collection.persistence import write_json_atomic
 from reposeer.contracts.models import RawRecordId, Sha256, UtcTimestamp, UuidText
 from reposeer.pipelines.normalization import ProcessingSummary
 from reposeer.storage.paths import StoragePaths
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class DatasetWrite(BaseModel):
@@ -18,6 +27,18 @@ class DatasetWrite(BaseModel):
     total_row_count: int | None = Field(ge=0)
     schema_version: Literal["1"] = "1"
     status: Literal["pending", "written", "unchanged", "failed"]
+    content_sha256: Sha256 | None = None
+    relative_path: str | None = None
+
+    @field_validator("relative_path")
+    @classmethod
+    def portable_path(cls, value: str | None) -> str | None:
+        if value is not None:
+            path = PurePosixPath(value)
+            if (not value.strip() or not path.parts or "\\" in value
+                    or path.is_absolute() or PureWindowsPath(value).drive or ".." in path.parts):
+                raise ValueError("dataset_path_must_be_relative_posix")
+        return value
 
 
 class ProcessingManifest(BaseModel):

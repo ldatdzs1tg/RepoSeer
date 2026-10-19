@@ -73,6 +73,28 @@ actual collection run IDs, inserted/total counts and dataset states, T-018 summa
 sanitized errors and explicit missing reasons. Existing run manifests are not overwritten.
 A failed/pending preflight keeps an unknown total row count null, not zero.
 
+Dataset entries additionally expose optional `content_sha256` and `relative_path`,
+without changing version `1` or the Parquet schemas. The shared streaming helper
+hashes physical file bytes in 1 MiB chunks once per persisted dataset per run.
+Written and existing unchanged files receive their actual SHA-256; missing optional
+files retain null hashes and zero rows without creating empty Parquet. Hash-read
+failure after atomic replacement marks the dataset/run failed, preserves the valid
+file and actual inserted/total counts, and propagates the original error for replay.
+
+Portable paths use POSIX `processed/<dataset>/<dataset>.parquet` beneath the storage
+root. Downstream consumers should resolve `storage_root / Path(entry.relative_path)`;
+the existing `path` remains compatible metadata for the original environment.
+Containment is checked before creating dataset directories; traversal, absolute,
+drive/UNC and backslash paths are rejected. Legacy manifests missing both optional
+fields still load with null values and are not rewritten.
+
+Output hashes describe the physical file at manifest creation time. A later
+incremental run can replace the current file; earlier manifests retain their
+original hashes and remain readable. Their hash differing from current bytes alone
+does not imply corruption. History scans validate raw UUID fingerprints, without
+requiring old output hashes to match current files. There is no immutable versioned
+Parquet snapshot store.
+
 `processing_status` is complete only for successful persistence with accepted
 handoff data and no actual input rejection; partial retains accepted data plus
 rejections; failed means no eligible handoff data or an input/persistence failure.

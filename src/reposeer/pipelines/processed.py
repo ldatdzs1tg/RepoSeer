@@ -17,7 +17,7 @@ from reposeer.contracts.models import UuidText
 from reposeer.exceptions import StorageError
 from reposeer.pipelines.normalization import NormalizationPipeline
 from reposeer.processing.relevance import VerifiedTargetContext
-from reposeer.storage.manifest import DatasetWrite, ProcessingManifest, write_manifest
+from reposeer.storage.manifest import DatasetWrite, ProcessingManifest, _file_sha256, write_manifest
 from reposeer.storage.paths import StoragePaths
 from reposeer.storage.processed.dataset_writer import ProcessedDatasetWriter, stable_json
 from reposeer.storage.raw.jsonl import JsonlStorage
@@ -32,14 +32,6 @@ class ProcessingWriteResult(BaseModel):
     dataset_row_counts: dict[str, int]
     error_count: int = Field(ge=0)
     datasets: dict[str, DatasetWrite]
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 class ProcessedDatasetPipeline:

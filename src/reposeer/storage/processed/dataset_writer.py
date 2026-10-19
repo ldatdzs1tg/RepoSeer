@@ -1,6 +1,7 @@
 """Explicit T-019 projections and idempotent, per-file atomic processed persistence."""
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -10,7 +11,7 @@ from reposeer.collectors.github.repository import repository_exclusion_reasons
 from reposeer.contracts import GitHubRepository, validate_record
 from reposeer.contracts.models import UuidText
 from reposeer.exceptions import StorageError
-from reposeer.storage.manifest import DatasetWrite
+from reposeer.storage.manifest import DatasetWrite, _file_sha256
 from reposeer.storage.paths import StoragePaths
 from reposeer.storage.processed.parquet import ParquetStorage
 
@@ -94,8 +95,19 @@ class ProcessedDatasetWriter:
         self.parquet_storage = ParquetStorage()
         self.dataset_results: dict[str, DatasetWrite] = {}
 
+    def _dataset_location(self, name: str) -> tuple[Path, str]:
+        if name not in DATASET_SCHEMAS:
+            raise ValueError("unsupported_processed_dataset")
+        path = self.paths.processed_dir / name / f"{name}.parquet"
+        try:
+            path.resolve().relative_to(self.paths.base_dir.resolve())
+            relative = path.relative_to(self.paths.base_dir).as_posix()
+        except ValueError as error:
+            raise ValueError("dataset_path_outside_storage_root") from error
+        return path, relative
+
     def _prepare(self, name: str, rows: list[dict]) -> tuple[pl.DataFrame, int, int, bool]:
-        path = self.paths.processed_path(name)
+        path, _ = self._dataset_location(name)
         schema, keys = DATASET_SCHEMAS[name], DATASET_KEYS[name]
         incoming = pl.DataFrame(rows, schema=schema, strict=True)
         existing = self.parquet_storage.read(path)
@@ -120,16 +132,23 @@ class ProcessedDatasetWriter:
 
     def _persist(self, name: str, prepared: tuple[pl.DataFrame, int, int, bool]) -> int:
         frame, inserted, previous_count, changed = prepared
-        info = DatasetWrite(path=str(self.paths.processed_path(name)), inserted_row_count=0,
+        path, relative = self._dataset_location(name)
+        info = DatasetWrite(path=str(path), relative_path=relative, inserted_row_count=0,
                             total_row_count=previous_count, status="unchanged")
         self.dataset_results[name] = info
-        if changed:
-            try:
-                self.parquet_storage.write(self.paths.processed_path(name), frame)
-            except (OSError, StorageError, pl.exceptions.PolarsError):
-                info.status = "failed"
-                raise
-            info.inserted_row_count, info.total_row_count, info.status = inserted, frame.height, "written"
+        try:
+            if changed:
+                self.parquet_storage.write(path, frame)
+                info.inserted_row_count, info.total_row_count = inserted, frame.height
+            if path.exists():
+                info.content_sha256 = _file_sha256(path)
+            elif changed or previous_count:
+                raise FileNotFoundError(path)
+            if changed:
+                info.status = "written"
+        except (OSError, StorageError, pl.exceptions.PolarsError):
+            info.status = "failed"
+            raise
         return inserted
 
     def upsert_repositories(self, rows: list[dict]) -> int:
@@ -237,8 +256,9 @@ class ProcessedDatasetWriter:
         rows = self._project(result, processing_run_id)
         prepared = {}
         for name in DATASET_SCHEMAS:
+            path, relative = self._dataset_location(name)
             self.dataset_results[name] = DatasetWrite(
-                path=str(self.paths.processed_path(name)), inserted_row_count=0,
+                path=str(path), relative_path=relative, inserted_row_count=0,
                 total_row_count=None, status="pending")
             try:
                 prepared[name] = self._prepare(name, rows[name])
