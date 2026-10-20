@@ -50,17 +50,14 @@ htmlcov/
 # Jupyter
 .ipynb_checkpoints/
 
-# Data directories (keep directory structure via .gitkeep)
-data/raw/**
-!data/raw/**/.gitkeep
-data/processed/**
-!data/processed/**/.gitkeep
-data/features/**
-!data/features/**/.gitkeep
-data/reports/**
-!data/reports/**/.gitkeep
-data/metadata/**
-!data/metadata/**/.gitkeep
+# Generated datasets and runtime artifacts
+# Ignore raw data, processed data, sampling snapshots,
+# manifests, reports, pilot runs and future data outputs.
+data/**
+
+# Preserve directory placeholders
+!data/**/
+!data/**/.gitkeep
 
 # Reference & temporary
 reference-markdown/
@@ -72,3 +69,5 @@ reference-markdown/
 
 # Optional project-local uv cache
 .uv-cache/
+# T-020A sampling source artifacts and registries
+data/registry/
