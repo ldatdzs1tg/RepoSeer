@@ -162,6 +162,32 @@ Discovery does not trigger T-020, fetch per-package JSON, query GitHub, install
 packages, crawl articles or call an LLM. Registry artifacts are not T-011 raw
 records and are excluded from unchanged T-019 processing inputs and schemas.
 
+## Terminal progress
+
+Interactive terminals (including PowerShell) show a single Rich progress panel on
+stderr, refreshed at most four times per second. Non-TTY/redirected stderr, CI and
+`--no-progress` disable dynamic rendering; the existing summary remains on stdout.
+For example, append `--no-progress` to any discovery command above.
+
+Download reports decoded bytes, measured throughput, elapsed time and retry
+attempts. It has no percentage or ETA: compressed Content-Length is not a decoded
+byte total. Counters and speed restart for each attempt. Snapshot verification is
+an indeterminate spinner across metadata, hash, HTML checks and import; its
+multiple reads are never summed into a one-file percentage. Parsing/normalization
+uses actual bytes read divided by snapshot size, with valid name occurrences;
+file input uses file byte size, including comments and blank lines. SQLite frame
+building, deduplication and selection use a spinner, without extra COUNT queries.
+Batch progress advances only after write, fsync, content verification and hashing.
+Finalization covers artifact checks, manifest write and atomic publication;
+`Completed` is emitted only after export returns successfully. Errors and Ctrl+C
+close the terminal context without reporting successful completion.
+
+`ProgressEvent`/optional callbacks in the existing index client and pipeline carry
+only ephemeral stage/counter observations at byte or batch boundaries. Rich stays
+in the CLI. No progress fields/log files are persisted. Algorithm, counts, schemas,
+snapshot checksums, selected targets and batch bytes are unchanged with progress
+on or off. A callback should be lightweight and must not mutate source files.
+
 ## Operations and verification
 
 Use an isolated data root for demos. Keep enough disk space for decoded index,

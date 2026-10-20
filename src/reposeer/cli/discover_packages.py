@@ -1,18 +1,93 @@
 """Generate evidenced PyPI target batches; collection is a separate command."""
 
 import json
+import os
 import sqlite3
+import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import typer
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    FileSizeColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 
-from reposeer.clients.pypi_index import DEFAULT_INDEX_BYTES, PackageDiscoveryError
+from reposeer.clients.pypi_index import DEFAULT_INDEX_BYTES, PackageDiscoveryError, ProgressEvent
 from reposeer.pipelines.package_discovery import PackageDiscoveryOptions, PackageDiscoveryPipeline
 from reposeer.storage.paths import StoragePaths
 
 discover_packages_app = typer.Typer(
     help="Discover PyPI names and export reproducible target batches."
 )
+
+
+class _DiscoveryProgress(Progress):
+    """Render one current phase; byte totals and ETA exist only for local reads."""
+
+    def __init__(self, console: Console):
+        super().__init__(console=console, refresh_per_second=4)
+        self.current_stage = None
+        self.current_task = None
+
+    def refresh(self) -> None:
+        # add_task normally renders immediately; let Live's 4 Hz loop render phases.
+        if not self.live.is_started:
+            super().refresh()
+
+    def report(self, event: ProgressEvent) -> None:
+        new_attempt = (
+            event.stage == "downloading"
+            and event.completed == 0
+            and event.message is not None
+            and event.message.startswith("Downloading")
+        )
+        if event.stage != self.current_stage or new_attempt:
+            if self.current_task is not None:
+                self.remove_task(self.current_task)
+            columns = [SpinnerColumn(), TextColumn("{task.description}")]
+            if event.stage == "downloading":
+                columns += [FileSizeColumn(), TransferSpeedColumn()]
+            elif event.stage in {"parsing", "reading_file"}:
+                columns += [
+                    BarColumn(),
+                    TextColumn("{task.percentage:>5.1f}%"),
+                    FileSizeColumn(),
+                    TimeRemainingColumn(),
+                    TextColumn("{task.fields[items]}"),
+                ]
+            elif event.stage == "exporting":
+                columns += [BarColumn(), TextColumn("{task.completed:.0f} / {task.total:.0f}")]
+            elif event.stage == "sampling":
+                columns += [TextColumn("{task.fields[items]}")]
+            self.columns = (*columns, TimeElapsedColumn())
+            self.current_task = self.add_task(
+                event.message
+                or {
+                    "parsing": "Parsing & normalization",
+                    "exporting": "Exporting batches",
+                }.get(event.stage, event.stage),
+                total=event.total,
+                items="",
+            )
+            self.current_stage = event.stage
+        fields = {}
+        if event.message is not None:
+            fields["description"] = event.message
+        if event.items_seen is not None:
+            fields["items"] = f"{event.items_seen:,} names"
+        if event.stage == "completed":
+            fields.update(total=1, completed=1)
+        else:
+            fields["completed"] = event.completed
+        self.update(self.current_task, **fields)
 
 
 @discover_packages_app.callback(invoke_without_command=True)
@@ -32,6 +107,9 @@ def main(
     ),
     exclude_file: Path | None = typer.Option(
         None, "--exclude-file", help="Explicit UTF-8 exclusions"
+    ),
+    no_progress: bool = typer.Option(
+        False, "--no-progress", help="Disable terminal progress (automatic for non-TTY/CI)"
     ),
     max_index_bytes: int = typer.Option(
         DEFAULT_INDEX_BYTES, "--max-index-bytes", help="Decoded-byte budget, at most 512 MiB"
@@ -53,8 +131,19 @@ def main(
     except ValueError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(2) from None
+    console = Console(stderr=True)
+    enabled = (
+        not no_progress
+        and sys.stderr.isatty()
+        and console.is_terminal
+        and not console.is_dumb_terminal
+        and not os.environ.get("CI")
+    )
     try:
-        result = PackageDiscoveryPipeline().run(options)
+        with _DiscoveryProgress(console) if enabled else nullcontext() as progress:
+            result = PackageDiscoveryPipeline(
+                progress=progress.report if progress is not None else None,
+            ).run(options)
         manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     except PackageDiscoveryError as error:
         typer.echo(str(error), err=True)

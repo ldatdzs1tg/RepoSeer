@@ -14,13 +14,16 @@ from typing import Literal
 from uuid import uuid4
 
 from reposeer.clients.pypi_index import (
+    CHUNK_SIZE,
     DEFAULT_INDEX_BYTES,
     PackageDiscoveryError,
+    ProgressCallback,
     PyPIIndexClient,
     copy_snapshot,
     file_fingerprint,
     load_snapshot,
     parse_index,
+    report_progress,
     validate_byte_budget,
 )
 from reposeer.collection.persistence import write_json_atomic
@@ -98,9 +101,21 @@ class PackageDiscoveryResult:
     snapshot_path: Path | None
 
 
-def _load_names(path: Path, on_name: Callable[[str], None], *, kind: str) -> tuple[str, int]:
+def _load_names(
+    path: Path,
+    on_name: Callable[[str], None],
+    *,
+    kind: str,
+    progress: ProgressCallback | None = None,
+) -> tuple[str, int]:
     """Read and hash original bytes; reject bad rows without echoing their contents."""
     digest, valid = hashlib.sha256(), 0
+    size = reported = 0
+    total = path.stat().st_size if progress is not None else None
+    message = "Reading exclusions" if kind == "exclusion" else "Parsing & normalization"
+    report_progress(
+        progress, "reading_file", completed=0, total=total, message=message, items_seen=0
+    )
     with path.open("rb") as stream:
         line_number = 0
         while raw := stream.readline(1048577):
@@ -108,15 +123,25 @@ def _load_names(path: Path, on_name: Callable[[str], None], *, kind: str) -> tup
             if len(raw) > 1048576:
                 raise PackageDiscoveryError(f"invalid_{kind}_row:{line_number}")
             digest.update(raw)
+            size += len(raw)
             try:
                 value = raw.decode("utf-8-sig" if line_number == 1 else "utf-8").strip()
-                if not value or value.startswith("#"):
-                    continue
-                name = normalize_pypi_name(value[5:] if value.startswith("pypi:") else value)
+                if value and not value.startswith("#"):
+                    name = normalize_pypi_name(value[5:] if value.startswith("pypi:") else value)
+                else:
+                    name = None
             except (UnicodeError, ValueError) as error:
                 raise PackageDiscoveryError(f"invalid_{kind}_row:{line_number}") from error
-            on_name(name)
-            valid += 1
+            if name is not None:
+                on_name(name)
+                valid += 1
+            # Row parsing stays bounded, with notifications only at byte boundaries.
+            if progress is not None and size - reported >= CHUNK_SIZE:
+                report_progress(
+                    progress, "reading_file", completed=size, total=total, items_seen=valid
+                )
+                reported = size
+    report_progress(progress, "reading_file", completed=size, total=total, items_seen=valid)
     return digest.hexdigest(), valid
 
 
@@ -138,8 +163,10 @@ class PackageDiscoveryPipeline:
         *,
         index_client: PyPIIndexClient | None = None,
         clock: Callable[[], datetime] | None = None,
+        progress: ProgressCallback | None = None,
     ):
         self.index_client = index_client
+        self.progress = progress
         self.clock = clock or (lambda: datetime.now(UTC))
 
     def run(self, options: PackageDiscoveryOptions) -> PackageDiscoveryResult:
@@ -149,6 +176,7 @@ class PackageDiscoveryPipeline:
         created_at = format_utc_timestamp(self.clock())
         run_id = str(uuid4())
         snapshot = None
+        report_progress(self.progress, "sampling", message="Building sampling frame")
         # Validate explicit exclusions before acquiring any network source.
         with tempfile.TemporaryDirectory(prefix="reposeer-sampling-") as scratch:
             with closing(sqlite3.connect(Path(scratch) / "frame.sqlite")) as db:
@@ -170,7 +198,9 @@ class PackageDiscoveryPipeline:
 
                 exclusion_hash = None
                 if options.exclude_file is not None:
-                    exclusion_hash, _ = _load_names(options.exclude_file, exclude, kind="exclusion")
+                    exclusion_hash, _ = _load_names(
+                        options.exclude_file, exclude, kind="exclusion", progress=self.progress
+                    )
                 db.executemany("INSERT OR IGNORE INTO exclusions VALUES (?)", exclusion_rows)
                 exclusion_rows.clear()
                 excluded_name_count = db.execute("SELECT COUNT(*) FROM exclusions").fetchone()[0]
@@ -194,20 +224,31 @@ class PackageDiscoveryPipeline:
                     snapshots = registry / "snapshots"
                     if options.source == "snapshot":
                         snapshot = copy_snapshot(
-                            load_snapshot(options.snapshot, max_bytes=options.max_index_bytes),
+                            load_snapshot(
+                                options.snapshot,
+                                max_bytes=options.max_index_bytes,
+                                progress=self.progress,
+                            ),
                             snapshots,
                         )
                     elif self.index_client is not None:
                         snapshot = self.index_client.fetch_snapshot(
-                            snapshots, max_decoded_bytes=options.max_index_bytes
+                            snapshots,
+                            max_decoded_bytes=options.max_index_bytes,
+                            progress=self.progress,
                         )
                     else:
                         with PyPIIndexClient(clock=self.clock) as client:
                             snapshot = client.fetch_snapshot(
-                                snapshots, max_decoded_bytes=options.max_index_bytes
+                                snapshots,
+                                max_decoded_bytes=options.max_index_bytes,
+                                progress=self.progress,
                             )
                     parser, digest, size = parse_index(
-                        snapshot.path, candidate, max_bytes=options.max_index_bytes
+                        snapshot.path,
+                        candidate,
+                        max_bytes=options.max_index_bytes,
+                        progress=self.progress,
                     )
                     if (digest, size) != (snapshot.sha256, snapshot.decoded_byte_count):
                         raise PackageDiscoveryError("snapshot_changed_during_sampling")
@@ -232,7 +273,9 @@ class PackageDiscoveryPipeline:
                         input_file_sha256=None,
                     )
                 else:
-                    digest, valid_entries = _load_names(options.input_file, candidate, kind="input")
+                    digest, valid_entries = _load_names(
+                        options.input_file, candidate, kind="input", progress=self.progress
+                    )
                     parsing = dict(anchors_seen=None, valid_project_entries=None, invalid_entries=0)
                     source = dict(
                         kind=source_kind,
@@ -246,6 +289,7 @@ class PackageDiscoveryPipeline:
                         frame_scope="user_supplied_subset",
                         input_file_sha256=digest,
                     )
+                report_progress(self.progress, "sampling", message="Deduplicating sampling frame")
                 db.executemany("INSERT OR IGNORE INTO candidates VALUES (?, ?)", rows)
                 rows.clear()
                 db.commit()
@@ -263,6 +307,12 @@ class PackageDiscoveryPipeline:
                 parsing["duplicate_normalized_names"] = counts["normalized_duplicates"]
                 if counts["eligible_unique_candidates"] < options.count:
                     raise PackageDiscoveryError("insufficient_eligible_candidates")
+                report_progress(
+                    self.progress,
+                    "sampling",
+                    message="Selecting sample",
+                    items_seen=unique_count,
+                )
                 names = [
                     row[0]
                     for row in db.execute(
@@ -275,7 +325,7 @@ class PackageDiscoveryPipeline:
                     )
                 ]
         # SQLite connection closes before the system-temp directory is removed (Windows).
-        return self._export(
+        result = self._export(
             options,
             paths,
             names,
@@ -287,6 +337,8 @@ class PackageDiscoveryPipeline:
             dict(file_sha256=exclusion_hash, excluded_name_count=excluded_name_count),
             snapshot.path if snapshot else None,
         )
+        report_progress(self.progress, "completed", message="Completed")
+        return result
 
     def _export(
         self,
@@ -309,6 +361,7 @@ class PackageDiscoveryPipeline:
         if final.exists():
             raise PackageDiscoveryError("sampling_run_already_exists")
         batch_count = (len(names) + options.batch_size - 1) // options.batch_size
+        report_progress(self.progress, "exporting", completed=0, total=batch_count)
         # Staging is a sibling of runs, not a completed UUID directory.
         with tempfile.TemporaryDirectory(prefix=".sampling-", dir=runs.parent) as staging:
             stage = Path(staging)
@@ -355,6 +408,10 @@ class PackageDiscoveryPipeline:
                     raise PackageDiscoveryError("invalid_exported_batch")
                 replayed.extend(actual)
                 batches.append(dict(batch_id=batch_id, **artifact(batch, len(selected))))
+                report_progress(self.progress, "exporting", completed=index, total=batch_count)
+            report_progress(
+                self.progress, "finalizing", message="Finalizing artifacts and manifest"
+            )
             if (
                 targets_path.read_text(encoding="utf-8").splitlines() != replayed
                 or len(set(replayed)) != options.count

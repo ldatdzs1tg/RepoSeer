@@ -38,6 +38,25 @@ class PackageDiscoveryError(ValueError):
 
 
 @dataclass(frozen=True)
+class ProgressEvent:
+    """Ephemeral acquisition/sampling observations, never persisted in artifacts."""
+
+    stage: str
+    completed: int | None = None
+    total: int | None = None
+    message: str | None = None
+    items_seen: int | None = None
+
+
+ProgressCallback = Callable[[ProgressEvent], None]
+
+
+def report_progress(progress: ProgressCallback | None, stage: str, **values) -> None:
+    if progress is not None:
+        progress(ProgressEvent(stage, **values))
+
+
+@dataclass(frozen=True)
 class IndexSnapshot:
     path: Path
     sha256: str
@@ -180,9 +199,12 @@ def parse_index(
     on_project: Callable[[str], None] | None = None,
     *,
     max_bytes: int = DEFAULT_INDEX_BYTES,
+    progress: ProgressCallback | None = None,
 ) -> tuple[IndexHTMLParser, str, int]:
     parser, decoder = IndexHTMLParser(on_project), codecs.getincrementaldecoder("utf-8-sig")()
     digest, size = hashlib.sha256(), 0
+    total = path.stat().st_size if progress is not None else None
+    report_progress(progress, "parsing", completed=0, total=total, items_seen=0)
     try:
         with path.open("rb") as stream:
             while chunk := stream.read(CHUNK_SIZE):
@@ -191,15 +213,36 @@ def parse_index(
                     raise PackageDiscoveryError("index_byte_budget_exceeded")
                 digest.update(chunk)
                 parser.feed(decoder.decode(chunk))
+                report_progress(
+                    progress,
+                    "parsing",
+                    completed=size,
+                    total=total,
+                    items_seen=parser.valid_project_entries,
+                )
         parser.feed(decoder.decode(b"", final=True))
         parser.finish()
     except UnicodeError as error:
         raise PackageDiscoveryError("invalid_index_utf8") from error
+    report_progress(
+        progress,
+        "parsing",
+        completed=size,
+        total=total,
+        items_seen=parser.valid_project_entries,
+    )
     return parser, digest.hexdigest(), size
 
 
-def load_snapshot(path: Path, *, max_bytes: int = DEFAULT_INDEX_BYTES) -> IndexSnapshot:
+def load_snapshot(
+    path: Path,
+    *,
+    max_bytes: int = DEFAULT_INDEX_BYTES,
+    progress: ProgressCallback | None = None,
+) -> IndexSnapshot:
     validate_byte_budget(max_bytes)
+    # Several full reads follow; an indeterminate phase avoids double-counting bytes.
+    report_progress(progress, "verifying", message="Verifying snapshot")
     try:
         meta = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
         if (
@@ -392,13 +435,23 @@ class PyPIIndexClient:
         return delay
 
     def fetch_snapshot(
-        self, destination_dir: Path, *, max_decoded_bytes: int = DEFAULT_INDEX_BYTES
+        self,
+        destination_dir: Path,
+        *,
+        max_decoded_bytes: int = DEFAULT_INDEX_BYTES,
+        progress: ProgressCallback | None = None,
     ) -> IndexSnapshot:
         validate_byte_budget(max_decoded_bytes)
         destination_dir.mkdir(parents=True, exist_ok=True)
         waited = 0.0
         for attempt in range(1, self.max_attempts + 1):
             temporary, size, status, started = None, 0, None, time.monotonic()
+            report_progress(
+                progress,
+                "downloading",
+                completed=0,
+                message=f"Downloading PyPI Index (attempt {attempt}/{self.max_attempts})",
+            )
             try:
                 request = self.client.build_request("GET", INDEX_URL, timeout=self.timeout)
                 # Borrowed clients may carry query credentials as default params.
@@ -447,6 +500,7 @@ class PyPIIndexClient:
                             digest.update(chunk)
                             output.write(chunk)
                             parser.feed(decoder.decode(chunk))
+                            report_progress(progress, "downloading", completed=size)
                         parser.feed(decoder.decode(b"", final=True))
                         parser.finish()
                         output.flush()
@@ -484,6 +538,12 @@ class PyPIIndexClient:
                     size,
                     time.monotonic() - started,
                 )
+            report_progress(
+                progress,
+                "downloading",
+                completed=size,
+                message=f"Retrying in {delay:g}s (attempt {attempt}/{self.max_attempts})",
+            )
             self.sleep(delay)
             waited += delay
         raise PackageDiscoveryError("index_attempts_exhausted")

@@ -157,6 +157,13 @@ of the official PyPI Simple Index and reproducible SHA-256 priority sampling:
 uv run reposeer discover-packages --source pypi-simple --count 1000 --seed 20261020 --batch-size 50 --data-dir data
 ```
 
+Interactive terminals show progress on stderr (up to 4 refreshes/second).
+Use `--no-progress` to disable it; CI/non-TTY stderr disables it automatically.
+Download shows decoded bytes, speed and retry attempt without an unknown-total
+percentage/ETA. Parsing percentages measure bytes read; SQLite uses a spinner,
+and batch counts advance after durable verified writes. Progress preserves sampling
+results and keeps the summary on stdout.
+
 The summary prints the new sampling UUID, snapshot checksum, actual frame counts,
 registry CSV, manifest and batch paths. Use one generated batch with T-020:
 

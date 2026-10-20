@@ -576,7 +576,9 @@ def test_100000_streamed_projects_and_sqlite_scratch_cleanup(tmp_path, monkeypat
 
 
 def test_existing_corrupt_content_addressed_snapshot_is_never_overwritten(tmp_path):
-    with PyPIIndexClient(transport=httpx.MockTransport(lambda request: response(["demo", "other"]))) as client:
+    with PyPIIndexClient(
+        transport=httpx.MockTransport(lambda request: response(["demo", "other"]))
+    ) as client:
         snapshot = client.fetch_snapshot(tmp_path / "snapshots")
         metadata = snapshot.path.with_suffix(".json").read_bytes()
         snapshot.path.write_bytes(b"corrupted-existing-evidence")
@@ -585,3 +587,234 @@ def test_existing_corrupt_content_addressed_snapshot_is_never_overwritten(tmp_pa
         assert snapshot.path.read_bytes() == b"corrupted-existing-evidence"
         assert snapshot.path.with_suffix(".json").read_bytes() == metadata
         assert not list(snapshot.path.parent.glob("*.tmp"))
+
+
+def test_progress_streaming_retry_parsing_and_replay(tmp_path):
+    from reposeer.clients.pypi_index import parse_index
+
+    events, calls = [], []
+    body = b"".join(index(f"project-{i}" for i in range(3000)))
+
+    def interrupted():
+        yield body[:65536]
+        raise httpx.ReadTimeout("interrupted")
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            stream=Chunks(interrupted if len(calls) == 1 else lambda: iter([body])),
+        )
+
+    with PyPIIndexClient(
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _: None,
+        clock=lambda: NOW,
+    ) as client:
+        observed = PackageDiscoveryPipeline(index_client=client, progress=events.append).run(
+            replace(options(tmp_path), count=5, batch_size=2)
+        )
+    download = [event for event in events if event.stage == "downloading"]
+    assert all(event.total is None for event in download)
+    starts = [i for i, event in enumerate(download) if event.completed == 0]
+    assert len(starts) == 2 and "attempt 2/3" in download[starts[1]].message
+    assert download[starts[1] - 1].completed == 65536
+    assert "Retrying" in download[starts[1] - 1].message
+    for attempt in (download[: starts[1]], download[starts[1] :]):
+        assert [event.completed for event in attempt] == sorted(
+            event.completed for event in attempt
+        )
+    assert download[-1].completed == len(body)
+    parsed = [event for event in events if event.stage == "parsing"]
+    assert [event.completed for event in parsed] == sorted(event.completed for event in parsed)
+    assert parsed[0].completed == 0 and parsed[-1].completed == len(body)
+    assert all(event.total == len(body) for event in parsed)
+    assert parsed[-1].items_seen == 3000
+    exported = [event for event in events if event.stage == "exporting"]
+    assert [event.completed for event in exported] == [0, 1, 2, 3]
+    assert all(event.total == 3 for event in exported)
+    assert events[-2].stage == "finalizing" and events[-1].stage == "completed"
+    assert observed.manifest_path.is_file()
+
+    # Both standalone parsing and offline replay expose real bytes, without HTTP.
+    standalone = []
+    parse_index(observed.snapshot_path, progress=standalone.append)
+    assert standalone == parsed
+    replay_options = replace(
+        options(tmp_path),
+        source="snapshot",
+        snapshot=observed.snapshot_path,
+        count=5,
+        batch_size=2,
+    )
+    silent = PackageDiscoveryPipeline(progress=None).run(replay_options)
+    replay_events = []
+    replay = PackageDiscoveryPipeline(progress=replay_events.append).run(replay_options)
+    assert replay_events[1].stage == "verifying"
+    assert replay_events[1].total is None and replay_events[1].completed is None
+    assert not any(event.stage == "downloading" for event in replay_events)
+    assert (
+        observed.targets_path.read_bytes()
+        == silent.targets_path.read_bytes()
+        == replay.targets_path.read_bytes()
+    )
+    assert [p.read_bytes() for p in sorted(silent.batches_dir.iterdir())] == [
+        p.read_bytes() for p in sorted(replay.batches_dir.iterdir())
+    ]
+    before, after = read(silent.manifest_path), read(replay.manifest_path)
+    for key in (
+        "manifest_version",
+        "source",
+        "sampling",
+        "counts",
+        "parsing",
+        "exclusion",
+        "limitations",
+    ):
+        assert before[key] == after[key]
+    assert before.keys() == after.keys()
+
+
+def test_file_progress_is_byte_bounded_and_export_failure_never_completes(tmp_path, monkeypatch):
+    import reposeer.pipelines.package_discovery as module
+
+    names = tmp_path / "names.txt"
+    names.write_bytes(b"# comment\n\n" + b"demo\nother\n" * 15000)
+    opt = replace(options(tmp_path), source="file", input_file=names, batch_size=1)
+    events = []
+    result = PackageDiscoveryPipeline(progress=events.append).run(opt)
+    reading = [event for event in events if event.stage == "reading_file"]
+    assert len(reading) <= names.stat().st_size // 65536 + 2
+    assert [event.completed for event in reading] == sorted(event.completed for event in reading)
+    assert reading[-1].completed == reading[-1].total == names.stat().st_size
+    assert reading[-1].items_seen == 30000
+    assert verify(result, opt.data_dir)[0]["counts"]["unique_valid_candidates"] == 2
+
+    original_write = module._write_targets
+
+    def fail(path, selected):
+        if path.name == "batch_002.txt":
+            raise OSError("injected storage failure")
+        original_write(path, selected)
+
+    monkeypatch.setattr(module, "_write_targets", fail)
+    events.clear()
+    with pytest.raises(OSError):
+        PackageDiscoveryPipeline(progress=events.append).run(opt)
+    assert [event.completed for event in events if event.stage == "exporting"] == [0, 1]
+    assert not any(event.stage == "completed" for event in events)
+    assert list((opt.data_dir / "registry/runs").iterdir()) == [result.manifest_path.parent]
+
+
+@pytest.mark.parametrize(
+    "tty,ci,no_progress",
+    [
+        (False, None, False),
+        (True, None, True),
+        (True, "1", False),
+        (True, None, False),
+    ],
+)
+def test_cli_progress_stays_on_stderr_and_respects_tty_ci_and_opt_out(
+    tmp_path,
+    monkeypatch,
+    tty,
+    ci,
+    no_progress,
+):
+    from io import StringIO
+
+    from rich.console import Console
+
+    import reposeer.cli.discover_packages as module
+
+    terminal = StringIO()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    def console(**kwargs):
+        monkeypatch.setattr(module.sys.stderr, "isatty", lambda: tty)
+        return Console(file=terminal, force_terminal=True, width=140)
+
+    monkeypatch.setattr(module, "Console", console)
+    if ci is None:
+        monkeypatch.delenv("CI", raising=False)
+    else:
+        monkeypatch.setenv("CI", ci)
+    names = tmp_path / "names.txt"
+    names.write_text("demo\nother\n", encoding="utf-8")
+    result = CliRunner().invoke(
+        app,
+        [
+            "discover-packages",
+            "--source",
+            "file",
+            "--input-file",
+            str(names),
+            "--count",
+            "2",
+            "--data-dir",
+            str(tmp_path / "data"),
+            *(["--no-progress"] if no_progress else []),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Selected packages: 2" in result.stdout and "\x1b" not in result.stdout
+    if tty and ci is None and not no_progress:
+        assert "Completed" in terminal.getvalue()
+    else:
+        assert terminal.getvalue() == "" and "\x1b" not in result.stderr
+
+
+@pytest.mark.parametrize("failure", [PackageDiscoveryError("injected"), KeyboardInterrupt()])
+def test_terminal_progress_closes_on_failure_or_interrupt(tmp_path, monkeypatch, failure):
+    from io import StringIO
+
+    from rich.console import Console
+
+    import reposeer.cli.discover_packages as module
+    from reposeer.clients.pypi_index import ProgressEvent
+
+    renderers, terminal = [], StringIO()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    original = module._DiscoveryProgress
+
+    def renderer(console):
+        instance = original(console)
+        renderers.append(instance)
+        return instance
+
+    class FailedPipeline:
+        def __init__(self, *, progress):
+            self.progress = progress
+
+        def run(self, options):
+            self.progress(ProgressEvent("finalizing", message="Finalizing"))
+            raise failure
+
+    monkeypatch.setattr(module, "_DiscoveryProgress", renderer)
+    monkeypatch.setattr(module, "PackageDiscoveryPipeline", FailedPipeline)
+
+    def console(**kwargs):
+        monkeypatch.setattr(module.sys.stderr, "isatty", lambda: True)
+        return Console(file=terminal, force_terminal=True)
+
+    monkeypatch.setattr(module, "Console", console)
+    monkeypatch.delenv("CI", raising=False)
+    result = CliRunner().invoke(
+        app,
+        [
+            "discover-packages",
+            "--source",
+            "file",
+            "--input-file",
+            "unused.txt",
+            "--count",
+            "1",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert renderers and not renderers[0].live.is_started
+    assert "Completed" not in terminal.getvalue() and "Sampling Run ID" not in result.stdout
