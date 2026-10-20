@@ -27,6 +27,8 @@ from reposeer.services.activity_batch_service import ActivityBatchService
 from reposeer.storage.paths import StoragePaths
 from reposeer.storage.processed.dataset_writer import DATASET_SCHEMAS
 from reposeer.storage.raw.jsonl import JsonlStorage
+from reposeer.technology.models import SearchPlan, SearchTerm
+from reposeer.technology.search_terms import SearchTermGenerator
 
 NOW = datetime(2026, 10, 20, 10, tzinfo=UTC)
 REPOS = {"pallets/flask": 900000001, "psf/requests": 900000002}
@@ -39,7 +41,7 @@ def read(path):
 @pytest.fixture
 def environment(tmp_path, monkeypatch):
     monkeypatch.setattr(settings.collection, "cache_enabled", False)
-    calls, options = [], {"mapping": "verified_current", "failed_repo": None, "empty": False, "fail_provider": False, "fail_crawler": False, "excluded_repo": None, "issues_prs": False}
+    calls, options = [], {"mapping": "verified_current", "failed_repo": None, "empty": False, "fail_provider": False, "fail_crawler": False, "excluded_repo": None, "issues_prs": False, "crawl_outcomes": None}
     paths = StoragePaths(tmp_path / "root with spaces")
 
     def handler(request):
@@ -79,9 +81,20 @@ def environment(tmp_path, monkeypatch):
                 "objectID": "42" if name == "flask" else "43", "title": "Package tutorial",
                 "url": f"https://blog.example/{name}", "created_at": "2024-01-01T00:00:00Z",
             }]
+            if options["crawl_outcomes"]:
+                hits = [{"objectID": str(index + 100), "title": "Package tutorial",
+                         "url": f"https://blog.example/{outcome}", "created_at": "2024-01-01T00:00:00Z"}
+                        for index, outcome in enumerate(options["crawl_outcomes"])]
             return httpx.Response(200, json={"hits": hits, "nbPages": 1})
         if request.url.host == "blog.example":
-            if options["fail_crawler"]:
+            if request.url.path == "/timeout":
+                raise httpx.ReadTimeout("private-network-message", request=request)
+            if request.url.path == "/rejected":
+                return httpx.Response(302, headers={"location": "http://127.0.0.1/private"})
+            if request.url.path == "/unavailable":
+                return httpx.Response(200, text="<html><body></body></html>",
+                                      headers={"content-type": "text/html"})
+            if options["fail_crawler"] or request.url.path == "/not_found":
                 return httpx.Response(404, text="secret-provider-body")
             html = HTML.replace("synthetic package", "Flask package")
             html = html.replace("</article>", '<p>Use <a href="https://github.com/pallets/flask">Flask</a> to build Python web applications.</p></article>')
@@ -192,20 +205,149 @@ def test_partial_sources_preserve_successful_artifacts_and_report_truth(environm
         totals = read(result.collection_report_path)["totals"]
         assert totals["records_newly_stored"] is None
         assert totals["records_newly_stored_known"] > 0
+        assert totals["repositories_failed"] == 1 and totals["repositories_excluded"] == 0
+        assert by_target["psf/requests"]["status"] == "failed"
     if failure == "activity_budget":
         sources = read(result.collection_report_path)["sources"]
         issues = [source for source in sources if source["source"] == "github_issues"]
         assert issues and all(source["records_stored"] == 0 and source["partial"] == 1
                               and source["failed"] == 0 for source in issues)
+    if failure == "excluded":
+        target = next(target for target in manifest["targets"] if target["normalized_target"] == "psf/requests")
+        assert target["github_metadata_status"] == target["status"] == "excluded"
+        assert target["repo_id"] is None
+        metadata = [source for source in manifest["sources"]
+                    if source["source"] == "github_metadata" and source["target"] == "psf/requests"]
+        assert len(metadata) == 1
+        source = metadata[0]
+        assert source["state"] == "excluded"
+        assert source["attempted"] == source["excluded"] == 1
+        assert source["succeeded"] == source["failed"] == source["skipped"] == 0
+        assert source["records_stored"] is None  # Upstream did persist raw but supplies no item write count.
+        assert len(raw_repositories) == 2 and result.repositories_collected == 1
+        stages = [stage for stage in manifest["stages"] if stage["target"] == "psf/requests"]
+        github = next(stage for stage in stages if stage["stage"] == "github_collection")
+        assert github["status"] == "skipped" and github["reason_codes"] == ["repository_excluded"]
+        assert all(stage["status"] != "failed" for stage in stages)
+        assert next(target for target in manifest["targets"] if target["normalized_target"] == "pypi:flask")["status"] == "complete"
+        totals = read(result.collection_report_path)["totals"]
+        assert totals["repositories_excluded"] == 1 and totals["repositories_failed"] == 0
+        assert totals["records_newly_stored"] is None
+        assert pl.read_parquet(paths.processed_dir / "repositories/repositories.parquet").height == 1
     if failure == "crawler":
-        assert read(result.data_profile_path)["external_metrics"]["content_unavailable"] > 0
+        metrics = read(result.data_profile_path)["external_metrics"]
+        assert metrics["content_unavailable"] == metrics["documents_extracted"] == 0
+        assert metrics["fetch_failed"] == metrics["candidates_attempted"] == 2
+        assert metrics["other_capture_failed"] == 0
     if failure == "unavailable":
         sources = read(result.collection_report_path)["sources"]
         assert any(source["source"] == "rss" and source["attempted"] == 0
-                   and source["state"] == "failed" for source in sources)
+                   and source["state"] == source["native_status"] == "unavailable"
+                   and source["failed"] == 0 and source["provider_jobs"]
+                   and all(job["status"] == "unavailable" for job in source["provider_jobs"]) for source in sources)
     if failure in {"provider", "no_candidates"}:
         assert any(stage["reason_codes"] == ["no_discovery_candidates"] for stage in manifest["stages"])
         assert not result.child_run_ids.get("external_crawl")
+        if failure == "no_candidates":
+            assert all(source["state"] == "attempted_no_results" and source["attempted"] > 0
+                       and source["failed"] == 0 and source["pagination_complete"] is True
+                       for source in manifest["sources"] if source["source"] == "hackernews")
+
+
+def test_excluded_only_run_retains_raw_without_eligible_repository(environment):
+    pipeline, paths, _, options, _ = environment
+    options["excluded_repo"] = "psf/requests"
+    result = pipeline.run(["psf/requests"])
+    manifest = read(result.manifest_path)
+    assert result.status != "complete" and result.repositories_collected == result.targets_resolved == 0
+    assert manifest["targets"][0]["status"] == "excluded"
+    assert manifest["targets"][0]["github_metadata_status"] == "excluded"
+    assert len(JsonlStorage().read_contract_records(paths.raw_dir / "github/repositories.jsonl")) == 1
+    assert not (paths.processed_dir / "repositories/repositories.parquet").exists()
+    report = read(result.collection_report_path)
+    assert report["totals"]["repositories_excluded"] == 1 and report["totals"]["repositories_failed"] == 0
+    assert not result.child_run_ids.get("external_discovery")
+
+
+@pytest.mark.parametrize("outcomes,expected", [
+    (["full"], (1, 0, 0, 0)), (["not_found"], (0, 0, 1, 0)),
+    (["unavailable"], (0, 1, 0, 0)),
+    (["full", "not_found", "unavailable"], (1, 1, 1, 0)),
+    (["rejected", "timeout"], (0, 0, 1, 1)),
+    (["unknown_accounting"], (0, 0, 0, None)),
+])
+def test_crawl_capture_outcomes_match_persisted_documents_and_profile(environment, outcomes, expected):
+    pipeline, paths, _, options, _ = environment
+    options["crawl_outcomes"] = outcomes
+    if outcomes == ["unknown_accounting"]:
+        options["crawl_outcomes"] = ["rejected"]
+        original_factory = pipeline.crawl_factory
+        def legacy_factory(**kwargs):
+            crawler = original_factory(**kwargs)
+            original_crawl = crawler.crawl
+            def crawl(*args, **kwargs):
+                result = original_crawl(*args, **kwargs)
+                saved = read(result.manifest_path)
+                saved.pop("candidate_groups")  # No proof of distinct failed-candidate granularity.
+                result.manifest_path.write_text(json.dumps(saved), encoding="utf-8")
+                return result
+            crawler.crawl = crawl
+            return crawler
+        pipeline.crawl_factory = legacy_factory
+    result = pipeline.run(["pypi:flask"])
+    manifest, report, profile = read(result.manifest_path), read(result.collection_report_path), read(result.data_profile_path)
+    source = next(source for source in manifest["sources"] if source["source"] == "external_crawl")
+    keys = ("documents_extracted", "content_unavailable", "fetch_failed", "other_capture_failed")
+    assert tuple(source[key] for key in keys) == expected
+    assert source["candidates_attempted"] == len(outcomes)
+    assert profile["external_metrics"]["candidates_attempted"] == len(outcomes)
+    assert all(profile["external_metrics"][key] == source[key] for key in keys)
+    assert source == next(entry for entry in report["sources"] if entry["source"] == "external_crawl")
+    documents = JsonlStorage().read_contract_records(paths.raw_dir / "external/documents.jsonl")
+    assert source["records_emitted"] == source["records_stored"] == len(documents) == sum(expected[:2])
+    assert sum(raw.payload["content_status"] == "full" for raw in documents) == expected[0]
+    assert sum(raw.payload["content_status"] == "unavailable" for raw in documents) == expected[1]
+    stage = next(stage for stage in manifest["stages"] if stage["stage"] == "external_crawl")
+    assert stage["details"]["attempted_candidate_count"] == len(outcomes)
+    assert stage["details"]["documents_extracted"] == expected[0]
+    if "unavailable" in outcomes:
+        assert any(error["code"] == "parse_error" and error["raw_record_id"]
+                   for error in stage["details"]["errors"])
+    assert result.status == ("complete" if outcomes == ["full"] else "partial")
+    assert manifest["targets"][0]["status"] == result.status
+    assert "no_content_count" not in source and "no_content_count" not in profile["external_metrics"]
+    assert "private-network-message" not in result.manifest_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("planned", [False, True])
+def test_requested_discovery_without_planned_queries_is_incomplete(environment, monkeypatch, planned):
+    pipeline, _, calls, options, _ = environment
+    options["empty"] = True
+    def plan(self, **kwargs):
+        return SearchPlan(package_id=kwargs["package_id"], repo_id=kwargs["repo_id"],
+                          repo_full_name=kwargs["repo_full_name"], terms=[SearchTerm(
+                              query="Flask", intent="direct_package", platform="hackernews")] if planned else [])
+    monkeypatch.setattr(SearchTermGenerator, "build_search_plan", plan)
+    result = pipeline.run(["pypi:flask"], discovery_sources=["hackernews", "rss"])
+    manifest = read(result.manifest_path)
+    assert result.status == manifest["targets"][0]["status"] == "partial"
+    stage = next(stage for stage in manifest["stages"] if stage["stage"] == "external_discovery")
+    assert stage["status"] == "partial" and stage["reason_codes"] == ["no_planned_queries"]
+    assert not result.child_run_ids.get("external_crawl")
+    assert any(stage["reason_codes"] == ["no_discovery_candidates"] for stage in manifest["stages"])
+    for source in manifest["sources"]:
+        if source["source"] not in {"hackernews", "rss"}:
+            continue
+        if planned and source["source"] == "hackernews":
+            assert source["state"] == "attempted_no_results"
+            assert source["attempted"] == source["succeeded"] == 1 and source["pagination_complete"] is True
+        else:
+            assert source["state"] == "skipped" and source["reason_code"] == "no_planned_queries"
+            assert source["attempted"] == source["succeeded"] == source["failed"] == source["partial"] == 0
+            assert source["skipped"] == 1 and source["pagination_complete"] is None
+            assert source["provider_jobs"] == [] and source["native_status"] is None
+    assert sum(request.url.host == "hn.algolia.com" for request in calls) == int(planned)
+    assert read(result.collection_report_path)["sources"] == manifest["sources"]
 
 
 def test_stored_replay_no_network_no_new_raw_and_scope_is_root_snapshot(environment):

@@ -128,6 +128,8 @@ def _repository_candidate(raw: RawRecord) -> tuple[str | None, str, str | None]:
 
 
 def _discovery_status(jobs: Sequence[dict[str, Any]]) -> str:
+    if not jobs:
+        return "skipped"
     states = {job["status"] for job in jobs}
     if states == {"complete"}:
         return "complete"
@@ -180,15 +182,17 @@ class CollectionPipeline:
 
     @staticmethod
     def _source(manifest: dict, target: str, source: str, status: str, **metrics: Any) -> None:
-        state = ("skipped" if status == "skipped" else "failed" if status == "failed"
+        state = (status if status in {"skipped", "excluded"} else "failed" if status == "failed"
                  else "partial" if status != "complete" else
                  "completed_with_records" if metrics.get("records_emitted") else "attempted_no_results")
         entry = dict(target=target, source=source, state=state, attempted=int(status != "skipped"),
                      succeeded=int(status == "complete"), partial=int(status == "partial"),
                      failed=int(status == "failed"), skipped=int(status == "skipped"),
+                     excluded=int(status == "excluded"),
                      records_emitted=None, records_stored=None, records_rejected=None,
                      pages_fetched=None, pagination_complete=None, observed_candidate_count=None,
-                     crawled_candidate_count=None, documents_extracted=None, no_content_count=None)
+                     crawled_candidate_count=None, candidates_attempted=None, documents_extracted=None,
+                     content_unavailable=None, fetch_failed=None, other_capture_failed=None)
         entry.update(metrics)
         manifest["sources"].append(entry)
 
@@ -301,7 +305,7 @@ class CollectionPipeline:
                              records_emitted=1, records_stored=1, raw_record_ids=[raw.raw_record_id], run_id=raw.run_id,
                              repo_id=raw.repo_id)
             else:
-                self._source(manifest, item.target, "github_metadata", "failed", error_code=item.error_code)
+                self._source(manifest, item.target, "github_metadata", item.status, error_code=item.error_code)
             entries = [dict(entry) for entry in batch.groups
                        if entry["repo_full_name"].casefold() == item.target.casefold()]
             if item.status != "duplicate":
@@ -316,10 +320,14 @@ class CollectionPipeline:
                 if target["repo_full_name"] and target["repo_full_name"].casefold() == item.target.casefold():
                     target.update(github_metadata_status=item.status, activity_group_statuses=entries,
                                   activity_run_id=batch.run_id)
+                    if item.status in {"excluded", "failed"}:
+                        target["status"] = item.status
             repo_status = ("complete" if item.status in {"processed", "duplicate"}
                            and (item.status == "duplicate" or all(entry["status"] == "complete" for entry in entries))
-                           else "partial" if item.status == "processed" else "failed")
-            reasons = sorted({entry["missing_reason"] for entry in entries if entry["missing_reason"]})
+                           else "partial" if item.status == "processed"
+                           else "skipped" if item.status == "excluded" else "failed")
+            reasons = (["repository_excluded"] if item.status == "excluded" else
+                       sorted({entry["missing_reason"] for entry in entries if entry["missing_reason"]}))
             self._stage(manifest, item.target, "github_collection", repo_status,
                         run_ids=[batch.run_id], manifest_paths=[self._ref(batch.report_path)],
                         reason_codes=reasons,
@@ -358,10 +366,14 @@ class CollectionPipeline:
                     elif mapping.reason:
                         target["missing_reasons"].append(mapping.reason)
                 target["status"] = "complete" if target["repo_id"] else "partial"
+            elif target["github_metadata_status"] == "excluded":
+                target["status"] = "excluded"
+                target["missing_reasons"].append("repository_excluded")
             elif not target["missing_reasons"]:
                 target["missing_reasons"].append("missing_stored_evidence" if manifest["mode"] == "stored"
                                                  else "github_metadata_unavailable")
-            self._stage(manifest, target["normalized_target"], "identity_resolution", target["status"],
+            self._stage(manifest, target["normalized_target"], "identity_resolution",
+                        "skipped" if target["status"] == "excluded" else target["status"],
                         reason_codes=target["missing_reasons"],
                         details=dict(evidence_observed_at=target["evidence_observed_at"],
                                      mapping_status=target["mapping_status"]))
@@ -396,11 +408,13 @@ class CollectionPipeline:
             aliases = {"stackoverflow": "stackexchange", "newsapi": "news"}
             requested = {aliases.get(source, source) for source in sources}
             jobs_requested = [job for job in saved["per_job_stats"] if job["provider"] in requested]
-            discovery_status = _discovery_status(jobs_requested)
+            jobless = requested - {job["provider"] for job in jobs_requested}
+            discovery_status = "partial" if jobless else _discovery_status(jobs_requested)
             target["discovery_status"] = discovery_status
             self._stage(manifest, key, "external_discovery", discovery_status, run_ids=[result.run_id],
                         manifest_paths=[self._ref(self.paths.metadata_dir / "collection_runs" / f"discovery_manifest_{result.run_id}.json")],
-                        reason_codes=sorted({job["missing_reason"] for job in jobs_requested if job["missing_reason"]}),
+                        reason_codes=sorted({job["missing_reason"] for job in jobs_requested if job["missing_reason"]}
+                                            | ({"no_planned_queries"} if jobless else set())),
                         details=dict(search_plan=result.search_plan.model_dump(mode="json"), discovery=saved,
                                      requested_sources=sorted(requested),
                                      upstream_status=collection.status,
@@ -410,16 +424,25 @@ class CollectionPipeline:
                 jobs = [entry for entry in saved["per_job_stats"] if entry["provider"] == provider]
                 emitted = [record for record in collection.records if record.payload.get("discovery_provider") == provider]
                 status = _discovery_status(jobs)
+                states = {job["status"] for job in jobs}
                 self._source(manifest, key, provider, status,
                              records_emitted=len(emitted), records_stored=len(emitted),
                              records_rejected=sum(job["records_rejected"] for job in jobs),
                              attempted=sum(job["attempted"] for job in jobs),
                              succeeded=sum(job["status"] == "complete" for job in jobs),
                              partial=sum(job["status"] == "partial" for job in jobs),
-                             failed=sum(job["status"] in {"failed", "unavailable"} for job in jobs),
-                             skipped=sum(job["status"] == "skipped_budget" for job in jobs),
+                             failed=sum(job["status"] == "failed" for job in jobs),
+                             skipped=sum(job["status"] == "skipped_budget" for job in jobs) if jobs else 1,
+                             state="unavailable" if jobs and all(job["status"] == "unavailable" for job in jobs)
+                             else "skipped" if not jobs else
+                             "completed_with_records" if status == "complete" and emitted else
+                             "attempted_no_results" if status == "complete" else status,
+                             native_status=(next(iter(states)) if len(states) == 1
+                                            else status if jobs else None),
+                             reason_code="no_planned_queries" if not jobs else None,
                              pages_fetched=sum(job["pages_fetched"] for job in jobs),
-                             pagination_complete=all(not job["has_more"] and job["status"] == "complete" for job in jobs),
+                             pagination_complete=(all(not job["has_more"] and job["status"] == "complete" for job in jobs)
+                                                  if jobs else None),
                              observed_candidate_count=len({record.payload["candidate_id"] for record in emitted}),
                              provider_jobs=jobs)
             for provider in sorted({job["provider"] for job in saved["per_job_stats"]} - requested):
@@ -441,17 +464,45 @@ class CollectionPipeline:
             self._child(manifest, "external_crawl", crawled.run_id)
             target["crawler_status"] = crawled.collection_result.status
             crawl_manifest = json.loads(crawled.manifest_path.read_text(encoding="utf-8"))
+            captured = crawled.collection_result.records
+            captured_by_id = {record.raw_record_id: record for record in captured}
+            persisted = {record.raw_record_id: record for record in
+                         self.storage.read_contract_records(crawled.output_path)
+                         if record.raw_record_id in captured_by_id}
+            extracted = sum(record.payload.get("content_status") == "full" for record in captured)
+            unavailable = sum(record.payload.get("content_status") == "unavailable" for record in captured)
+            if (persisted != captured_by_id or len(captured_by_id) != len(captured)
+                    or set(crawl_manifest["raw_record_ids"]) != set(captured_by_id)
+                    or crawl_manifest["documents_extracted"] != extracted
+                    or extracted + unavailable != len(captured)
+                    or any(record.source_record_type != "article"
+                           or record.payload.get("record_stage") != "external_document" for record in captured)):
+                raise ValueError("crawl_capture_metrics_mismatch")
+            errors = crawled.collection_result.errors
+            fetch_codes = {"not_found", "http_error", "network_error", "rate_limited"}
+            # T-017 attaches at most one collection error per attempted candidate group.
+            # Projection/other errors of a different granularity cannot establish a count.
+            groups = crawl_manifest.get("candidate_groups", [])
+            grouped_errors = [error for group in groups for error in group.get("errors", [])]
+            distinct_failures_verified = (
+                len(groups) == crawl_manifest["attempted_candidate_count"]
+                and all(len(group.get("errors", [])) <= 1 for group in groups)
+                and grouped_errors == [error.model_dump(mode="json") for error in errors]
+                and all(error.code in fetch_codes | {"parse_error", "validation_error"} for error in errors))
+            other_failed = (sum(error.code not in fetch_codes and error.raw_record_id not in captured_by_id
+                                for error in errors) if distinct_failures_verified else None)
             self._stage(manifest, key, "external_crawl", crawled.collection_result.status, run_ids=[crawled.run_id],
                         manifest_paths=[self._ref(crawled.manifest_path)],
-                        reason_codes=[error.code for error in crawled.collection_result.errors], details=crawl_manifest)
-            count = len(crawled.collection_result.records)
-            extracted = crawl_manifest["documents_extracted"]
+                        reason_codes=[error.code for error in errors], details=crawl_manifest)
             self._source(manifest, key, "external_crawl", crawled.collection_result.status,
-                         records_emitted=count, records_stored=count,
+                         records_emitted=len(captured), records_stored=len(captured),
                          records_rejected=crawled.collection_result.metadata.records_rejected,
                          observed_candidate_count=crawl_manifest["unique_candidate_count"],
                          crawled_candidate_count=crawl_manifest["attempted_candidate_count"],
-                         documents_extracted=extracted, no_content_count=crawl_manifest["attempted_candidate_count"]-extracted)
+                         candidates_attempted=crawl_manifest["attempted_candidate_count"],
+                         documents_extracted=extracted, content_unavailable=unavailable,
+                         fetch_failed=sum(error.code in fetch_codes for error in errors),
+                         other_capture_failed=other_failed)
         except EXPECTED_ERRORS as error:
             if stage == "external_discovery":
                 target["discovery_status"] = "failed"
@@ -546,15 +597,15 @@ class CollectionPipeline:
                 manifest["processing"] = dict(processing_run_id=processing.processing_run_id, status="failed",
                                              manifest_path=self._ref(path), input_record_count=None, dataset_row_counts=None)
             self._error(manifest, None, "processing", "processing_failed", error)
+        crawls = [entry for entry in manifest["sources"] if entry["source"] == "external_crawl"]
         external = {
-            key: sum(entry[key] for entry in manifest["sources"] if entry.get(key) is not None)
-            if any(entry.get(key) is not None for entry in manifest["sources"]) else None
-            for key in ("documents_extracted", "no_content_count", "crawled_candidate_count")}
+            key: sum(entry[key] for entry in crawls)
+            if crawls and all(entry.get(key) is not None for entry in crawls) else None
+            for key in ("candidates_attempted", "documents_extracted", "content_unavailable",
+                        "fetch_failed", "other_capture_failed")}
         external["candidates_discovered"] = sum(
             stage["details"]["discovery"]["candidate_count"] for stage in manifest["stages"]
             if stage["stage"] == "external_discovery" and "discovery" in stage["details"]) if mode == "live" else None
-        external["candidates_attempted"] = external.pop("crawled_candidate_count")
-        external["content_unavailable"] = external.pop("no_content_count")
         quality_path = self.paths.reports_dir / "data_quality" / f"data_profile_{manifest['integration_run_id']}.json"
         collection_path = self.paths.reports_dir / "data_quality" / f"collection_profile_{manifest['integration_run_id']}.json"
         manifest["reports"] = dict(collection_profile=self._ref(collection_path), data_profile=self._ref(quality_path))
@@ -593,6 +644,10 @@ class CollectionPipeline:
                       started_at=manifest["started_at"], finished_at=manifest["finished_at"],
                       overall_status=manifest["status"], targets=manifest["targets"], sources=manifest["sources"],
                       totals=dict(targets_requested=len(parsed), targets_resolved=resolved,
+                          repositories_excluded=sum(entry["excluded"] for entry in manifest["sources"]
+                                                    if entry["source"] == "github_metadata"),
+                          repositories_failed=sum(entry["failed"] for entry in manifest["sources"]
+                                                  if entry["source"] == "github_metadata"),
                           repositories_collected=len({raw.repo_id for _, raw in repositories.values()}) if mode == "live" else 0,
                           records_newly_stored=(
                               None if mode == "live" and any(entry["attempted"] and entry["records_stored"] is None

@@ -104,10 +104,56 @@ locking or immutable snapshot store is claimed.
 ## Report semantics
 
 Collection profiles retain per-target identity/mapping and metadata/activity/
-discovery/crawl states. Sources report attempted/succeeded/partial/failed/skipped,
+discovery/crawl states. Sources report attempted/succeeded/partial/failed/skipped/excluded,
 known emitted/stored/rejected counts, pages, pagination and candidate/content counts.
 Unavailable counters remain null. A known subtotal and unknown-source list accompany
 a null total when storage counts are incomplete.
+
+Repository metadata retains native outcomes: `processed`, `duplicate`, `excluded`
+and `failed`. Exclusion is a valid screening outcome, not a collection error.
+An excluded metadata source has state `excluded`, attempted=1, excluded=1,
+succeeded=failed=skipped=0. Its target retains `github_metadata_status=excluded`,
+status `excluded` and no eligible repo identity; its GitHub stage is
+`skipped/repository_excluded`. Details preserve upstream reasons without guessing
+more specific screening evidence. `repositories_excluded` and `repositories_failed`
+in collection totals count metadata outcomes, independently of activity groups and
+provider jobs. Excluded-only runs never report complete. Excluded raw metadata may
+already exist; unknown item storage counts stay null and excluded observations do
+not become eligible processed repositories.
+
+Discovery sources distinguish `not_requested`, `no_planned_queries`,
+`attempted_no_results`, `completed_with_records`, `partial`, `failed` and
+`unavailable`. A requested provider with no jobs is `skipped` with
+`reason_code=no_planned_queries`, attempted=succeeded=failed=0, skipped=1 and
+pagination_complete=null. Requested discovery scope is partial if any requested
+provider has no planned query, including when all providers are jobless. This is
+not a zero-result search. Actual completed jobs with zero candidates remain
+`attempted_no_results`, with complete pagination and a skipped crawler
+(`no_discovery_candidates`). Unavailable jobs keep their native status, reasons
+and actual attempts; unavailable without requests is not counted as a failed
+request. Unchanged native jobs and manifests remain in stage details.
+
+External crawl sources and data-profile `external_metrics` use these counters:
+
+| Metric | Evidence and unit |
+| --- | --- |
+| `candidates_attempted` | T-017 manifest attempted unique candidate groups after deduplication and budget |
+| `documents_extracted` | Emitted article observations with `content_status=full`, checked against persisted raw and native manifest |
+| `content_unavailable` | Persisted emitted article observations with `content_status=unavailable`; never attempts minus extractions |
+| `fetch_failed` | Collection errors with T-017 codes `not_found`, `http_error`, `network_error`, `rate_limited`; one terminal error per failed candidate fetch, not individual HTTP retry attempts |
+| `other_capture_failed` | Non-fetch errors without an emitted document, only when candidate-group errors prove one-to-one accounting; otherwise null |
+
+For current T-017 content states, extracted + unavailable equals emitted captured
+documents. A 404 has fetch_failed=1 and content_unavailable=0; a captured response
+with unavailable extraction has content_unavailable=1 and fetch_failed=0. An
+extraction error attached to an emitted unavailable observation is not counted
+again as a failed capture. Rejected-record counts retain their upstream meaning
+and are not unique failed-candidate counts. These are counts, not missingness
+rates: the capture denominator is emitted documents, while attempt outcomes refer
+to unique attempted groups. No equality across different units is presumed.
+`no_content_count` is removed from internal T-020 reports. Child manifests retain
+original input/unique/attempt/rejection counts and errors. Aggregate counters stay
+null when any child count is unknown; no crawl means no supplied capture count.
 
 Data profiles include presence, portable path, row/column counts, schema strings,
 per-column null counts/rates and compatibility `stats/missing_rate`. Missing tables
@@ -138,7 +184,7 @@ Illustrative report excerpts (not a claim of live verification):
   ],
   "sources": [
     {"source": "github_metadata", "state": "completed_with_records", "records_stored": 1},
-    {"source": "rss", "state": "failed", "attempted": 0}
+    {"source": "rss", "state": "unavailable", "native_status": "unavailable", "attempted": 0, "failed": 0}
   ],
   "source_coverage": "not_verified",
   "historical_validity": "unverified",
