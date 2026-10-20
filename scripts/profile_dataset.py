@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
-"""Script to run profiling on current processed datasets."""
+"""Compatibility entrypoint into the shared profile CLI."""
 
-from pathlib import Path
+import typer
 
-from reposeer.profiling.report import ProfilingReportGenerator
-from reposeer.storage.paths import paths
+from reposeer.cli.profile import profile_app
 
 
 def main() -> None:
-    generator = ProfilingReportGenerator()
-    tables = {
-        "repositories": paths.processed_path("repositories"),
-    }
-    report = generator.generate_report(tables)
-    out = Path("data/reports/data_quality/profile_report.json")
-    generator.save_report(report, out)
-    print(f"Profiling report written to {out}")
+    typer.main.get_command(profile_app).main()
 
 
 if __name__ == "__main__":

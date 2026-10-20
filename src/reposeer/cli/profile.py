@@ -1,44 +1,30 @@
-"""CLI profile command."""
+"""Standalone profiling of all T-019 datasets under one storage root."""
 
 from pathlib import Path
 
+import polars as pl
 import typer
-from rich.console import Console
-from rich.table import Table
 
-console = Console()
-profile_app = typer.Typer(help="Profile datasets and check data quality using Polars and DuckDB.")
+from reposeer.profiling.report import ProfilingReportGenerator
+from reposeer.storage.paths import StoragePaths
+
+profile_app = typer.Typer(help="Profile existing processed datasets without collection.")
 
 
 @profile_app.callback(invoke_without_command=True)
 def main(
-    output: Path = typer.Option(
-        Path("data/reports/data_quality/profile_report.json"),
-        "--output",
-        "-o",
-        help="Report output file",
-    ),
+    output: Path | None = typer.Option(None, "--output", "-o", help="Report output file"),
+    data_dir: Path | None = typer.Option(None, "--data-dir", help="Storage root"),
 ) -> None:
-    """Generate data profiling and completeness metrics."""
-    console.print("[bold cyan]Running dataset profiling...[/bold cyan]")
-    from reposeer.profiling.report import ProfilingReportGenerator
-    from reposeer.storage.paths import paths
-
+    paths = StoragePaths(data_dir)
+    output = output or paths.reports_dir / "data_quality" / "profile_report.json"
     generator = ProfilingReportGenerator()
-    parquet_files = {
-        "repositories": paths.processed_path("repositories"),
-    }
-    report = generator.generate_report(parquet_files)
-    generator.save_report(report, output)
-
-    table = Table(title="Dataset Profiling Summary")
-    table.add_column("Dataset", style="bold")
-    table.add_column("Rows")
-    table.add_column("Columns")
-
-    for name, data in report.get("datasets", {}).items():
-        stats = data.get("stats", {})
-        table.add_row(name, str(stats.get("row_count", 0)), str(stats.get("column_count", 0)))
-
-    console.print(table)
-    console.print(f"[bold green]✓ Profiling report saved to {output}[/bold green]")
+    try:
+        report = generator.profile_storage(paths)
+        generator.save_report(report, output)
+    except (OSError, ValueError, pl.exceptions.PolarsError):
+        typer.echo("Cannot read processed datasets or persist profile.", err=True)
+        raise typer.Exit(1) from None
+    for name, data in report["datasets"].items():
+        typer.echo(f"{name}: {data['row_count'] if data['present'] else 'missing'}")
+    typer.echo(f"Profiling report saved to {output}")

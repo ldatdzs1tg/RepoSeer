@@ -2,7 +2,7 @@
 
 RepoSeer targets the probability that a **PyPI package** has confirmed maintenance abandonment in the next **12 calendar months** after `cutoff_at`. GitHub repositories supply observations; repository inactivity, archived status and LLM statements are candidate evidence, not labels or risk probabilities. This repository implements collection and resolution through T-015, external discovery (T-016) and current external crawling (T-017); features, labels, training and inference remain planned.
 
-T-018 adds offline canonical normalization, observation-preserving deduplication and target-specific relevance. See [data normalization and T-019/T-020 handoff](docs/architecture/data_normalization.md).
+T-018 adds offline canonical normalization, observation-preserving deduplication and target-specific relevance. T-019 persists processed datasets; T-020 integrates bounded live collection, stored replay and data profiling. See [data normalization and T-019/T-020 handoff](docs/architecture/data_normalization.md).
 
 ## Tech Stack (Sprint 2)
 
@@ -147,6 +147,80 @@ See [crawler contract, CLI and T-018 handoff](docs/architecture/external_crawler
 uv run reposeer crawl-external --candidates-file data/raw/external/discovery.jsonl
 uv run python scripts/crawl_external_sample.py --data-dir /tmp/reposeer-t017-demo
 ```
+
+## Integrated collection and profiling (T-020)
+
+`collect-dataset` orchestrates existing T-013?T-019 components. Create a UTF-8
+`targets.txt` (blank lines and full-line comments are allowed):
+
+~~~text
+pypi:flask
+pypi:requests
+pypi:pydantic
+~~~
+
+~~~bash
+uv run reposeer collect-dataset --targets-file targets.txt --data-dir data --mode live
+uv run reposeer collect-dataset --targets-file targets.txt --data-dir data --mode stored
+uv run reposeer profile --data-dir data
+uv run python scripts/profile_dataset.py --data-dir data --output data/reports/data_quality/profile_report.json
+~~~
+
+Live mode fetches current PyPI evidence, verifies mappings through one GitHub
+metadata/activity batch, detects technology from recorded metadata, discovers and
+crawls only that discovery run's candidates, then processes and profiles. It does
+not collect README/manifests or call an LLM implicitly. Use an isolated `--data-dir`
+for experiments; existing observations are append-only. The default live adapters
+share one owned HTTP session with cache under that root. Credentials come from
+existing configuration, never targets or reports.
+
+Defaults: `--groups all`, `--max-pages 2`, `--max-records 200`,
+`--discovery-sources hackernews`, `--discovery-max-pages 1`,
+`--discovery-max-records 30`, `--max-candidates 15`. Budgets retain the limits of
+the underlying services; exhaustion means partial coverage, not completion.
+`collect-dataset --help` lists all options. Exit codes are 0 for complete requested
+scope, 1 for partial/failed execution, and 2 for invalid configuration before work.
+
+Stored mode makes no network calls and writes no new raw data. It resolves targets
+only from saved evidence, may run recorded technology detection, and replays all
+eligible T-018 raw inputs under the root through T-019. Collection reports distinguish
+requested targets from that whole-root processing and profiling scope. Replaying
+inserts zero existing canonical observations; processing audit rows grow per run.
+PyPI metadata and discovery candidates are not treated as fetched document inputs.
+
+`--cutoff-at` is accepted only in stored mode for diagnostics. Current mapping and
+freshness never establish historical validity or historical snapshots. Missing
+PyPI/GitHub evidence stays unresolved/ambiguous; repository-only targets never become
+packages through name similarity. Technology detection is distinct from the optional
+D03 Functional Profiler. No features, labels, agents, training or inference run here.
+
+Outputs (paths inside manifests are root-relative where portable references apply):
+
+~~~text
+data/metadata/collection_runs/integration_<UUID>.json
+data/reports/data_quality/collection_profile_<UUID>.json
+data/reports/data_quality/data_profile_<UUID>.json
+data/processed/<dataset>/<dataset>.parquet
+~~~
+
+The seven existing tables remain `repositories`, `github_activity`,
+`github_activity_details`, `external_documents`, `external_relevance`,
+`external_lineage` and `processing_audit`. Profiles include missing datasets as
+`present=false` with null row counts, per-column missingness, duplicate-input
+denominators, retrieval freshness, unknown availability, and relevance counts/rates.
+Collection completeness, source coverage `not_verified` and historical validity
+`unverified` remain separate. Unavailable external sources and partial child runs
+remain visible; successful artifacts survive later failures.
+
+Use the saved child IDs with existing start/resume/cursor commands, then stored
+replay. T-020 does not add an integration resume engine or a transaction across
+seven files. [Integration architecture, report sample and recovery semantics](docs/architecture/collection_integration.md).
+
+~~~bash
+uv run --frozen pytest -q tests/integration/test_collection_pipeline.py
+uv run --frozen pytest -q -m "not smoke"
+uv run --frozen ruff check src tests scripts
+~~~
 
 ## Offline processed datasets (T-019)
 

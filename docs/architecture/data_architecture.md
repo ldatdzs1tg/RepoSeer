@@ -114,4 +114,4 @@ filesystem path binding, including apostrophes. See README for CLI/query example
 T-020 can consume `ProcessingWriteResult`, these tables and processing manifests.
 It must distinguish audit history from logical entities and retain temporal/coverage
 limitations. No D09 features/labels, D10 training, D11 inference or full T-020
-collection orchestration is implemented.
+collection orchestration is implemented by T-019. T-020 now integrates those existing boundaries; see [collection integration](collection_integration.md).
