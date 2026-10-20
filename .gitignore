@@ -72,3 +72,5 @@ reference-markdown/
 
 # Optional project-local uv cache
 .uv-cache/
+# T-020A sampling source artifacts and registries
+data/registry/

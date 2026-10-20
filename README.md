@@ -148,6 +148,43 @@ uv run reposeer crawl-external --candidates-file data/raw/external/discovery.jso
 uv run python scripts/crawl_external_sample.py --data-dir /tmp/reposeer-t017-demo
 ```
 
+## Automatic PyPI package discovery and sampling (T-020A)
+
+Generate package targets without entering package names, using a streaming snapshot
+of the official PyPI Simple Index and reproducible SHA-256 priority sampling:
+
+```powershell
+uv run reposeer discover-packages --source pypi-simple --count 1000 --seed 20261020 --batch-size 50 --data-dir data
+```
+
+The summary prints the new sampling UUID, snapshot checksum, actual frame counts,
+registry CSV, manifest and batch paths. Use one generated batch with T-020:
+
+```powershell
+uv run reposeer collect-dataset --targets-file "data/registry/runs/<sampling-UUID>/batches/batch_001.txt" --data-dir data --mode live
+```
+
+Sampling does not automatically collect packages. T-020 accepts at most 100 targets
+per invocation; use batches rather than the aggregate targets.txt for larger samples.
+Registry CSV starts with `name_valid_only/not_checked/not_started`; index presence
+provides no verified repository mapping or maintenance/abandonment status.
+
+Offline alternatives use the same sampler:
+
+```powershell
+uv run reposeer discover-packages --source snapshot --snapshot "data/registry/snapshots/<sha256>.html" --count 1000 --seed 20261020 --batch-size 50 --data-dir data
+uv run reposeer discover-packages --source file --input-file packages.txt --count 3 --seed 42 --batch-size 2 --data-dir data
+```
+
+File input is UTF-8, one PyPI name or pypi: ID per line; blank/full-comment lines
+are allowed. Optional `--exclude-file` explicitly excludes normalized names.
+Snapshot replay verifies bytes and metadata and retains original retrieval time.
+Defaults: seed 42, batch size 50, decoded index budget 256 MiB (max 512 MiB).
+Count is 1-10,000; batch size 1-100. Current snapshots are not historical cohorts.
+Outputs live under Git-ignored `data/registry/`. Use one writer per root and local
+system TEMP for SQLite scratch, especially on Windows/Google Drive Stream.
+See [sampling algorithm, provenance, outputs and limits](docs/architecture/package_discovery.md).
+
 ## Integrated collection and profiling (T-020)
 
 `collect-dataset` orchestrates existing T-013?T-019 components. Create a UTF-8

@@ -10,6 +10,7 @@ from reposeer.cli.collect_dataset import collect_dataset_app
 from reposeer.cli.crawl_external import crawl_external_app
 from reposeer.cli.detect_tech import detect_tech_app
 from reposeer.cli.discover_external import discover_external_app
+from reposeer.cli.discover_packages import discover_packages_app
 from reposeer.cli.process import process_app
 from reposeer.cli.profile import profile_app
 
@@ -45,6 +46,7 @@ app.add_typer(collect_app, name="collect")
 app.add_typer(collect_activity_app, name="collect-activity")
 app.add_typer(collect_dataset_app, name="collect-dataset")
 app.add_typer(discover_external_app, name="discover-external")
+app.add_typer(discover_packages_app, name="discover-packages")
 app.add_typer(crawl_external_app, name="crawl-external")
 app.add_typer(detect_tech_app, name="detect-tech")
 app.add_typer(process_app, name="process")
