@@ -43,9 +43,12 @@ only from the environment, not automatically from `.env`.
 
 On Supabase SQL Editor, compare the existing bootstrap with
 `supabase/migrations/20261021000100_create_registry.sql` (copied verbatim from the
-supplied bootstrap). **Do not reapply it to existing production.** Apply only
-`20261021000200_coordination_assignments.sql`, after backup/review. It is additive
-and repeatable; no worker is enabled. Tools check columns, private table RLS and
+supplied bootstrap). **Do not reapply it to existing production.** After backup/review, apply
+`20261021000200_coordination_assignments.sql` only if it has not already been applied,
+then `20261021000300_coordination_followups.sql`. Do not edit published 001/002.
+Migration 003 adds repository coverage, package screening/mapping provenance and an
+immutable per-run catalog snapshot. All additions are repeatable; no worker is enabled.
+The implementation does not connect to production to discover migration history. Tools check columns, private table RLS and
 unique indexes before operating, and fail rather than automatically migrating.
 
 ```powershell
@@ -153,11 +156,14 @@ Coordinator assigns at most 10 repository jobs per call, without reusing live cl
 uv run python tools/coordination/dispatcher.py dispatch-crawl --worker C1 --limit 10 --out-dir data/coordination/assignments/C1 --lease-hours 48
 ```
 
-A crawl assignment path is a pointer to the current DB claim: reissuing the same job
-updates `crawl/assignments/Cn/<job_id>.json` only while holding that claim's row lock.
-Prior local snapshots are retained under the dispatch out-dir's `history/<sha>.json`;
-previous run bundles and their assignment copies remain immutable. Disabled workers
-cannot receive either new assignments or recovered pending uploads.
+Crawl assignments are immutable `crawl/assignments/Cn/<job_id>/<claim_token>.json`.
+The coordinator commits its claim and pending journal, validates the claim, uploads
+outside any DB transaction, then revalidates it in a short transaction before
+removing the journal. No mutable remote pointer can overwrite a newer claim.
+If the claim changes during upload, the command fails and retains the journal;
+the old token-specific remote file is orphaned, not a newly authorized assignment.
+Only distribute paths from a successful dispatch. Ingest rechecks the live DB claim.
+Disabled workers cannot receive new or recovered publications.
 
 Assignments contain up to 100 linked PyPI targets, fixed bounded collector options,
 expected repository, token and checksum. If a repository has over 100 packages,
@@ -167,12 +173,13 @@ Crawler downloads one actual job JSON and validates without API/upload first:
 
 ```powershell
 $job = '<job-UUID>'
-rclone copyto "reposeer:crawl/assignments/C1/$job.json" "data/coordination/assignments/C1/$job.json"
-uv run python tools/coordination/worker.py run --worker C1 --assignment "data/coordination/assignments/C1/$job.json" --data-root data/coordination/work/C1 --remote reposeer: --dry-run
-uv run python tools/coordination/worker.py run --worker C1 --assignment "data/coordination/assignments/C1/$job.json" --data-root data/coordination/work/C1 --remote reposeer:
+$claim = '<claim-UUID-from-dispatch>'
+rclone copyto "reposeer:crawl/assignments/C1/$job/$claim.json" "data/coordination/assignments/C1/$job/$claim.json"
+uv run python tools/coordination/worker.py run --worker C1 --assignment "data/coordination/assignments/C1/$job/$claim.json" --data-root data/coordination/work/C1 --remote reposeer: --dry-run
+uv run python tools/coordination/worker.py run --worker C1 --assignment "data/coordination/assignments/C1/$job/$claim.json" --data-root data/coordination/work/C1 --remote reposeer:
 ```
 
-The job's data-dir is exactly `<data-root>/<job_id>`. The subprocess uses an argument
+The data-dir is exactly `<data-root>/<job_id>/<claim_token>`. The subprocess uses an argument
 array and existing `collect-dataset` flags. No arbitrary command/URL is executed.
 A child exit 1 with a genuine partial manifest and raw observations is submitted;
 its data is retained. A missing manifest creates a local failure receipt and fails,
@@ -182,9 +189,60 @@ no fake successful READY run. Logs are redacted and retained outside the bundle.
 Retry the same command to upload saved READY data without collecting again. Local
 files/checkpoints are never deleted automatically. An unfinished T-020 manifest
 requires operator inspection and existing child recovery commands: T-020 has no
-integration resume engine. A reissued claim must not overwrite an old claim's
-job directory; retain/archive the old root and select a fresh local `--data-root`.
+integration resume engine. A reissued claim automatically gets a new token directory beneath the same data-root;
+both attempts remain separate. For example, attempts `J/T1/` and `J/T2/` retain their own
+ASSIGNMENT, targets, manifests, raw, processed, checksum, READY and receipt. Logs stay
+outside bundles under `logs/J/T1.log` and `logs/J/T2.log`.
 Use the default 48-hour lease, longer than expected collection and upload time.
+Use a short local disk data-root (for example `C:/RepoSeerData/C1`) if Drive Stream's
+Windows path-length limit rejects the two UUID segments plus artifact names.
+Spaces in paths are supported by quoting and argument arrays; no shell is used.
+
+### Activity coverage and follow-up scopes
+
+| Scope | max_pages/group | max_records/group | Next automatic scope |
+|---|---:|---:|---|
+| initial | 1 | 30 | followup:1 only when GitHub budget_limited |
+| followup:1 | 2 | 100 | followup:2 only when GitHub budget_limited |
+| followup:2 | 4 | 300 | none |
+
+External options remain hackernews / 1 page / 1 record / 1 candidate. Assignments
+accept only these exact scope/options pairs; workers derive argv from validated
+options. Initial scopes precede followups at equal priority. The default five
+GitHub groups are unchanged.
+
+Coverage comes from actual per-group manifest entries, preserving status,
+missing_reason, nullable pages_fetched/records_stored and reason codes. Registry
+statuses are unknown, budget_limited, bounded_no_budget_exhaustion or collection_failed.
+A completed job means its bounded scope finished. Even bounded_no_budget_exhaustion
+is not full historical coverage. External-only partial runs do not create followups;
+unverified mapping/metadata retains bounded retry/failure behavior.
+
+Followups recollect the first pages with larger budgets, consuming repeated API
+requests. They are **not cursor resume**. New raw observations keep their own IDs
+and timestamps. After followup:2, budget_limited remains visible with no further
+automatic job. Full cursor recovery is a separate task.
+
+### Packages discovered after a repository was collected
+
+A successful screening import records last_screening_run_id, then attempts reuse
+only for its new candidate packages (at most 100), after committing the import.
+The coordinator verifies screening bundle SHA and saved PyPI JSON, accepted canonical
+GitHub raw checksum/numeric ID, the existing resolver and RepositoryScopeEvidence.
+It records source paths/hashes/observed times before promoting verified_current.
+It never calls GitHub again or requeues a completed repository job for this check.
+Failures remain candidates with reason codes. Existing records with no screening
+reference report screening_evidence_missing; no provenance is invented.
+
+```powershell
+uv run python tools/coordination/dispatcher.py verify-pending --limit 100 --dry-run
+uv run python tools/coordination/dispatcher.py verify-pending --limit 100 --apply
+```
+
+The default is dry-run. Missing/corrupt evidence and numeric identity collisions
+are reported without promotion or automatic row merging. Review each result's
+reason_code; restore the original immutable evidence or screen again through an
+explicit operator workflow rather than editing hashes to force verification.
 
 ## Coordinator: ingest, audit and catalog
 
@@ -194,6 +252,8 @@ may be large. No mutable DuckDB is opened on Drive Stream.
 ```powershell
 uv run python tools/coordination/ingest.py run --remote reposeer: --workspace data/coordination/central --dry-run
 uv run python tools/coordination/ingest.py run --remote reposeer: --workspace data/coordination/central --limit 25
+uv run python tools/coordination/ingest.py rebuild-catalog --remote reposeer: --dry-run
+uv run python tools/coordination/ingest.py rebuild-catalog --remote reposeer:
 uv run python tools/coordination/dispatcher.py status --json
 uv run python tools/coordination/dispatcher.py requeue-expired --pending-dir data/coordination --dry-run
 # Only after reviewing current READY, pending assignments/uploads and worker state:
@@ -201,6 +261,46 @@ uv run python tools/coordination/dispatcher.py requeue-expired --pending-dir dat
 ```
 
 `--dry-run` makes no DB or Drive writes; worker dry-run also creates no work files.
+After verifying its immutable bundle upload (READY last), each crawler publishes a
+small immutable `crawl/inbox/Cn/<job_id>/<integration_run_id>.json` notification.
+It binds schema version, worker/job/run, exact submission prefix, READY payload SHA
+and the immutable READY timestamp. Same-claim retries reuse both bundle and notice
+without collecting again. No credentials or local logs enter the notification.
+
+Normal ingest lists pending inboxes for C1-C7 only, at most --limit notices per call;
+it never recursively scans crawl/submissions. It downloads only referenced READY
+runs. Accepted replay checks DB identity/SHA without redownloading old bundles.
+After DB commit, only the notification is copy/verified then removed from inbox into
+`crawl/inbox-processed/...`. Invalid notices go to `crawl/inbox-quarantine/...` with
+an explicit error and local reason under workspace/quarantine. Transport/DB failures
+leave notices pending, including failures after acceptance but before archiving.
+Retrying is idempotent; raw submissions and canonical bundles are never deleted.
+
+For legacy uploads lacking notifications, run explicit bounded backfill:
+
+```powershell
+uv run python tools/coordination/ingest.py scan-legacy --remote reposeer: --workspace data/coordination/central --limit 25 --dry-run
+uv run python tools/coordination/ingest.py scan-legacy --remote reposeer: --workspace data/coordination/central --limit 25 --apply
+```
+
+Backfill walks job/run directories explicitly and stops after the requested number
+of eligible READY runs. It skips already indexed runs and existing pending notices,
+so repeated batches progress. It also validates and backfills missing SQL catalog
+snapshots for legacy accepted runs, without changing original bytes. No normal ingest
+cycle triggers this scan. Catalog rebuild fails explicitly until legacy accepted
+rows have snapshots, instead of silently omitting them.
+
+To retry a quarantined notification after correcting the underlying claim/evidence
+issue, inspect its local reason first, then copy its unchanged JSON back to the
+same inbox path. Example (only after review; stale claims require a new assignment):
+
+```powershell
+$runId = '<integration-run-UUID>'
+rclone copyto "reposeer:crawl/inbox-quarantine/C1/$job/$runId.json" "reposeer:crawl/inbox/C1/$job/$runId.json" --immutable
+```
+
+A dry-run never uploads, archives notifications, writes registry rows or rebuilds
+catalog. It may read metadata and return pending/rejected diagnostics.
 Only READY submissions are downloaded. SHA/size lists cover every submitted file
 except CHECKSUMS and READY themselves. Claims, targets, job, worker, assignment hash,
 run and canonical raw provider evidence are revalidated. Stale tokens, renamed-ID
@@ -213,7 +313,7 @@ They preserve all original raw bytes, observations, nulls, processed schemas and
 worker-local absolute provenance paths. Resolve run artifacts using their relative
 paths under the catalog run root; don't assume a worker's disk path exists centrally.
 A bundle hash is the SHA of CHECKSUMS.sha256; bundle byte_size counts all files.
-Previous accepted submissions are skipped by their READY payload checksum and DB
+Previous accepted notifications are recognized by READY checksum and DB
 artifact path; downstream authority is the coordinator-owned canonical copy.
 
 Artifact acceptance differs from job collection. A partial run ends the bounded
@@ -224,16 +324,28 @@ is no promise of complete history. Only individually verified package IDs are
 promoted. Unverified mapping/metadata runs are retained for audit and the job retries
 with bounded backoff, then fails at max_attempts. No abandonment label is produced.
 
-Canonical upload/read-back verification precedes DB ingestion. Failure rolls back
-acceptance; replay reuses matching files and never overwrites a conflicting SHA.
-A catalog failure may leave accepted DB runs and a stale active catalog; repeat ingest
-even with no pending bundles to rebuild it from DB plus accepted receipt checksums.
-The explicit-schema catalog is built atomically on local TEMP, uploaded as immutable
-`canonical/catalog/snapshots/<sha>.parquet`, verified, then publishes
-`canonical/catalog/ingestion_index.parquet` and `active.json`. Consumers read active.json,
-resolve its immutable relative_path and verify SHA; do not read a half-published alias.
-No Parquet concatenation or feature construction is performed. Operate one coordinator
-writer; do not overlap scheduled ingest processes.
+Ingestion has three phases: read-only preflight, immutable canonical upload/read-back
+without an open DB transaction, then short locked acceptance revalidating claim,
+lease, targets, worker, evidence and numeric identity. A crash or stale claim after
+transfer can leave an orphan canonical directory; it cannot mark the DB accepted.
+Replay reuses matching immutable bytes and rejects conflicting checksums.
+
+Acceptance stores immutable catalog metadata in crawl_runs: run/job/worker, expected
+repository, verified numeric ID, assignment target snapshot, overall status,
+canonical path/SHA and ingestion timestamp. The catalog uses this SQL metadata only,
+not current package lists or downloaded receipts/checksums from all accepted runs.
+Normal ingest does not rebuild it. Invoke rebuild-catalog separately, or explicitly
+add --refresh-catalog to ingest run for one refresh after the batch.
+
+The explicit-schema Parquet is built atomically on local TEMP and published as
+`canonical/catalog/snapshots/<sha>.parquet`, then a verified compatibility alias
+`canonical/catalog/ingestion_index.parquet` and `active.json`. Consumers resolve
+active.json's immutable relative_path and verify SHA. Failed publication leaves
+accepted runs safe and may leave an older active snapshot; rerun rebuild-catalog.
+One dedicated autocommit PostgreSQL session holds pg_try_advisory_lock across
+coordinator ingestion/catalog publication, released in finally. No long-running
+transaction or row lock spans transfers. Operate one coordinator writer; do not
+overlap processes. No raw/processed concatenation or features are built here.
 
 Requeue is dry-run by default, fails closed if Drive cannot be queried, checks current
 claim tokens against remote/local pending files, and clears claim fields only when
@@ -267,12 +379,12 @@ The tests fake rclone/subprocess metadata storage, and reuse real offline T-020 
 observations. PostgreSQL concurrency is opt-in via REPOSEER_COORDINATION_TEST_DSN;
 only localhost and a database named `reposeer_coordination_test...` are accepted.
 Use a dedicated disposable local PostgreSQL database with schema/role creation
-privileges. Never point this test at Supabase. It applies the two migrations only
+privileges. Never point this test at Supabase. It applies the three migrations only
 there, removes only its own UUID rows and checks competing SKIP LOCKED transactions.
 Without that DSN this test is skipped; offline tests cannot establish live SQL/ACL
 compatibility or provider quotas.
 
-Before production: review/apply additive migration; verify private schema/RLS/indexes;
+Before production: review/apply 002 if missing, then 003; verify private schema/RLS/indexes;
 secure coordinator DSN; configure restricted Drive OAuth separately; test dry-run;
 activate named slots explicitly; run one small discovery/screen/crawl/ingest batch;
 verify SHA read-back and catalog pointer; inspect partial/failed counts; then scale.

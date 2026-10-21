@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import sys
+import tempfile
 from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -12,8 +13,8 @@ if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.coordination._common import (
-    COLLECTION,
     MAX_METADATA,
+    CoordinationError,
     Drive,
     Registry,
     artifact_row,
@@ -21,6 +22,7 @@ from tools.coordination._common import (
     canonical,
     check_claim,
     cli_guard,
+    collection_options,
     enabled_worker,
     fingerprint,
     finish_job,
@@ -28,6 +30,7 @@ from tools.coordination._common import (
     no_worker_dsn,
     now,
     parser,
+    read_checksums,
     read_json,
     relative,
     require,
@@ -53,9 +56,9 @@ from reposeer.pipelines.package_discovery import CSV_FIELDS
 
 CLAIM_SQL = """SELECT j.*,r.repo_full_name FROM reposeer.crawl_jobs j
  LEFT JOIN reposeer.repositories r USING(repository_id)
- WHERE j.job_kind=%s AND j.scope_key='initial' AND j.status IN ('queued','retry')
+ WHERE j.job_kind=%s AND (j.scope_key='initial' OR (j.job_kind='collect_repository' AND j.scope_key IN ('followup:1','followup:2'))) AND j.status IN ('queued','retry')
  AND (j.retry_after IS NULL OR j.retry_after<=now()) AND j.attempt_count<j.max_attempts
- ORDER BY j.priority DESC,j.created_at,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT %s"""
+ ORDER BY j.priority DESC,CASE j.scope_key WHEN 'initial' THEN 0 WHEN 'followup:1' THEN 1 ELSE 2 END,j.created_at,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT %s"""
 
 
 def discovery_bundle(root):
@@ -174,36 +177,30 @@ def import_discovery(root, *, dry_run=False, registry=None, remote="reposeer:"):
 def publish_assignment(path, out_dir, drive, registry, *, expected_worker):
     assignment = validate_assignment(read_json(path), expected_worker=expected_worker)
     screening = assignment["kind"] == "screen_package"
-    identity = assignment["assignment_id" if screening else "job_id"]
+    identity = (
+        assignment["assignment_id"]
+        if screening
+        else assignment["job_id"] + "/" + assignment["claim_token"]
+    )
     final = safe_path(out_dir, f"{identity}.json")
     items = assignment["jobs"] if screening else [assignment]
-    # Hold claims while updating their assignment pointers. Reclaim cannot publish
-    # a newer token and then be overwritten by this older publisher.
-    with registry.connect() as db:
-        enabled_worker(db, assignment["worker_id"], "screening" if screening else "crawler")
-        for item in items:
-            row = db.execute(
-                "SELECT j.*,r.repo_full_name FROM reposeer.crawl_jobs j LEFT JOIN reposeer.repositories r USING(repository_id) WHERE job_id=%s FOR UPDATE OF j",
-                (item["job_id"],),
-            ).fetchone()
-            check_claim(row, assignment, item)
-        if final.exists() and not screening:
-            previous = validate_assignment(
-                read_json(final), expected_worker=expected_worker, allow_expired=True
-            )
-            require(previous.get("job_id") == identity, "assignment_local_conflict")
-            if previous["assignment_sha256"] != assignment["assignment_sha256"]:
-                write_json(
-                    safe_path(out_dir, f"history/{previous['assignment_sha256']}.json"), previous
-                )
-        write_json(final, assignment, immutable=screening)
-        prefix = "screening" if screening else "crawl"
-        # Crawl assignment files are current-claim pointers. Run bundles stay immutable.
-        drive.put(
-            final,
-            f"{prefix}/assignments/{assignment['worker_id']}/{identity}.json",
-            replace=not screening,
-        )
+
+    def check():
+        with registry.connect(readonly=True) as db:
+            enabled_worker(db, assignment["worker_id"], "screening" if screening else "crawler")
+            for item in items:
+                row = db.execute(
+                    "SELECT j.*,r.repo_full_name FROM reposeer.crawl_jobs j LEFT JOIN reposeer.repositories r USING(repository_id) WHERE job_id=%s",
+                    (item["job_id"],),
+                ).fetchone()
+                check_claim(row, assignment, item)
+
+    check()
+    write_json(final, assignment)
+    prefix = "screening" if screening else "crawl"
+    # Token-specific immutable paths cannot overwrite a newer claim's assignment.
+    drive.put(final, f"{prefix}/assignments/{assignment['worker_id']}/{identity}.json")
+    check()  # A reclaimed claim leaves its journal for inspection, never signals success.
     if Path(path) != final:
         Path(path).unlink()
     return str(final)
@@ -271,7 +268,7 @@ def dispatch(kind, worker, limit, out_dir, *, lease_hours=48, remote="reposeer:"
                             expected_repo_full_name=slug(job["repo_full_name"]),
                             targets=targets,
                             lease_expires_at=format_utc_timestamp(expiry),
-                            collection=COLLECTION,
+                            collection=collection_options(job["scope_key"]),
                             package_scope_truncated=len(rows) > 100,
                         )
                     )
@@ -456,7 +453,8 @@ def import_screening(root, *, dry_run=False, registry=None, remote="reposeer:"):
         jobs_retry=0,
         duplicates_skipped=0,
     )
-    with (registry or Registry()).connect(readonly=dry_run) as db:
+    registry = registry or Registry()
+    with registry.connect(readonly=dry_run) as db:
         existing = db.execute(
             "SELECT sha256 FROM reposeer.artifacts WHERE storage_path=%s",
             (prefix + "/CHECKSUMS.sha256",),
@@ -499,6 +497,10 @@ def import_screening(root, *, dry_run=False, registry=None, remote="reposeer:"):
                 (result["package_id"],),
             ).fetchone()
             require(package is not None, "unknown_screening_package")
+            db.execute(
+                "UPDATE reposeer.packages SET last_screening_run_id=%s WHERE package_id=%s",
+                (identity, result["package_id"]),
+            )
             if package["mapping_status"] == "verified_current":
                 # Candidate-only screening cannot relink or downgrade verified evidence.
                 finish_job(db, job)
@@ -546,7 +548,210 @@ def import_screening(root, *, dry_run=False, registry=None, remote="reposeer:"):
             marker["payload_sha256"],
             sum(size for _, size in inventory.values()),
         )
+    candidates = [r["package_id"] for r in results if r["screening_status"] == "candidate"]
+    if candidates:
+        counters["verification"] = verify_pending(
+            registry=registry, remote=remote, apply=True, limit=len(candidates), packages=candidates
+        )
     return counters
+
+
+def verify_pending(*, registry=None, remote="reposeer:", limit=100, apply=False, packages=None):
+    """Reuse immutable screening + accepted repository observations; never call providers."""
+    from psycopg.types.json import Jsonb
+
+    from reposeer.collectors.external.crawler.scope import RepositoryScopeEvidence
+    from reposeer.collectors.github.repository import repository_exclusion_reasons
+    from reposeer.collectors.package.repository_mapping import PackageRepositoryResolver
+    from reposeer.contracts import validate_record
+    from reposeer.contracts.identity import parse_repo_id
+    from reposeer.pipelines.normalization import NormalizationPipeline
+
+    require(1 <= limit <= 1000, "invalid_verification_limit")
+    registry, drive = registry or Registry(), Drive(remote)
+    sql = "SELECT p.*,r.github_repo_id,r.repo_full_name FROM reposeer.packages p JOIN reposeer.repositories r USING(repository_id) WHERE p.mapping_status='candidate' AND r.github_repo_id IS NOT NULL"
+    params = []
+    if packages is not None:
+        require(1 <= len(packages) <= 100, "invalid_verification_packages")
+        sql += " AND p.package_id=ANY(%s)"
+        params.append(packages)
+    sql += " ORDER BY p.package_id LIMIT %s"
+    params.append(limit)
+    with registry.connect(readonly=True) as db:
+        pending = db.execute(sql, params).fetchall()
+    results, cache = [], {}
+    with tempfile.TemporaryDirectory(prefix="reposeer-verify-") as scratch:
+        scratch = Path(scratch)
+        for package in pending:
+            key = subject(package["package_id"])
+            evidence, reason, verified = None, None, False
+            try:
+                require(
+                    package.get("last_screening_run_id") is not None, "screening_evidence_missing"
+                )
+                screen = uid(str(package["last_screening_run_id"]))
+                with registry.connect(readonly=True) as db:
+                    screen_artifact = db.execute(
+                        "SELECT a.* FROM reposeer.artifacts a JOIN reposeer.crawl_runs c USING(run_id) WHERE a.storage_path=%s AND a.artifact_kind='bundle' AND a.status='ingested' AND c.run_kind='screening' AND c.worker_id='D2'",
+                        (drive.path(f"screening/submissions/D2/{screen}/CHECKSUMS.sha256"),),
+                    ).fetchone()
+                    accepted = db.execute(
+                        "SELECT a.*,c.catalog_metadata,j.repository_id FROM reposeer.crawl_jobs j JOIN reposeer.crawl_runs c USING(job_id) JOIN reposeer.artifacts a USING(run_id) WHERE j.repository_id=%s AND c.run_kind='integration' AND a.artifact_kind='bundle' AND a.status='ingested' ORDER BY c.finished_at DESC,c.run_id LIMIT 1",
+                        (package["repository_id"],),
+                    ).fetchone()
+                require(screen_artifact is not None, "screening_evidence_missing")
+                require(accepted is not None, "accepted_repository_evidence_missing")
+                run_id = uid(str(accepted["run_id"]))
+                screen_root = scratch / screen
+                if screen not in cache:
+                    drive.download(f"screening/submissions/D2/{screen}", screen_root)
+                    marker, _, rows, _ = screening_bundle(screen_root)
+                    require(
+                        marker["payload_sha256"] == screen_artifact["sha256"],
+                        "screening_source_checksum",
+                    )
+                    cache[screen] = rows
+                result = next((r for r in cache[screen] if r["package_id"] == key), None)
+                require(
+                    result and result["screening_status"] == "candidate",
+                    "screening_candidate_missing",
+                )
+                prefix = f"canonical/runs/{run_id}"
+                require(
+                    accepted["storage_path"] == drive.path(prefix + "/CHECKSUMS.sha256"),
+                    "accepted_repository_path_mismatch",
+                )
+                if run_id not in cache:
+                    folder = scratch / run_id
+                    folder.mkdir()
+                    checksums = folder / "CHECKSUMS.sha256"
+                    # Metadata and just GitHub raw are fetched; other run payloads stay on Drive.
+                    size = drive.listing(prefix).get("CHECKSUMS.sha256")
+                    require(type(size) is int and size <= MAX_METADATA, "checksum_list_size_limit")
+                    drive._run(["copyto", drive.path(prefix + "/CHECKSUMS.sha256"), str(checksums)])
+                    require(
+                        fingerprint(checksums)[0] == accepted["sha256"],
+                        "accepted_repository_checksum",
+                    )
+                    inventory = read_checksums(checksums)
+                    raw_name = "raw/github/repositories.jsonl"
+                    require(raw_name in inventory, "github_raw_missing")
+                    raw_path = folder / "repositories.jsonl"
+                    drive._run(["copyto", drive.path(prefix + "/" + raw_name), str(raw_path)])
+                    require(fingerprint(raw_path) == inventory[raw_name], "github_raw_checksum")
+                    observations = []
+                    with raw_path.open("rb") as stream:
+                        while line := stream.readline(16 * 1024**2 + 1):
+                            require(len(line) <= 16 * 1024**2, "raw_line_size_limit")
+                            raw = validate_record(line)
+                            require(isinstance(raw, RawRecord), "noncanonical_raw_evidence")
+                            observations.append(raw)
+                    cache[run_id] = (observations, inventory[raw_name][0])
+                matches = [
+                    r
+                    for r in cache[run_id][0]
+                    if r.source == "github_rest"
+                    and r.source_record_type == "github_repository"
+                    and r.repo_id is not None
+                    and int(parse_repo_id(r.repo_id)) == package["github_repo_id"]
+                ]
+                require(matches, "repository_numeric_evidence_missing")
+                github = max(matches, key=lambda r: (r.retrieved_at, r.raw_record_id))
+                normalized = NormalizationPipeline().process([github])
+                require(len(normalized.canonical_repositories) == 1, "invalid_github_repository")
+                repository = normalized.canonical_repositories[0]
+                require(
+                    not repository_exclusion_reasons(repository), "ineligible_repository_evidence"
+                )
+                payload = read_json(screen_root / "pypi_raw" / (key[5:] + ".json"))
+                mapping = PackageRepositoryResolver().resolve_current(key[5:], payload, repository)
+                reason = mapping.reason
+                if mapping.status == "verified_current":
+                    # Validation-only wrapper; stored provenance binds original D2 JSON bytes.
+                    pypi = RawRecord(
+                        schema_version="0.1.0",
+                        record_type="raw_record",
+                        raw_record_id="raw:" + str(uuid4()),
+                        run_id=screen,
+                        source="pypi_json",
+                        source_record_type="dependency_metadata",
+                        source_record_id=key[5:],
+                        package_id=key,
+                        repo_id=None,
+                        source_url=f"https://pypi.org/pypi/{key[5:]}/json",
+                        retrieved_at=result["retrieved_at_utc"],
+                        available_at=None,
+                        event_at=None,
+                        http_status=None,
+                        raw_body_sha256=None,
+                        payload=payload,
+                    )
+                    resolved = RepositoryScopeEvidence(pypi=pypi, github=github).resolve()
+                    require(
+                        int(parse_repo_id(resolved["repo_id"])) == package["github_repo_id"],
+                        "repository_numeric_identity_changed",
+                    )
+                    verified = True
+                    evidence = dict(
+                        screening_run_id=screen,
+                        integration_run_id=run_id,
+                        pypi_path=f"screening/submissions/D2/{screen}/pypi_raw/{key[5:]}.json",
+                        pypi_sha256=result["pypi_response_sha256"],
+                        pypi_observed_at=pypi.retrieved_at,
+                        github_path=prefix + "/raw/github/repositories.jsonl",
+                        github_sha256=cache[run_id][1],
+                        github_raw_record_id=github.raw_record_id,
+                        github_observed_at=github.retrieved_at,
+                        historical_validity="unverified",
+                    )
+                else:
+                    reason = reason or "mapping_unresolved"
+            except (CoordinationError, ValueError, KeyError, TypeError, OSError) as error:
+                reason = (
+                    str(error)
+                    if isinstance(error, CoordinationError)
+                    else "mapping_evidence_invalid"
+                )
+                verified = False
+            if apply:
+                with registry.connect() as db:
+                    duplicate = db.execute(
+                        "SELECT repository_id FROM reposeer.repositories WHERE github_repo_id=%s AND repository_id<>%s",
+                        (package["github_repo_id"], package["repository_id"]),
+                    ).fetchone()
+                    repo = db.execute(
+                        "SELECT github_repo_id FROM reposeer.repositories WHERE repository_id=%s FOR UPDATE",
+                        (package["repository_id"],),
+                    ).fetchone()
+                    current = db.execute(
+                        "SELECT * FROM reposeer.packages WHERE package_id=%s FOR UPDATE", (key,)
+                    ).fetchone()
+                    require(
+                        current
+                        and current["repository_id"] == package["repository_id"]
+                        and str(current.get("last_screening_run_id"))
+                        == str(package.get("last_screening_run_id")),
+                        "mapping_changed_during_verification",
+                    )
+                    if duplicate or repo["github_repo_id"] != package["github_repo_id"]:
+                        verified, reason = False, "github_numeric_id_collision_quarantine"
+                    if current["mapping_status"] == "candidate":
+                        db.execute(
+                            "UPDATE reposeer.packages SET mapping_status=%s,mapping_evidence=%s,mapping_verified_at=%s WHERE package_id=%s",
+                            (
+                                "verified_current" if verified else "candidate",
+                                Jsonb(evidence if verified else dict(reason_code=reason)),
+                                now() if verified else None,
+                                key,
+                            ),
+                        )
+            results.append(dict(package_id=key, verified=verified, reason_code=reason))
+    return dict(
+        dry_run=not apply,
+        checked=len(results),
+        verified=sum(r["verified"] for r in results),
+        results=results,
+    )
 
 
 def requeue_expired(
@@ -631,6 +836,9 @@ def status(registry):
         repos = db.execute(
             "SELECT verification_status,count(*) AS count FROM reposeer.repositories GROUP BY verification_status"
         ).fetchall()
+        coverage = db.execute(
+            "SELECT activity_coverage_status,count(*) AS count FROM reposeer.repositories GROUP BY activity_coverage_status"
+        ).fetchall()
         jobs = db.execute(
             "SELECT job_kind,status,count(*) AS count FROM reposeer.crawl_jobs GROUP BY job_kind,status"
         ).fetchall()
@@ -643,6 +851,7 @@ def status(registry):
     return dict(
         packages=packages,
         repositories=repos,
+        activity_coverage=coverage,
         jobs=jobs,
         workers=workers,
         artifacts=artifacts,
@@ -675,6 +884,11 @@ def main():
     sub = commands.add_parser("activate")
     sub.add_argument("--worker", required=True)
     sub.add_argument("--display-name", required=True)
+    sub = commands.add_parser("verify-pending")
+    sub.add_argument("--limit", type=int, default=100)
+    group = sub.add_mutually_exclusive_group()
+    group.add_argument("--apply", action="store_true")
+    group.add_argument("--dry-run", action="store_true")
     sub = commands.add_parser("requeue-expired")
     group = sub.add_mutually_exclusive_group()
     group.add_argument("--apply", action="store_true")
@@ -699,6 +913,10 @@ def main():
         )
     if args.command == "screen-local":
         return screen_local(args.assignment, args.out_dir, remote=args.remote)
+    if args.command == "verify-pending":
+        return verify_pending(
+            registry=registry, remote=args.remote, limit=args.limit, apply=args.apply
+        )
     if args.command == "status":
         return status(registry)
     if args.command == "requeue-expired":

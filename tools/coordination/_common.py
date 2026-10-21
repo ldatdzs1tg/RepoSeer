@@ -11,10 +11,30 @@ import tempfile
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from uuid import UUID
 
 from reposeer.contracts.identity import canonical_github_url, format_utc_timestamp, package_id
 
+COLLECTION_BUDGETS = MappingProxyType(
+    {"initial": (1, 30), "followup:1": (2, 100), "followup:2": (4, 300)}
+)
+
+
+def collection_options(scope):
+    require(scope in COLLECTION_BUDGETS, "unsupported_scope")
+    pages, records = COLLECTION_BUDGETS[scope]
+    return dict(
+        max_pages=pages,
+        max_records=records,
+        discovery_sources=["hackernews"],
+        discovery_max_pages=1,
+        discovery_max_records=1,
+        max_candidates=1,
+    )
+
+
+# Compatibility for callers using the initial policy; validation derives fresh options.
 COLLECTION = dict(
     max_pages=1,
     max_records=30,
@@ -193,7 +213,7 @@ def validate_assignment(value, *, expected_worker=None, allow_expired=False):
     elif kind == "collect_repository":
         uid(value.get("job_id"))
         uid(value.get("claim_token"))
-        require(value.get("scope_key") == "initial", "unsupported_scope")
+        options = collection_options(value.get("scope_key"))
         require(
             slug(value.get("expected_repo_full_name")) == value["expected_repo_full_name"],
             "noncanonical_repo",
@@ -201,7 +221,10 @@ def validate_assignment(value, *, expected_worker=None, allow_expired=False):
         targets = value.get("targets")
         require(isinstance(targets, list) and 1 <= len(targets) <= 100, "invalid_targets")
         require(len({subject(p) for p in targets}) == len(targets), "duplicate_targets")
-        require(value.get("collection") == COLLECTION, "unsupported_collection_options")
+        require(
+            canonical(value.get("collection")) == canonical(options),
+            "unsupported_collection_options",
+        )
     else:
         raise CoordinationError("unknown_assignment_kind")
     return value
@@ -422,6 +445,16 @@ class Drive:
             result[name] = row["Size"]
         return result
 
+    def children(self, prefix):
+        value = self._run(["lsjson", self.path(prefix), "--dirs-only"], missing_ok=True)
+        if value is None:
+            return []
+        rows = json.loads(value)
+        require(isinstance(rows, list) and len(rows) <= 200000, "remote_listing_limit")
+        names = [relative(row["Path"]) for row in rows]
+        require(all("/" not in name for name in names), "invalid_remote_directory")
+        return sorted(names)
+
     def download(self, prefix, destination):
         listing = self.listing(prefix)
         require(
@@ -452,6 +485,15 @@ class Drive:
             self._run(["copyto", self.path(name), str(target)])
             return fingerprint(target)
 
+    def archive(self, source, destination):
+        """Copy/verify then remove only the notification, never its bundle."""
+        with tempfile.TemporaryDirectory(prefix="reposeer-notification-") as scratch:
+            local = Path(scratch) / "notification.json"
+            self._run(["copyto", self.path(source), str(local)])
+            self.put(local, destination)
+            require(self.remote_fingerprint(source) == fingerprint(local), "notification_changed")
+            self._run(["deletefile", self.path(source)])
+
     def put(self, local, name, *, replace=False):
         local = Path(local)
         expected = fingerprint(local)
@@ -479,16 +521,40 @@ class Drive:
 
 SCHEMA = {
     "workers": "worker_id worker_role display_name is_enabled last_seen_at created_at",
-    "packages": "package_id first_sampling_run_id source_snapshot_sha256 mapping_status candidate_repo_full_name repository_id last_screened_at created_at",
-    "repositories": "repository_id repo_full_name github_repo_id verification_status verified_at last_collected_at created_at",
+    "packages": "package_id first_sampling_run_id source_snapshot_sha256 mapping_status candidate_repo_full_name repository_id last_screened_at created_at last_screening_run_id mapping_evidence mapping_verified_at",
+    "repositories": "repository_id repo_full_name github_repo_id verification_status verified_at last_collected_at created_at activity_coverage_status activity_coverage_json last_coverage_at",
     "crawl_jobs": "job_id job_kind package_id repository_id scope_key priority status claimed_by claim_token claimed_at lease_expires_at retry_after attempt_count max_attempts last_error_code created_at updated_at assignment_targets assignment_sha256",
-    "crawl_runs": "run_id worker_id job_id run_kind status started_at finished_at error_code",
+    "crawl_runs": "run_id worker_id job_id run_kind status started_at finished_at error_code catalog_metadata",
     "artifacts": "artifact_id run_id artifact_kind storage_path sha256 byte_size status submitted_at ingested_at error_code",
 }
 
 
 class Registry:
     """Only coordinator commands instantiate this object. No implicit migrations."""
+
+    @contextmanager
+    def writer_lock(self):
+        import psycopg
+        from psycopg.rows import dict_row
+
+        dsn = os.environ.get("REPOSEER_REGISTRY_DSN")
+        require(bool(dsn), "registry_dsn_missing_coordinator_only")
+        try:
+            # Autocommit session: no transaction survives a Drive operation.
+            with psycopg.connect(
+                dsn, autocommit=True, row_factory=dict_row, connect_timeout=15
+            ) as db:
+                key = ("reposeer:canonical-writer",)
+                acquired = db.execute(
+                    "SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS acquired", key
+                ).fetchone()
+                require(acquired and acquired["acquired"], "another_ingest_writer_is_active")
+                try:
+                    yield
+                finally:
+                    db.execute("SELECT pg_advisory_unlock(hashtextextended(%s,0))", key)
+        except psycopg.Error:
+            raise CoordinationError("registry_operation_failed") from None
 
     @contextmanager
     def connect(self, *, readonly=False):
@@ -650,6 +716,87 @@ def artifact_row(db, run_id, kind, path, sha, size):
     return bool(created)
 
 
+def notification(assignment, marker):
+    worker = worker_id(assignment["worker_id"], "crawler")
+    job, run = uid(assignment["job_id"]), uid(marker["run_id"])
+    return dict(
+        schema_version=1,
+        worker_id=worker,
+        job_id=job,
+        integration_run_id=run,
+        submission_prefix=f"crawl/submissions/{worker}/{job}/{run}",
+        ready_payload_sha256=marker["payload_sha256"],
+        created_at_utc=marker["created_at_utc"],
+    )
+
+
+def validate_notification(value, path):
+    worker = worker_id(value.get("worker_id"), "crawler")
+    job, run = uid(value.get("job_id")), uid(value.get("integration_run_id"))
+    require(
+        type(value.get("schema_version")) is int and value["schema_version"] == 1,
+        "notification_version",
+    )
+    require(
+        path == f"crawl/inbox/{worker}/{job}/{run}.json"
+        and value.get("submission_prefix") == f"crawl/submissions/{worker}/{job}/{run}",
+        "notification_path_mismatch",
+    )
+    require(
+        isinstance(value.get("ready_payload_sha256"), str)
+        and re.fullmatch("[a-f0-9]{64}", value["ready_payload_sha256"]),
+        "notification_checksum",
+    )
+    timestamp(value.get("created_at_utc"))
+    return value
+
+
+def activity_coverage(manifest, expected_repo):
+    """Bounded observations only; neither complete groups nor dates prove full history."""
+    expected_groups = {"commits", "issues", "pull_requests", "contributors", "releases"}
+    entries = [e for t in manifest["targets"] for e in t.get("activity_group_statuses", [])]
+    entries += [
+        e
+        for stage in manifest.get("stages", [])
+        for e in stage.get("details", {}).get("activity_groups", [])
+    ]
+    groups = {}
+    for entry in entries:
+        if slug(entry.get("repo_full_name", expected_repo)) != expected_repo:
+            continue
+        group = entry.get("group")
+        require(group in expected_groups, "invalid_activity_group")
+        summary = {
+            key: entry.get(key)
+            for key in ("group", "status", "missing_reason", "pages_fetched", "records_stored")
+        }
+        require(isinstance(summary["status"], str), "invalid_activity_status")
+        require(
+            summary["missing_reason"] is None or isinstance(summary["missing_reason"], str),
+            "invalid_activity_reason",
+        )
+        for key in ("pages_fetched", "records_stored"):
+            require(
+                summary[key] is None or type(summary[key]) is int and summary[key] >= 0,
+                "invalid_activity_counter",
+            )
+        require(group not in groups or groups[group] == summary, "conflicting_activity_coverage")
+        groups[group] = summary
+    reasons = {g["missing_reason"] for g in groups.values() if g["missing_reason"]}
+    if "budget_exhausted" in reasons:
+        status = "budget_limited"
+    elif any(g["status"] in {"failed", "retryable_failure", "excluded"} for g in groups.values()):
+        status = "collection_failed"
+    elif set(groups) == expected_groups and all(g["status"] == "complete" for g in groups.values()):
+        status = "bounded_no_budget_exhaustion"
+    else:
+        status = "unknown"
+        reasons.add("activity_coverage_unverified")
+    return dict(
+        status=status, groups=[groups[k] for k in sorted(groups)], reason_codes=sorted(reasons)
+    )
+
+
 def integration_evidence(root, assignment, run_id):
     """Recompute receipt facts from T-020 manifests AND canonical provider observations."""
     from reposeer.collectors.github.repository import repository_exclusion_reasons
@@ -804,6 +951,7 @@ def integration_evidence(root, assignment, run_id):
         started_at=manifest["started_at"],
         finished_at=manifest["finished_at"],
         error_codes=errors,
+        activity_coverage=activity_coverage(manifest, assignment["expected_repo_full_name"]),
         manifest_path=manifest_name,
         collection_profile_path=profile_name,
         data_profile_path=data_profile_name,

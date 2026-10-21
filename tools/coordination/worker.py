@@ -18,6 +18,7 @@ from tools.coordination._common import (
     format_utc_timestamp,
     integration_evidence,
     no_worker_dsn,
+    notification,
     now,
     parser,
     read_json,
@@ -38,7 +39,7 @@ def run(worker, assignment_path, data_root, *, remote="reposeer:", dry_run=False
     worker_id(worker, "crawler")
     assignment = validate_assignment(read_json(assignment_path), expected_worker=worker)
     require(assignment["kind"] == "collect_repository", "crawl_assignment_required")
-    root = safe_path(data_root, uid(assignment["job_id"]))
+    root = safe_path(data_root, uid(assignment["job_id"]) + "/" + uid(assignment["claim_token"]))
     require(not root.is_symlink() and not root.is_junction(), "unsafe_work_directory")
     if dry_run:
         return dict(
@@ -71,17 +72,17 @@ def run(worker, assignment_path, data_root, *, remote="reposeer:", dry_run=False
                 "--mode",
                 "live",
                 "--max-pages",
-                "1",
+                str(assignment["collection"]["max_pages"]),
                 "--max-records",
-                "30",
+                str(assignment["collection"]["max_records"]),
                 "--discovery-sources",
-                "hackernews",
+                ",".join(assignment["collection"]["discovery_sources"]),
                 "--discovery-max-pages",
-                "1",
+                str(assignment["collection"]["discovery_max_pages"]),
                 "--discovery-max-records",
-                "1",
+                str(assignment["collection"]["discovery_max_records"]),
                 "--max-candidates",
-                "1",
+                str(assignment["collection"]["max_candidates"]),
             ]
             # Stream subprocess output to a local temporary file, then redact into a
             # sibling log outside the submitted data directory. No shell evaluation.
@@ -109,7 +110,10 @@ def run(worker, assignment_path, data_root, *, remote="reposeer:", dry_run=False
                 )
                 raise CoordinationError("collector_process_interrupted")
             atomic_bytes(
-                Path(data_root) / "logs" / f"{assignment['job_id']}.log",
+                Path(data_root)
+                / "logs"
+                / assignment["job_id"]
+                / f"{assignment['claim_token']}.log",
                 text.encode("utf-8"),
                 immutable=False,
             )
@@ -152,6 +156,14 @@ def run(worker, assignment_path, data_root, *, remote="reposeer:", dry_run=False
     drive.upload(
         root, f"crawl/submissions/{worker}/{assignment['job_id']}/{receipt['integration_run_id']}"
     )
+    # Timestamp is from immutable READY, so notification retries produce identical bytes.
+    with tempfile.TemporaryDirectory(prefix="reposeer-inbox-") as scratch:
+        notice = Path(scratch) / "notification.json"
+        write_json(notice, notification(assignment, read_json(root / "READY.json")))
+        drive.put(
+            notice,
+            f"crawl/inbox/{worker}/{assignment['job_id']}/{receipt['integration_run_id']}.json",
+        )
     return dict(
         job_id=assignment["job_id"],
         integration_run_id=receipt["integration_run_id"],
@@ -159,6 +171,9 @@ def run(worker, assignment_path, data_root, *, remote="reposeer:", dry_run=False
         artifact_submitted=True,
         collected_repository=receipt["collected_repository"],
         local_retained=True,
+        scope_key=assignment["scope_key"],
+        activity_coverage=receipt.get("activity_coverage"),
+        collection_policy="bounded_from_first_page_not_cursor_resume",
     )
 
 
