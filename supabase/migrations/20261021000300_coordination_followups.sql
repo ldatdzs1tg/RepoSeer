@@ -1,5 +1,7 @@
-﻿-- Additive coordination metadata only. Apply 001, then 002 before this migration.
+-- Additive coordination metadata only. Apply 001, then 002 before this migration.
 BEGIN;
+-- Locate the exact D2 batch for an expired screening claim; legacy rows may be NULL.
+ALTER TABLE reposeer.crawl_jobs ADD COLUMN IF NOT EXISTS screen_assignment_id uuid;
 ALTER TABLE reposeer.repositories
   ADD COLUMN IF NOT EXISTS activity_coverage_status text NOT NULL DEFAULT 'unknown',
   ADD COLUMN IF NOT EXISTS activity_coverage_json jsonb,

@@ -26,11 +26,10 @@ environment = t020.environment
 
 
 @pytest.fixture
-def tmp_path():
-    # Two UUID path segments plus core artifact names exceed Drive Stream's path
-    # limit under pytest's long test-name directories. Keep real I/O local, with spaces.
-    with tempfile.TemporaryDirectory(prefix="rc ") as folder:
-        yield Path(folder)
+def tmp_path(tmp_path_factory, monkeypatch):
+    # Use a short --basetemp on Windows; route helper scratch files into pytest ownership.
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path_factory.getbasetemp()))
+    return tmp_path_factory.mktemp("rc")
 
 
 class Rows:
@@ -114,20 +113,33 @@ class Registry:
                     ]
                 )
             if "FROM reposeer.crawl_jobs j JOIN reposeer.crawl_runs" in sql:
-                return Rows(
-                    [
-                        dict(
-                            a,
-                            catalog_metadata=self.runs[a["run_id"]].get("catalog_metadata"),
-                            repository_id=args[0],
-                        )
-                        for a in reversed(list(self.artifacts.values()))
-                        if a["artifact_kind"] == "bundle"
-                        and a["status"] == "ingested"
-                        and self.runs[a["run_id"]]["run_kind"] == "integration"
-                        and self.jobs[self.runs[a["run_id"]]["job_id"]]["repository_id"] == args[0]
-                    ][:1]
+                rows = [
+                    dict(
+                        a,
+                        catalog_metadata=self.runs[a["run_id"]].get("catalog_metadata"),
+                        repository_id=args[0],
+                    )
+                    for a in self.artifacts.values()
+                    if a["artifact_kind"] == "bundle"
+                    and a["status"] == "ingested"
+                    and self.runs[a["run_id"]]["run_kind"] == "integration"
+                    and self.jobs[self.runs[a["run_id"]]["job_id"]]["repository_id"] == args[0]
+                    and (
+                        (self.runs[a["run_id"]].get("catalog_metadata") or {}).get("github_repo_id")
+                        is None
+                        or str(self.runs[a["run_id"]]["catalog_metadata"]["github_repo_id"])
+                        == args[1]
+                    )
+                ]
+                rows.sort(
+                    key=lambda a: (
+                        self.runs[a["run_id"]].get("finished_at")
+                        or c.timestamp("1970-01-01T00:00:00.000Z"),
+                        a["run_id"],
+                    ),
+                    reverse=True,
                 )
+                return Rows(rows[args[3] : args[3] + args[2]])
             if "count(*) AS count FROM reposeer.crawl_runs" in sql:
                 return Rows(
                     [
@@ -257,6 +269,7 @@ class Registry:
                 attempt_count=0,
                 max_attempts=3,
                 scope_key=scope,
+                screen_assignment_id=None,
                 priority=args[2] if "scope_key,priority" in sql else 0,
                 repo_full_name=None
                 if key == "package_id"
@@ -305,13 +318,18 @@ class Registry:
                     lease_expires_at=args[2],
                     assignment_targets=args[3].obj,
                     assignment_sha256=args[4],
+                    screen_assignment_id=args[5],
                     attempt_count=job["attempt_count"] + 1,
                 )
             elif "SET status=%s" in sql:
                 job.update(status=args[0], retry_after=args[1], last_error_code=args[2])
             elif "SET claimed_by=NULL" in sql:
                 job.update(
-                    claimed_by=None, claim_token=None, claimed_at=None, lease_expires_at=None
+                    claimed_by=None,
+                    claim_token=None,
+                    claimed_at=None,
+                    lease_expires_at=None,
+                    screen_assignment_id=None,
                 )
             elif "last_error_code=%s" in sql:
                 job["last_error_code"] = args[0]
@@ -442,6 +460,7 @@ def claim(registry, value):
             max_attempts=3,
             scope_key=value.get("scope_key", "initial"),
             priority=0,
+            screen_assignment_id=value.get("assignment_id"),
             repo_full_name=value.get("expected_repo_full_name"),
             repository_id=None if value["kind"] == "screen_package" else 1,
         )
@@ -838,22 +857,160 @@ def test_paths_assignments_and_credentials_fail_closed(tmp_path, monkeypatch):
 
 def test_requeue_defaults_readonly_and_refuses_unknown_drive_state(tmp_path, monkeypatch):
     registry, drive = Registry(), Drive(tmp_path / "remote")
-    value = assignment()
-    claim(registry, value)
-    registry.jobs[value["job_id"]]["lease_expires_at"] = c.now() - timedelta(hours=1)
     monkeypatch.setattr(d, "Drive", lambda remote: drive)
+    listing = drive.listing
+    calls = []
+
+    def targeted(prefix):
+        assert registry.active_transactions == 0
+        assert prefix not in {"crawl/submissions", "screening/submissions"}
+        calls.append(prefix)
+        return listing(prefix)
+
+    monkeypatch.setattr(drive, "listing", targeted)
+    irrelevant = drive.root / "crawl/submissions/C7/unrelated"
+    irrelevant.mkdir(parents=True)
+    for n in range(100):
+        (irrelevant / str(n)).write_bytes(b"x")
+    assert not d.requeue_expired(registry=registry)["jobs_requeued"]
+    assert not calls
+    value = c.sign_assignment(
+        dict(assignment(), lease_expires_at=c.format_utc_timestamp(c.now() - timedelta(hours=1)))
+    )
+    claim(registry, value)
     before = copy.deepcopy(registry.__dict__)
     preview = d.requeue_expired(pending_dir=tmp_path / "empty", registry=registry)
     assert preview["dry_run"] and preview["jobs_requeued"] == [value["job_id"]]
     assert registry.__dict__ == before
 
     def unavailable(prefix):
+        assert registry.active_transactions == 0
         raise c.CoordinationError("drive_unavailable")
 
     monkeypatch.setattr(drive, "listing", unavailable)
     with pytest.raises(c.CoordinationError):
         d.requeue_expired(apply=True, pending_dir=tmp_path / "empty", registry=registry)
     assert registry.__dict__ == before
+    monkeypatch.setattr(drive, "listing", targeted)
+    applied = d.requeue_expired(apply=True, pending_dir=tmp_path / "empty", registry=registry)
+    job = registry.jobs[value["job_id"]]
+    assert applied["jobs_requeued"] == [value["job_id"]] and job["status"] == "retry"
+    assert job["claim_token"] is job["claimed_by"] is job["screen_assignment_id"] is None
+    assert job["attempt_count"] == 1 and job["retry_after"] > c.now()
+    assert not d.requeue_expired(apply=True, pending_dir=tmp_path / "empty", registry=registry)[
+        "jobs_requeued"
+    ]
+
+
+@pytest.mark.parametrize(
+    "kind,upload,protected",
+    [
+        ("collect_repository", "current", True),
+        ("collect_repository", "unknown", True),
+        ("collect_repository", "old", False),
+        ("collect_repository", "local", True),
+        ("screen_package", "current", True),
+        ("screen_package", "empty", False),
+        ("screen_package", "legacy", True),
+        ("screen_package", "old", False),
+    ],
+)
+def test_requeue_targeted_claim_submissions(tmp_path, monkeypatch, kind, upload, protected):
+    registry, drive = Registry(), Drive(tmp_path / "remote")
+    monkeypatch.setattr(d, "Drive", lambda remote: drive)
+    value = c.sign_assignment(
+        dict(
+            assignment(kind=kind),
+            lease_expires_at=c.format_utc_timestamp(c.now() - timedelta(hours=1)),
+        )
+    )
+    claim(registry, value)
+    item = value.get("jobs", [value])[0]
+    if kind == "screen_package":
+        prefix = f"screening/submissions/D2/{value['assignment_id']}"
+    else:
+        prefix = f"crawl/submissions/C1/{item['job_id']}/{uuid4()}"
+    if upload in {"current", "old", "unknown"}:
+        if upload == "old":
+            old = copy.deepcopy(value)
+            old.get("jobs", [old])[0]["claim_token"] = str(uuid4())
+            uploaded = c.sign_assignment(old)
+        else:
+            uploaded = value
+        c.write_json(
+            drive.root / prefix / ("other.json" if upload == "unknown" else "ASSIGNMENT.json"),
+            uploaded,
+        )
+    if upload == "legacy":
+        registry.jobs[item["job_id"]]["screen_assignment_id"] = None
+    if upload == "local":
+        c.write_json(tmp_path / "pending/.pending/assignment.json", value)
+    listing = drive.listing
+
+    def targeted(path):
+        assert registry.active_transactions == 0
+        assert path not in {"crawl/submissions", "screening/submissions"}
+        expected = prefix if kind == "screen_package" else prefix.rsplit("/", 1)[0]
+        assert path == expected
+        return listing(path)
+
+    monkeypatch.setattr(drive, "listing", targeted)
+    result = d.requeue_expired(apply=True, pending_dir=tmp_path / "pending", registry=registry)
+    assert (item["job_id"] in result["protected_jobs"]) == protected
+    assert (registry.jobs[item["job_id"]]["status"] == "claimed") == protected
+    assert registry.jobs[item["job_id"]]["attempt_count"] == 1
+
+
+def test_requeue_concurrent_claim_change_and_malformed_assignment(tmp_path, monkeypatch):
+    registry, drive = Registry(), Drive(tmp_path / "remote")
+    monkeypatch.setattr(d, "Drive", lambda remote: drive)
+    value = c.sign_assignment(
+        dict(assignment(), lease_expires_at=c.format_utc_timestamp(c.now() - timedelta(hours=1)))
+    )
+    claim(registry, value)
+    job = registry.jobs[value["job_id"]]
+    newer = str(uuid4())
+
+    def race(prefix):
+        assert registry.active_transactions == 0
+        job["claim_token"] = newer
+        return {}
+
+    monkeypatch.setattr(drive, "listing", race)
+    result = d.requeue_expired(apply=True, pending_dir=tmp_path / "empty", registry=registry)
+    assert (
+        not result["jobs_requeued"]
+        and result["protection_reasons"][value["job_id"]] == "claim_changed_or_locked"
+    )
+    assert job["status"] == "claimed" and job["claim_token"] == newer
+    monkeypatch.setattr(drive, "listing", Drive.listing.__get__(drive))
+    c.atomic_bytes(
+        drive.root / f"crawl/submissions/C1/{value['job_id']}/{uuid4()}/ASSIGNMENT.json",
+        b"not JSON",
+    )
+    before = copy.deepcopy(registry.__dict__)
+    with pytest.raises(ValueError):
+        d.requeue_expired(apply=True, pending_dir=tmp_path / "empty", registry=registry)
+    assert registry.__dict__ == before
+
+
+def test_requeue_screen_assignment_schema_and_dispatch(tmp_path, monkeypatch):
+    assert "screen_assignment_id" in c.SCHEMA["crawl_jobs"].split()
+    migration = Path("supabase/migrations/20261021000300_coordination_followups.sql")
+    assert not migration.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert migration.read_text(encoding="utf-8").startswith("--")
+    assert "ADD COLUMN IF NOT EXISTS screen_assignment_id uuid" in migration.read_text(
+        encoding="utf-8"
+    )
+    registry, drive = Registry(), Drive(tmp_path / "remote")
+    value = assignment(["pypi:a", "pypi:b"], kind="screen_package")
+    claim(registry, value)
+    for job in registry.jobs.values():
+        job.update(status="queued", attempt_count=0)
+    monkeypatch.setattr(d, "Drive", lambda remote: drive)
+    dispatched = d.dispatch("screen_package", "D2", 100, tmp_path / "out", registry=registry)
+    batch = c.read_json(dispatched["assignments"][0])["assignment_id"]
+    assert all(j["screen_assignment_id"] == batch for j in registry.jobs.values())
 
 
 def test_postgresql_competing_transactions_skip_locked(monkeypatch):
@@ -1182,3 +1339,152 @@ def test_catalog_10001_sql_snapshots_need_no_accepted_drive_reads(tmp_path, monk
     result = i.run("testremote:", tmp_path / "central", registry=registry)
     assert result["catalog_rows"] is None and not result["accepted"]
     assert len([a for a in observed if a[0] == "lsjson"]) == 7
+
+
+@pytest.mark.parametrize(
+    "mode,reason",
+    [
+        ("missing_newest", None),
+        ("wrong_numeric", "accepted_repository_evidence_missing"),
+        ("corrupt_raw", "github_raw_checksum"),
+        ("no_raw", "accepted_repository_evidence_missing"),
+        ("conflicting_identity", "invalid_github_repository"),
+        ("bad_checksum", "accepted_repository_checksum"),
+        ("malformed_checksums", "accepted_repository_checksum_list_invalid"),
+    ],
+)
+def test_verify_pending_newest_usable_evidence_and_integrity(tmp_path, monkeypatch, mode, reason):
+    monkeypatch.delenv("REPOSEER_REGISTRY_DSN", raising=False)
+    registry, drive = Registry(), Drive(tmp_path / "remote")
+    monkeypatch.setattr(d, "Drive", lambda remote: drive)
+    network_calls = []
+
+    def forbidden(*args, **kwargs):
+        network_calls.append(True)
+        pytest.fail("verification must not fetch provider evidence")
+
+    monkeypatch.setattr(t020.httpx.Client, "send", forbidden)
+    crawl = assignment()
+    claim(registry, crawl)
+    registry.repos[1]["github_repo_id"] = 900000001
+    screen = assignment(["pypi:late-a", "pypi:late-b"], kind="screen_package")
+    claim(registry, screen)
+    path = tmp_path / "screen.json"
+    c.write_json(path, screen)
+
+    class PyPI:
+        def get_package_info(self, name):
+            return dict(
+                info=dict(name=name, project_urls={"Source": "https://github.com/pallets/flask"})
+            )
+
+    result = d.screen_local(path, tmp_path / "screen", client=PyPI())
+    screen_id = screen["assignment_id"]
+    screen_root = Path(result["output"])
+    screen_prefix = f"screening/submissions/D2/{screen_id}"
+    registry.runs[screen_id] = dict(run_id=screen_id, run_kind="screening", worker_id="D2")
+    registry.artifacts[drive.path(screen_prefix + "/CHECKSUMS.sha256")] = dict(
+        run_id=screen_id,
+        artifact_kind="bundle",
+        status="ingested",
+        storage_path=drive.path(screen_prefix + "/CHECKSUMS.sha256"),
+        sha256=c.fingerprint(screen_root / "CHECKSUMS.sha256")[0],
+    )
+    for package in ("pypi:late-a", "pypi:late-b"):
+        registry.packages[package].update(repository_id=1, last_screening_run_id=screen_id)
+    older, newest = str(uuid4()), str(uuid4())
+    hashes = {}
+    for index, run_id in enumerate([older, newest]):
+        root = drive.root / f"canonical/runs/{run_id}"
+        c.write_json(root / "ASSIGNMENT.json", crawl)
+        if mode != "no_raw" and (index == 0 or mode != "missing_newest"):
+            numeric = 900000002 if mode == "wrong_numeric" else 900000001
+            payload = dict(
+                t020.repository_raw().payload,
+                id=numeric,
+                full_name="pallets/flask",
+                html_url="https://github.com/pallets/flask",
+                private=False,
+                fork=False,
+                is_template=False,
+                mirror_url=None,
+            )
+            if mode == "conflicting_identity" and index == 1:
+                payload["id"] = 900000002
+            raw = t020.repository_raw(
+                raw_record_id="raw:" + str(uuid4()),
+                run_id=str(uuid4()),
+                repo_id="github:repository:" + str(numeric),
+                source_record_id=str(numeric),
+                source_url="https://api.github.com/repos/pallets/flask",
+                payload=payload,
+            )
+            c.atomic_bytes(
+                root / "raw/github/repositories.jsonl",
+                c.canonical(raw.model_dump(mode="json")) + b"\n",
+            )
+            hashes[run_id] = c.fingerprint(root / "raw/github/repositories.jsonl")[0]
+        c.seal_bundle(root, crawl, run_id)
+        checksums = root / "CHECKSUMS.sha256"
+        registry.runs[run_id] = dict(
+            run_id=run_id,
+            job_id=crawl["job_id"],
+            run_kind="integration",
+            worker_id="C1",
+            status="partial",
+            finished_at=c.timestamp(f"2026-10-21T0{index}:00:00.000Z"),
+            catalog_metadata=None
+            if index == 0 or mode == "wrong_numeric"
+            else dict(github_repo_id=900000001),
+        )
+        registry.artifacts[drive.path(f"canonical/runs/{run_id}/CHECKSUMS.sha256")] = dict(
+            run_id=run_id,
+            artifact_kind="bundle",
+            status="ingested",
+            storage_path=drive.path(f"canonical/runs/{run_id}/CHECKSUMS.sha256"),
+            sha256=c.fingerprint(checksums)[0],
+        )
+        if index == 1:
+            if mode == "corrupt_raw":
+                with (root / "raw/github/repositories.jsonl").open("ab") as stream:
+                    stream.write(b"corrupted")
+            elif mode in {"bad_checksum", "malformed_checksums"}:
+                checksums.write_bytes(b"malformed checksum list")
+                if mode == "malformed_checksums":
+                    registry.artifacts[drive.path(f"canonical/runs/{run_id}/CHECKSUMS.sha256")][
+                        "sha256"
+                    ] = c.fingerprint(checksums)[0]
+    reads = []
+    transport = drive._run
+
+    def tracked(args, **kwargs):
+        assert registry.active_transactions == 0
+        if args[0] == "copyto" and args[1].startswith("testremote:canonical/runs/"):
+            reads.append(args[1])
+        return transport(args, **kwargs)
+
+    monkeypatch.setattr(drive, "_run", tracked)
+    before = copy.deepcopy(registry.__dict__)
+    preview = d.verify_pending(registry=registry, remote="testremote:")
+    assert registry.__dict__ == before and preview["dry_run"]
+    reads.clear()
+    applied = d.verify_pending(registry=registry, remote="testremote:", apply=True)
+    assert applied["verified"] == (2 if reason is None else 0), applied
+    for package in ("pypi:late-a", "pypi:late-b"):
+        row = registry.packages[package]
+        assert row["mapping_status"] == ("verified_current" if reason is None else "candidate")
+        if reason is None:
+            evidence = row["mapping_evidence"]
+            assert (
+                evidence["integration_run_id"] == older
+                and evidence["github_sha256"] == hashes[older]
+            )
+            assert evidence["historical_validity"] == "unverified"
+        else:
+            assert row["mapping_evidence"]["reason_code"] == reason
+    if reason is None:
+        assert reads.count(drive.path(f"canonical/runs/{older}/raw/github/repositories.jsonl")) == 1
+        assert reads.count(drive.path(f"canonical/runs/{newest}/CHECKSUMS.sha256")) == 1
+    elif mode in {"corrupt_raw", "conflicting_identity", "bad_checksum", "malformed_checksums"}:
+        assert not any(older in path for path in reads)  # Integrity failures never fall back.
+    assert not network_calls

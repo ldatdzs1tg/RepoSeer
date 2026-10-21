@@ -523,7 +523,7 @@ SCHEMA = {
     "workers": "worker_id worker_role display_name is_enabled last_seen_at created_at",
     "packages": "package_id first_sampling_run_id source_snapshot_sha256 mapping_status candidate_repo_full_name repository_id last_screened_at created_at last_screening_run_id mapping_evidence mapping_verified_at",
     "repositories": "repository_id repo_full_name github_repo_id verification_status verified_at last_collected_at created_at activity_coverage_status activity_coverage_json last_coverage_at",
-    "crawl_jobs": "job_id job_kind package_id repository_id scope_key priority status claimed_by claim_token claimed_at lease_expires_at retry_after attempt_count max_attempts last_error_code created_at updated_at assignment_targets assignment_sha256",
+    "crawl_jobs": "job_id job_kind package_id repository_id scope_key priority status claimed_by claim_token claimed_at lease_expires_at retry_after attempt_count max_attempts last_error_code created_at updated_at assignment_targets assignment_sha256 screen_assignment_id",
     "crawl_runs": "run_id worker_id job_id run_kind status started_at finished_at error_code catalog_metadata",
     "artifacts": "artifact_id run_id artifact_kind storage_path sha256 byte_size status submitted_at ingested_at error_code",
 }

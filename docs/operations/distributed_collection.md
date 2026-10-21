@@ -47,7 +47,11 @@ supplied bootstrap). **Do not reapply it to existing production.** After backup/
 `20261021000200_coordination_assignments.sql` only if it has not already been applied,
 then `20261021000300_coordination_followups.sql`. Do not edit published 001/002.
 Migration 003 adds repository coverage, package screening/mapping provenance and an
-immutable per-run catalog snapshot. All additions are repeatable; no worker is enabled.
+immutable per-run catalog snapshot. Migration 003 is UTF-8 **without BOM** and adds
+nullable `crawl_jobs.screen_assignment_id` to locate an exact D2 batch. Legacy rows
+may be NULL. According to the current operator state, 002/003 have not been applied
+to production; this coding task applies neither. All additions are repeatable; no
+worker is enabled.
 The implementation does not connect to production to discover migration history. Tools check columns, private table RLS and
 unique indexes before operating, and fail rather than automatically migrating.
 
@@ -229,7 +233,15 @@ A successful screening import records last_screening_run_id, then attempts reuse
 only for its new candidate packages (at most 100), after committing the import.
 The coordinator verifies screening bundle SHA and saved PyPI JSON, accepted canonical
 GitHub raw checksum/numeric ID, the existing resolver and RepositoryScopeEvidence.
-It records source paths/hashes/observed times before promoting verified_current.
+Accepted evidence is considered newest to oldest in bounded SQL batches. It uses
+the newest usable checksummed GitHub repository observation with the exact numeric
+ID, falling back when a newer accepted activity-only run lacks eligible metadata.
+Checksum/size errors, malformed evidence or conflicting identity stop verification;
+they are never bypassed to promote from an older run. Legacy runs without catalog
+snapshots remain eligible for evidence validation. Per-run caching avoids repeated
+file downloads for several packages. No raw activity dataset is downloaded here.
+It records the selected run, source paths/hashes/observed times before promotion;
+this is current observation scope, with historical_validity still unverified.
 It never calls GitHub again or requeues a completed repository job for this check.
 Failures remain candidates with reason codes. Existing records with no screening
 reference report screening_evidence_missing; no provenance is invented.
@@ -347,11 +359,27 @@ coordinator ingestion/catalog publication, released in finally. No long-running
 transaction or row lock spans transfers. Operate one coordinator writer; do not
 overlap processes. No raw/processed concatenation or features are built here.
 
-Requeue is dry-run by default, fails closed if Drive cannot be queried, checks current
-claim tokens against remote/local pending files, and clears claim fields only when
-applying a reclaim. Incomplete uploads with unknown ownership conservatively block
-reclaim. Attempts/history are never reset. Resolve quarantines/pending journals by
-inspection; do not blindly delete evidence or manually mark jobs collected.
+Requeue is dry-run by default. It queries expired claims first; no expired claims
+means no Drive inspection. Crawler checks are confined to
+`crawl/submissions/<claimed_by>/<job_id>/`; D2 checks use only
+`screening/submissions/D2/<screen_assignment_id>/`. There are no global recursive
+submission scans. D2 dispatch records the batch ID alongside each claim. Legacy
+screen jobs with a NULL batch ID are protected for manual resolution, not reclaimed
+on an assumption that no upload exists.
+
+A matching current job/token/worker/checksum or local pending journal protects the
+claim. Clearly identified uploads from older tokens do not block it forever.
+Incomplete/unknown identity protects the affected job; unreadable Drive or malformed
+assignment preflight aborts without DB changes. Remote reads finish before any row
+locks. Apply re-reads and locks each eligible job, checking that its expired lease,
+worker/token, batch and assignment still match; concurrent state changes are skipped.
+Only a successfully invalidated claim has its batch/claim fields cleared. Attempts,
+artifacts and journals are retained, with existing bounded backoff/max-attempt rules.
+
+This lease protocol has no worker API: an offline worker may still upload after
+expiry. A reclaimed/stale token must not be accepted as current, even if its raw
+bundle later arrives. Resolve protected claims/pending journals by inspection;
+do not delete evidence or manually mark collection successful.
 
 Status JSON includes package mapping, repository verification, job kind/status, the
 nine worker slots/assignment counts and artifact statuses. Suggested dashboard
