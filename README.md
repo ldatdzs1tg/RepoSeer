@@ -757,3 +757,11 @@ claims are grounded in accepted text; current metadata alone does not authentica
 Full D01 historical mapping, historical external content reconstruction, D04-D08 semantic relevance and
 specialist evidence agents, D09 labels/features, D10/D11 training/inference, D12 graph and
 D13-D15 reports/orchestration/lineage remain planned. See [v3 pipeline](docs/architecture/pipeline.md).
+
+## Distributed collection coordination
+
+Three standalone tools in `tools/coordination/` provide coordinator queue dispatch,
+DB-free screening/crawlers, and verified immutable ingestion. PostgreSQL credentials
+stay on one coordinator; workers exchange assignment/READY bundles through rclone.
+See [setup, PowerShell commands, recovery and deployment limits](docs/operations/distributed_collection.md).
+Production migrations, worker activation and scheduling remain explicit operator steps.
