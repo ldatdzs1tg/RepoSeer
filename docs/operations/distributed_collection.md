@@ -5,7 +5,72 @@ immutable run directories contain the data. There is no worker API, scheduler,
 Google Sheets sync, automatic worker activation, or production migration runner.
 The tools leave T-020/T-020A and canonical contract 0.1.0 unchanged.
 
-## Setup and permissions
+## Team member quick start
+
+### One-time setup (Windows CMD)
+
+Once the coordinator shares the updated branch, install Python 3.12+ and Git first.
+Use a local checkout and your own GitHub token:
+
+```cmd
+py -m pip install uv
+winget install --id Rclone.Rclone --exact
+git clone --branch feat/distributed-crawl-coordination https://github.com/ldatdzs1tg/RepoSeer.git "%USERPROFILE%\RepoSeer"
+cd /d "%USERPROFILE%\RepoSeer"
+uv sync --frozen
+rclone config
+rclone lsd reposeer:
+notepad .env
+```
+
+In `.env`, add `GITHUB_TOKEN=your-own-token`. Keep this file private and outside the
+shared data folder. Do not copy the coordinator's environment file. If you already
+have the checkout/tools, skip their installation and cloning steps.
+
+In `rclone config`, name the remote `reposeer` and point it at the shared
+`RepoSeer-Data` folder. Use an alias to your mounted shared folder for Drive for
+desktop, or a Google Drive OAuth remote. Ask the coordinator for access to your
+own assignments, submissions, inbox and processed inbox. Transport compatibility
+settings and checksums are handled by the command; no per-transfer filters are needed.
+
+### Daily command
+
+From your checkout, run one assigned job and exit:
+
+```cmd
+uv run --frozen python tools/coordination/worker.py work --worker C1
+```
+
+Use your assigned ID (`C2` through `C7`) in place of `C1`. `status: submitted`
+means the immutable bundle and inbox notification were published; `overall_status`
+may be partial. `status: no_work` means no eligible assignment remains.
+Results go to shared `crawl/submissions/C1/` and `crawl/inbox/C1/` automatically.
+Keep `C:\RepoSeerData\coordination\work\C1`: rerun the same command after a transfer
+failure to reuse collected data. For ambiguity, expired work, or an unfinished crawl,
+send the summary/error code to the coordinator and keep your local files.
+
+## Coordinator operations
+
+Members only need the quick start above. The coordinator retains Registry access,
+runs the existing D1/D2 steps below, and dispatches at most **one unfinished eligible
+assignment per worker** for normal automatic selection. Different workers run in parallel.
+Use the existing commands, with C2-C7 and their own output directories as needed:
+
+```cmd
+uv run --frozen python tools/coordination/dispatcher.py dispatch-crawl --worker C1 --limit 1 --out-dir "C:\RepoSeerData\coordination\assignments\C1" --lease-hours 48
+uv run --frozen python tools/coordination/ingest.py run --workspace "C:\RepoSeerData\coordination\central"
+uv run --frozen python tools/coordination/dispatcher.py status --json
+```
+
+Drive folders provide evidence without another progress database: `assignments/`
+contains published claims; `submissions/.../READY.json` identifies a sealed run;
+`inbox/` contains pending notifications; `inbox-processed/` contains archived accepted
+notifications; canonical artifacts live under `canonical/runs/`. Acceptance can
+retain a partial run while its job retries. These folders do not show a live crawl's
+progress and cannot establish current Registry status; Supabase remains authoritative.
+An optional overview Sheet is maintained manually.
+
+### Setup and permissions
 
 On a clean checkout, after this feature is merged:
 
@@ -49,9 +114,8 @@ then `20261021000300_coordination_followups.sql`. Do not edit published 001/002.
 Migration 003 adds repository coverage, package screening/mapping provenance and an
 immutable per-run catalog snapshot. Migration 003 is UTF-8 **without BOM** and adds
 nullable `crawl_jobs.screen_assignment_id` to locate an exact D2 batch. Legacy rows
-may be NULL. According to the current operator state, 002/003 have not been applied
-to production; this coding task applies neither. All additions are repeatable; no
-worker is enabled.
+may be NULL. Compare the actual schema before applying anything; this workflow
+never applies migrations automatically or enables workers implicitly.
 The implementation does not connect to production to discover migration history. Tools check columns, private table RLS and
 unique indexes before operating, and fail rather than automatically migrating.
 
@@ -70,7 +134,101 @@ uv run python tools/coordination/dispatcher.py activate --worker C1 --display-na
 Repeat explicitly for C2-C7 using real assigned names. Disabled slots cannot be
 dispatched. `activate` is an explicit DB write; do not run during code verification.
 
-## D1: discover names, never crawl
+### Windows / Google Drive for desktop troubleshooting
+
+An alias such as `reposeer:` backed by a mounted G: folder uses rclone's **local**
+backend. Coordination commands always pass `--local-no-preallocate`, including
+read-back/downloads, so correctness does not depend on a shell setting. This option
+also works alongside a directly authenticated Drive remote. For manual rclone
+commands in Windows CMD, use these settings in each participating terminal:
+
+```cmd
+set "REPOSEER_DRIVE_REMOTE=reposeer:"
+set "RCLONE_LOCAL_NO_PREALLOCATE=true"
+set "RCLONE_EXCLUDE="
+```
+
+The preallocation defect was reproduced with generated bytes in an isolated G:
+workspace directory: 572 bytes were reported as 1,024, 2,388 as 2,560, and 510 as
+512; `copyto` failed with exit 1. All three passed with preallocation disabled.
+The historical C1 failure cannot be attributed conclusively without its original
+stderr: the exact read-only version/access/listing checks now succeed and its
+remote assignment directory is empty. Creating that directory alone is not a fix.
+
+Coordination transfers handle only **undeclared** `desktop.ini` (case insensitive,
+at any depth) as OS metadata, after path/link validation. These files are excluded
+from new seals, downloads, inbox enumeration and immutable bundle comparisons.
+If an older CHECKSUMS list explicitly declares one, it is retained and must match
+its checksum and size, just like every other payload. READY and CHECKSUMS remain
+authoritative; other unexpected files, missing files and modified declared files
+fail verification. Existing bundles are never rewritten or re-signed. Use
+`Drive.download()` followed by `verify_bundle()` for sealed bundle downloads.
+Coordination subprocesses remove inherited filename/size/age/depth/hash filters
+(including `RCLONE_EXCLUDE`), so machine settings cannot hide unexpected payloads.
+Manual rclone commands retain their own environment; avoid broad excludes.
+
+Errors retain `error_code` and include safe `rclone_stage` / `rclone_exit_code`
+fields when applicable, without subprocess output, provider messages or secrets:
+
+```json
+{"error_code":"rclone_operation_failed","rclone_stage":"immutable_upload","rclone_exit_code":1}
+```
+
+Stages identify version, availability, listing, directory_creation,
+immutable_upload (or mutable catalog upload), read_back, checksum_verification and
+notification_removal. Only listing exit 3 is treated as directory absence; upload
+and read-back failures are never treated as missing directories. Exit 5 indicates
+a temporary error; exit 2 means usage/configuration and 7 is fatal. Other codes
+need operator diagnosis. Rclone performs bounded retries (2 high/low level attempts);
+timeouts and launch failures also report their stage. Ingestion retains notices
+on transport failure, including timeout, and reports these same diagnostics.
+Permanent errors remain visible; repeated operator retries do not fix permissions
+or conflicting bytes. See [rclone exit codes](https://rclone.org/docs/#exit-code)
+and [local preallocation](https://rclone.org/local/#local-no-preallocate).
+
+`Drive.put()` creates the nested parent, uses `--immutable --ignore-existing`,
+and verifies actual SHA-256 and size by downloading the destination into local
+TEMP. An existing matching file succeeds without another upload. Conflicting or
+partial destination bytes fail without repair, overwrite or deletion. Run a single
+coordinator writer: the listing is advisory, not a distributed filesystem lock.
+A read-only access preflight before claiming cannot establish write permission;
+there is deliberately no test upload or open Registry transaction during transfers.
+
+After a failed dispatch, inspect `.pending/<job_id>.json` and the remote directory,
+then repeat the original dispatch with the **same output directory only while its
+journal exists**. Recovery validates the current claim before publication and again
+after checksum verification, then removes the journal. It never claims another job
+or increments attempts on this path. If no journal exists, ordinary dispatch can
+claim new work. Never delete journals, change tokens, reset jobs, bypass an expired
+lease, or remove remote partial data to make publication pass. A stale claim or
+checksum conflict needs inspection; keep all evidence. Verify an uploaded assignment
+by comparing `Drive.remote_fingerprint(remote_name)` with `fingerprint(local_path)`.
+Worker dry-run validates the assignment without a Registry DSN; ingestion independently
+rechecks the live claim before accepting any canonical artifacts.
+
+#### Recover the existing C1 publication (coordinator only)
+
+No production publication was executed while implementing this workflow. In the
+coordinator CMD terminal, with its existing Registry credential, inspect and recover
+only the retained journal below. The final assignment and claim token are unchanged:
+
+```cmd
+set "JOB_ID=426f38b1-096b-453c-b655-14eaaff43696"
+set "CLAIM_TOKEN=454a399a-e02d-4a4b-9f69-040d53e625a1"
+set "OUT_DIR=C:\RepoSeerData\coordination\assignments\C1"
+type "%OUT_DIR%\.pending\%JOB_ID%.json"
+rclone lsjson "reposeer:crawl/assignments/C1/%JOB_ID%" --files-only
+if exist "%OUT_DIR%\.pending\%JOB_ID%.json" uv run --frozen python tools/coordination/dispatcher.py dispatch-crawl --worker C1 --limit 1 --out-dir "%OUT_DIR%" --lease-hours 48
+```
+
+Require `recovered_assignments` before asking C1 to run `work`. Publication checks the
+current claim before upload and after SHA-256 read-back, and removes `.pending` only
+on success. The guard prevents ordinary dispatch when this journal is already gone.
+Do not run another dispatcher concurrently. Stop for a stale claim, expired lease,
+conflicting bytes or a transport error; preserve the journal and inspect its safe
+stage/exit diagnostics. Do not reset or create another job for this recovery.
+
+### D1: discover names, never crawl
 
 The coordinator streams sorted current registry IDs into an exclusions snapshot:
 
@@ -113,7 +271,7 @@ package/screen job. Example actual counter names:
 `{"names_seen":1000,"packages_inserted":950,"duplicates_skipped":50,"screen_jobs_created":950}`.
 For dashboard display, packages_seen = names_seen, new_packages = packages_inserted.
 
-## D2: screen current source metadata
+### D2: screen current source metadata
 
 ```powershell
 uv run python tools/coordination/dispatcher.py dispatch-screen --worker D2 --limit 100 --out-dir data/coordination/assignments/D2 --lease-hours 48
@@ -152,12 +310,13 @@ An already verified package keeps its repository/mapping unchanged; candidate-on
 screening cannot relink it. Case-equivalent repository candidates share one repository and one initial crawl
 job, even when many packages refer to it. Re-import does not increase attempts.
 
-## C1-C7: one sequential collector per machine
+### C1-C7: one sequential collector per machine
 
-Coordinator assigns at most 10 repository jobs per call, without reusing live claims:
+Coordinator assigns one repository job per worker for the normal `work` command,
+without reusing live claims (the dispatcher still supports a limit up to 10):
 
 ```powershell
-uv run python tools/coordination/dispatcher.py dispatch-crawl --worker C1 --limit 10 --out-dir data/coordination/assignments/C1 --lease-hours 48
+uv run python tools/coordination/dispatcher.py dispatch-crawl --worker C1 --limit 1 --out-dir data/coordination/assignments/C1 --lease-hours 48
 ```
 
 Crawl assignments are immutable `crawl/assignments/Cn/<job_id>/<claim_token>.json`.
@@ -173,15 +332,32 @@ Assignments contain up to 100 linked PyPI targets, fixed bounded collector optio
 expected repository, token and checksum. If a repository has over 100 packages,
 `package_scope_truncated=true`; unassigned/unverified packages stay candidates.
 
-Crawler downloads one actual job JSON and validates without API/upload first:
+Members run `worker.py work --worker C1`; it retrieves its own signed assignment
+and reuses `run()` for collection, immutable upload and notification publication.
+It skips expired assignments and matching READY submissions with a validated pending
+or processed notification. Saved assignment bytes are checked against CHECKSUMS,
+and CHECKSUMS against READY. These are submission evidence, not Registry acceptance.
+A READY upload missing its notice is downloaded and verified if necessary, then
+resubmitted with the original integration run; it is never recollected automatically.
 
-```powershell
-$job = '<job-UUID>'
-$claim = '<claim-UUID-from-dispatch>'
-rclone copyto "reposeer:crawl/assignments/C1/$job/$claim.json" "data/coordination/assignments/C1/$job/$claim.json"
-uv run python tools/coordination/worker.py run --worker C1 --assignment "data/coordination/assignments/C1/$job/$claim.json" --data-root data/coordination/work/C1 --remote reposeer: --dry-run
-uv run python tools/coordination/worker.py run --worker C1 --assignment "data/coordination/assignments/C1/$job/$claim.json" --data-root data/coordination/work/C1 --remote reposeer:
+Multiple eligible assignments, including multiple unexpired tokens for one job, fail
+with `ambiguous_assignments_use_job_id_and_claim_token`. Do not choose by filename or
+lease recency. After checking the Registry, the coordinator can supply exact IDs:
+
+```cmd
+uv run --frozen python tools/coordination/worker.py work --worker C1 --job-id JOB_UUID --claim-token CLAIM_UUID
 ```
+
+`--job-id` alone works only if it leaves one eligible token. `--claim-token` requires
+`--job-id`. `--dry-run` validates selection without collection, upload or local work
+files. `--data-root` overrides the physical-disk default
+`C:\RepoSeerData\coordination\work\C1` (Linux/macOS: `~/.local/share/reposeer/work/C1`).
+Keep the same root when retrying; when switching from `run`, pass its existing
+`--data-root`. Do not put workspaces/checkpoints on a Drive mount.
+The worker has no Registry credentials and cannot detect a revoked but unexpired
+single claim from immutable Drive files alone. It never invents a replacement token;
+Central Ingestion always validates the current claim. Conflicts fail without overwrites.
+The existing `run --assignment ... --data-root ...` CLI remains available for diagnosis.
 
 The data-dir is exactly `<data-root>/<job_id>/<claim_token>`. The subprocess uses an argument
 array and existing `collect-dataset` flags. No arbitrary command/URL is executed.
@@ -202,7 +378,7 @@ Use a short local disk data-root (for example `C:/RepoSeerData/C1`) if Drive Str
 Windows path-length limit rejects the two UUID segments plus artifact names.
 Spaces in paths are supported by quoting and argument arrays; no shell is used.
 
-### Activity coverage and follow-up scopes
+#### Activity coverage and follow-up scopes
 
 | Scope | max_pages/group | max_records/group | Next automatic scope |
 |---|---:|---:|---|
@@ -227,7 +403,7 @@ requests. They are **not cursor resume**. New raw observations keep their own ID
 and timestamps. After followup:2, budget_limited remains visible with no further
 automatic job. Full cursor recovery is a separate task.
 
-### Packages discovered after a repository was collected
+#### Packages discovered after a repository was collected
 
 A successful screening import records last_screening_run_id, then attempts reuse
 only for its new candidate packages (at most 100), after committing the import.
@@ -256,7 +432,7 @@ are reported without promotion or automatic row merging. Review each result's
 reason_code; restore the original immutable evidence or screen again through an
 explicit operator workflow rather than editing hashes to force verification.
 
-## Coordinator: ingest, audit and catalog
+### Coordinator: ingest, audit and catalog
 
 Use local C: TEMP for Parquet work. Workspace files are verified downloads; they
 may be large. No mutable DuckDB is opened on Drive Stream.
@@ -393,7 +569,7 @@ for a separate future sync, never a distributed lock. No background task is inst
 After manual success, Task Scheduler can invoke the ingest command periodically
 with **Do not start a new instance** configured; do not store secrets in task arguments.
 
-## Offline verification and production checklist
+### Offline verification and production checklist
 
 ```powershell
 uv sync --extra dev --frozen

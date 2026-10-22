@@ -342,7 +342,12 @@ def _run(remote, workspace, *, limit=25, dry_run=False, registry=None, refresh_c
                     if isinstance(error, CoordinationError)
                     else "invalid_or_unreadable_bundle"
                 )
-                rejection = dict(notification_path=path, integration_run_id=run_id, error_code=code)
+                rejection = dict(
+                    notification_path=path,
+                    integration_run_id=run_id,
+                    error_code=code,
+                    **(error.diagnostics if isinstance(error, CoordinationError) else {}),
+                )
                 # Transport failures retain pending notifications for exact retry.
                 if (
                     accepted
@@ -350,6 +355,8 @@ def _run(remote, workspace, *, limit=25, dry_run=False, registry=None, refresh_c
                     or code
                     in {
                         "rclone_operation_failed",
+                        "rclone_operation_timeout",
+                        "rclone_operation_unavailable",
                         "rclone_not_installed",
                         "upload_checksum_mismatch",
                         "registry_operation_failed",

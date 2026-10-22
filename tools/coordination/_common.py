@@ -52,6 +52,14 @@ MAX_METADATA = 8 * 1024**2
 class CoordinationError(ValueError):
     """Safe machine-readable failure code, without provider bodies or credentials."""
 
+    def __init__(self, code, *, stage=None, exit_code=None):
+        super().__init__(code)
+        self.diagnostics = {}
+        if stage is not None:
+            self.diagnostics["rclone_stage"] = stage
+        if exit_code is not None:
+            self.diagnostics["rclone_exit_code"] = exit_code
+
 
 def require(condition, code):
     if not condition:
@@ -230,14 +238,20 @@ def validate_assignment(value, *, expected_worker=None, allow_expired=False):
     return value
 
 
-def files(root):
+def desktop_metadata(name):
+    return PurePosixPath(name).name.casefold() == "desktop.ini"
+
+
+def files(root, *, declared=()):
     found = {}
     for path in sorted(Path(root).rglob("*")):
         require(not path.is_symlink() and not path.is_junction(), "symlink_rejected")
         if path.is_file():
             name = relative(path.relative_to(root).as_posix())
             safe_path(root, name)
-            found[name] = fingerprint(path)
+            # Only undeclared OS metadata is dispensable. Validate paths/links first.
+            if not desktop_metadata(name) or name in declared:
+                found[name] = fingerprint(path)
     require(
         len(found) <= MAX_FILES and sum(size for _, size in found.values()) <= MAX_BUNDLE,
         "bundle_size_limit",
@@ -246,7 +260,9 @@ def files(root):
 
 
 def seal_bundle(root, assignment, run_id=None):
-    inventory = files(root)
+    checksums = safe_path(root, "CHECKSUMS.sha256")
+    declared = read_checksums(checksums) if checksums.exists() else ()
+    inventory = files(root, declared=declared)
     lines = "".join(
         f"{sha} {size} {name}\n"
         for name, (sha, size) in inventory.items()
@@ -321,7 +337,7 @@ def verify_bundle(root):
         fingerprint(safe_path(root, "CHECKSUMS.sha256"))[0] == marker.get("payload_sha256"),
         "checksum_list_mismatch",
     )
-    inventory = files(root)
+    inventory = files(root, declared=declared)
     actual = {k: v for k, v in inventory.items() if k not in {"READY.json", "CHECKSUMS.sha256"}}
     require(declared == actual, "bundle_checksum_mismatch")
     assignment = validate_assignment(read_json(Path(root) / "ASSIGNMENT.json"), allow_expired=True)
@@ -369,7 +385,8 @@ def cli_guard(function):
     ) as error:
         # Never print exception bodies from subprocesses, DB, HTTP, or untrusted files.
         code = str(error) if isinstance(error, CoordinationError) else type(error).__name__
-        print(json.dumps({"error_code": code}), file=sys.stderr)
+        details = error.diagnostics if isinstance(error, CoordinationError) else {}
+        print(json.dumps({"error_code": code, **details}), file=sys.stderr)
         raise SystemExit(1) from None
 
 
@@ -397,11 +414,37 @@ class Drive:
         return self.remote + ("" if self.remote.endswith(":") else "/") + name
 
     def _run(self, args, *, missing_ok=False):
+        stage = {
+            "version": "version",
+            "lsd": "availability",
+            "lsjson": "listing",
+            "mkdir": "directory_creation",
+            "deletefile": "notification_removal",
+        }.get(args[0], "operation")
+        if args[0] == "copyto":
+            stage = (
+                "read_back"
+                if args[1].startswith(self.remote)
+                else "immutable_upload"
+                if "--immutable" in args
+                else "upload"
+            )
+        # A caller's filters must not hide undeclared files or declared payloads.
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not re.fullmatch(
+                r"RCLONE_(?:(?:EXCLUDE|INCLUDE|FILTER|FILES_FROM0?)(?:_.*)?|"
+                r"MIN_SIZE|MAX_SIZE|MIN_AGE|MAX_AGE|MAX_DEPTH|HASH_FILTER)",
+                key.upper(),
+            )
+        }
         try:
             result = subprocess.run(
                 [
                     "rclone",
                     *args,
+                    "--local-no-preallocate",
                     "--retries",
                     "2",
                     "--low-level-retries",
@@ -416,19 +459,28 @@ class Drive:
                 encoding="utf-8",
                 errors="replace",
                 timeout=600,
+                env=environment,
             )
         except FileNotFoundError:
-            raise CoordinationError("rclone_not_installed") from None
-        if missing_ok and result.returncode == 3:
+            raise CoordinationError("rclone_not_installed", stage=stage) from None
+        except subprocess.TimeoutExpired:
+            raise CoordinationError("rclone_operation_timeout", stage=stage) from None
+        except OSError:
+            raise CoordinationError("rclone_operation_unavailable", stage=stage) from None
+        # Only listing's documented directory-not-found code means absence.
+        if missing_ok and args[0] == "lsjson" and result.returncode == 3:
             return None
-        require(result.returncode == 0, "rclone_operation_failed")
+        if result.returncode != 0:
+            raise CoordinationError(
+                "rclone_operation_failed", stage=stage, exit_code=result.returncode
+            )
         return result.stdout
 
     def check(self):
         self._run(["version"])
         self._run(["lsd", self.remote])
 
-    def listing(self, prefix):
+    def listing(self, prefix, *, include_metadata=False):
         value = self._run(
             ["lsjson", self.path(prefix), "--recursive", "--files-only"], missing_ok=True
         )
@@ -436,13 +488,15 @@ class Drive:
             return {}
         rows = json.loads(value)
         require(isinstance(rows, list) and len(rows) <= 200000, "remote_listing_limit")
-        result = {}
+        result, seen = {}, set()
         for row in rows:
             name = relative(row["Path"])
             require(not row.get("IsLink") and not row.get("IsDir"), "remote_symlink_rejected")
             require(type(row["Size"]) is int and 0 <= row["Size"] <= MAX_FILE, "remote_size_limit")
-            require(name not in result, "duplicate_remote_path")
-            result[name] = row["Size"]
+            require(name not in seen, "duplicate_remote_path")
+            seen.add(name)
+            if include_metadata or not desktop_metadata(name):
+                result[name] = row["Size"]
         return result
 
     def children(self, prefix):
@@ -456,18 +510,31 @@ class Drive:
         return sorted(names)
 
     def download(self, prefix, destination):
-        listing = self.listing(prefix)
+        listing = self.listing(prefix, include_metadata=True)
         require(
             listing and len(listing) <= MAX_FILES and sum(listing.values()) <= MAX_BUNDLE,
             "remote_bundle_limit",
         )
-        for name, size in listing.items():
+
+        def download_file(name, size):
             target = safe_path(destination, name)
             target.parent.mkdir(parents=True, exist_ok=True)
             if not target.exists():
                 self._run(["copyto", self.path(prefix + "/" + name), str(target)])
             require(target.is_file() and target.stat().st_size == size, "download_size_mismatch")
-        return listing
+
+        declared = {}
+        if "CHECKSUMS.sha256" in listing:
+            download_file("CHECKSUMS.sha256", listing["CHECKSUMS.sha256"])
+            declared = read_checksums(safe_path(destination, "CHECKSUMS.sha256"))
+        retained = {}
+        for name, size in listing.items():
+            safe_path(destination, name)  # Reject links even for ignored OS metadata.
+            if desktop_metadata(name) and name not in declared:
+                continue
+            download_file(name, size)
+            retained[name] = size
+        return retained
 
     def get_json(self, name, *, byte_size=None):
         if byte_size is None:
@@ -500,13 +567,32 @@ class Drive:
         parent, leaf = name.rsplit("/", 1)
         existing = self.listing(parent)
         if leaf in existing and not replace:
-            require(self.remote_fingerprint(name) == expected, "remote_path_checksum_conflict")
+            if self.remote_fingerprint(name) != expected:
+                raise CoordinationError(
+                    "remote_path_checksum_conflict", stage="checksum_verification"
+                )
             return
-        self._run(["copyto", str(local), self.path(name), *([] if replace else ["--immutable"])])
-        require(self.remote_fingerprint(name) == expected, "upload_checksum_mismatch")
+        self._run(["mkdir", self.path(parent)])
+        # A destination appearing after listing must never be overwritten, even if
+        # size/mtime happen to match. Read-back remains the authority on equality.
+        self._run(
+            [
+                "copyto",
+                str(local),
+                self.path(name),
+                *([] if replace else ["--immutable", "--ignore-existing"]),
+            ]
+        )
+        if self.remote_fingerprint(name) != expected:
+            raise CoordinationError("upload_checksum_mismatch", stage="checksum_verification")
 
     def upload(self, root, prefix):
-        inventory, existing = files(root), self.listing(prefix)
+        _, _, inventory = verify_bundle(root)
+        existing = {
+            name: size
+            for name, size in self.listing(prefix, include_metadata=True).items()
+            if not desktop_metadata(name) or name in inventory
+        }
         require(set(existing) <= set(inventory), "unexpected_remote_bundle_files")
         # A READY bundle is already immutable; compare all bytes before accepting replay.
         for name in existing:

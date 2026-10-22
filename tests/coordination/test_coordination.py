@@ -403,6 +403,9 @@ class Drive(c.Drive):
                 if path.exists()
                 else None
             )
+        if args[0] == "mkdir":
+            self.local(args[1]).mkdir(parents=True, exist_ok=True)
+            return ""
         if args[0] == "deletefile":
             self.local(args[1]).unlink()
             return ""
@@ -412,7 +415,9 @@ class Drive(c.Drive):
             if self.fail and self.fail in args[2]:
                 raise c.CoordinationError("upload_checksum_mismatch")
             self.writes.append(args[2])
-        target.parent.mkdir(parents=True, exist_ok=True)
+        assert target.parent.is_dir()  # Remote parents must be created explicitly.
+        if target.exists() and "--ignore-existing" in args:
+            return ""
         shutil.copyfile(source, target)
         return ""
 
@@ -505,6 +510,112 @@ def stored_partial(
         return subprocess.CompletedProcess(command, 1)
 
     return value, assignment_path, drive, runner, calls
+
+
+def test_work_retries_submission_and_skips_completed_crawls(tmp_path, environment, monkeypatch):
+    monkeypatch.delenv("REPOSEER_REGISTRY_DSN", raising=False)
+    monkeypatch.setattr(w.shutil, "which", lambda name: "/fake/uv")
+    value, path, drive, runner, calls = stored_partial(tmp_path, environment, monkeypatch)
+    assignment_name = f"crawl/assignments/C1/{value['job_id']}/{value['claim_token']}.json"
+    drive.put(path, assignment_name)
+    reads = []
+    transport = drive._run
+
+    def scoped(args, **kwargs):
+        assert not any("/C2/" in str(arg) for arg in args)
+        if args[0] == "lsjson":
+            reads.append(args[1])
+        return transport(args, **kwargs)
+
+    monkeypatch.setattr(drive, "_run", scoped)
+    root = tmp_path / "work"
+    drive.fail = "crawl/inbox"
+    with pytest.raises(c.CoordinationError, match="upload"):
+        w.work("C1", root, runner=runner)
+    assert len(calls) == 1
+    bundle = root / value["job_id"] / value["claim_token"]
+    marker, saved, _ = c.verify_bundle(bundle)
+    assert saved == value
+    raw = (bundle / "raw/github/repositories.jsonl").read_bytes()
+    drive.fail = None
+    result = w.work("C1", root, runner=runner)
+    assert result["status"] == "submitted" and result["artifact_submitted"]
+    assert result["integration_run_id"] == marker["run_id"] and len(calls) == 1
+    assert raw == (bundle / "raw/github/repositories.jsonl").read_bytes()
+    assert w.work("C1", root, runner=runner)["skipped_submitted"] == 1
+    assert w.work("C1", tmp_path / "fresh", runner=runner)["status"] == "no_work"
+    assert not (tmp_path / "fresh").exists() and len(calls) == 1
+    notice = f"crawl/inbox/C1/{value['job_id']}/{marker['run_id']}.json"
+    # A lost notice plus a lost local workspace reuses the remote READY run.
+    (drive.root / notice).unlink()
+    assert w.work("C1", tmp_path / "restored", runner=runner)["status"] == "submitted"
+    assert len(calls) == 1
+    drive.archive(notice, notice.replace("crawl/inbox/", "crawl/inbox-processed/", 1))
+    assert w.work("C1", tmp_path / "fresh", runner=runner)["skipped_submitted"] == 1
+    assert len(calls) == 1
+    assert all("assignments/C1" in name or "/C1/" in name for name in reads)
+    # Even a semantically identical assignment must match the sealed original bytes.
+    remote_assignment = (
+        drive.root / c.notification(value, marker)["submission_prefix"] / "ASSIGNMENT.json"
+    )
+    with remote_assignment.open("ab") as stream:
+        stream.write(b"\n")
+    with pytest.raises(c.CoordinationError, match="submission_assignment_checksum_mismatch"):
+        w.work("C1", tmp_path / "fresh", runner=runner)
+    assert len(calls) == 1 and not (tmp_path / "fresh").exists()
+
+
+def test_work_selects_only_unambiguous_valid_assignments(tmp_path, monkeypatch):
+    monkeypatch.delenv("REPOSEER_REGISTRY_DSN", raising=False)
+    monkeypatch.setattr(w.shutil, "which", lambda name: "/fake/uv")
+    drive = Drive(tmp_path / "remote")
+    monkeypatch.setattr(w, "Drive", lambda remote: drive)
+    root = tmp_path / "work"
+    assert w.work("C1", root)["status"] == "no_work" and not root.exists()
+    first = assignment()
+    second = c.sign_assignment(dict(first, claim_token=str(uuid4())))
+    expired = c.sign_assignment(
+        dict(assignment(), lease_expires_at=c.format_utc_timestamp(c.now() - timedelta(hours=1)))
+    )
+    for value in (first, second, expired):
+        c.write_json(
+            drive.root / f"crawl/assignments/C1/{value['job_id']}/{value['claim_token']}.json",
+            value,
+        )
+    for options in ({}, dict(job_id=first["job_id"])):
+        with pytest.raises(c.CoordinationError, match="ambiguous_assignments"):
+            w.work("C1", root, **options)
+    selected = dict(job_id=first["job_id"], claim_token=first["claim_token"])
+    assert w.work("C1", root, dry_run=True, **selected)["job_id"] == first["job_id"]
+    assert not root.exists() and not drive.writes
+    with pytest.raises(c.CoordinationError, match="claim_token_requires_job_id"):
+        w.work("C1", root, claim_token=first["claim_token"])
+    path = drive.root / f"crawl/assignments/C1/{first['job_id']}/{first['claim_token']}.json"
+    for altered, code in (
+        (dict(first, assignment_sha256="0" * 64), "assignment_checksum"),
+        (c.sign_assignment(dict(first, worker_id="C2")), "assignment_worker_mismatch"),
+        (c.sign_assignment(dict(first, claim_token=str(uuid4()))), "assignment_path_mismatch"),
+    ):
+        c.write_json(path, altered, immutable=False)
+        with pytest.raises(c.CoordinationError, match=code):
+            w.work("C1", root, **selected)
+    c.write_json(path, first, immutable=False)
+    cache = root / first["job_id"] / first["claim_token"] / "ASSIGNMENT.json"
+    c.write_json(cache, second)
+    with pytest.raises(c.CoordinationError, match="assignment_local_conflict"):
+        w.work("C1", root, **selected)
+    assert c.read_json(cache) == second
+    for value in (first, second):
+        old = c.sign_assignment(dict(value, lease_expires_at=expired["lease_expires_at"]))
+        c.write_json(
+            drive.root / f"crawl/assignments/C1/{value['job_id']}/{value['claim_token']}.json",
+            old,
+            immutable=False,
+        )
+    assert w.work("C1", root)["skipped_expired"] == 3
+    monkeypatch.setenv("REPOSEER_REGISTRY_DSN", "coordinator-only-secret")
+    with pytest.raises(c.CoordinationError, match="worker_must_not_have_registry_dsn"):
+        w.work("C1", root)
 
 
 def test_discovery_validation_and_idempotent_import(tmp_path):
@@ -613,33 +724,166 @@ def test_screening_reuses_source_policy_and_deduplicates_repo(tmp_path, monkeypa
     assert registry.__dict__ == before
 
 
-def test_dispatch_upload_recovery_and_disabled_workers(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind,worker", [("screen_package", "D2"), ("collect_repository", "C1")])
+def test_dispatch_upload_recovery_and_disabled_workers(tmp_path, monkeypatch, kind, worker):
     registry, drive = Registry(), Drive(tmp_path / "remote")
-    registry.execute(
-        "INSERT INTO reposeer.crawl_jobs(job_kind,package_id) VALUES ('screen_package',%s)",
-        ("pypi:demo",),
-    )
+    value = assignment(kind=kind)
+    claim(registry, value)
+    for job in registry.jobs.values():
+        job.update(status="queued", attempt_count=0)
     monkeypatch.setattr(d, "Drive", lambda remote: drive)
     drive.fail = "assignments"
+    output = tmp_path / "out"
     with pytest.raises(c.CoordinationError, match="upload"):
-        d.dispatch("screen_package", "D2", 100, tmp_path / "out", registry=registry)
+        d.dispatch(kind, worker, 1, output, registry=registry)
     job = next(iter(registry.jobs.values()))
     assert job["status"] == "claimed" and job["attempt_count"] == 1
-    token = job["claim_token"]
+    token, sha = job["claim_token"], job["assignment_sha256"]
+    pending = next((output / ".pending").glob("*.json"))
+    journal = pending.read_bytes()
     drive.fail = None
-    registry.workers["D2"]["is_enabled"] = False
+    registry.workers[worker]["is_enabled"] = False
     with pytest.raises(c.CoordinationError, match="disabled"):
-        d.dispatch("screen_package", "D2", 100, tmp_path / "out", registry=registry)
-    registry.workers["D2"]["is_enabled"] = True
-    recovered = d.dispatch("screen_package", "D2", 100, tmp_path / "out", registry=registry)
-    assert (
-        recovered["recovered_assignments"]
-        and job["claim_token"] == token
-        and job["attempt_count"] == 1
+        d.dispatch(kind, worker, 1, output, registry=registry)
+    registry.workers[worker]["is_enabled"] = True
+    job = registry.jobs[job["job_id"]]  # Failed transactions restore copied rows.
+    job["claim_token"] = str(uuid4())
+    with pytest.raises(c.CoordinationError, match="stale_claim"):
+        d.dispatch(kind, worker, 1, output, registry=registry)
+    assert pending.read_bytes() == journal and not drive.writes
+    job = registry.jobs[job["job_id"]]
+    job["claim_token"] = token
+    recovered = d.dispatch(kind, worker, 1, output, registry=registry)
+    assert recovered["recovered_assignments"] and not pending.exists()
+    assert Path(recovered["recovered_assignments"][0]).read_bytes() == journal
+    assert job["claim_token"] == token and job["assignment_sha256"] == sha
+    assert job["attempt_count"] == 1 and len(registry.jobs) == 1
+    c.atomic_bytes(pending, journal)
+    remote_file = drive.local(drive.writes[-1])
+    remote_file.write_bytes(b"conflicting immutable assignment")
+    before = copy.deepcopy(registry.__dict__)
+    with pytest.raises(c.CoordinationError, match="remote_path_checksum_conflict"):
+        d.dispatch(kind, worker, 1, output, registry=registry)
+    assert pending.read_bytes() == journal and registry.__dict__ == before
+    assert remote_file.read_bytes() == b"conflicting immutable assignment"
+    registry.workers[worker]["is_enabled"] = False
+    with pytest.raises(c.CoordinationError, match="disabled"):
+        d.dispatch(kind, worker, 1, output, registry=registry)
+
+
+def test_drive_immutable_readback_and_listing_race(tmp_path, monkeypatch):
+    drive = Drive(tmp_path / "remote")
+    local = tmp_path / "assignment.json"
+    local.write_bytes(b"original")
+    name = "crawl/assignments/C1/job/token.json"
+    drive.put(local, name)
+    assert (drive.root / name).read_bytes() == b"original"
+    writes = list(drive.writes)
+    drive.put(local, name)
+    assert drive.writes == writes
+    # Equal size does not authorize replacing different bytes.
+    (drive.root / name).write_bytes(b"conflict")
+    with pytest.raises(c.CoordinationError, match="remote_path_checksum_conflict"):
+        drive.put(local, name)
+    assert drive.writes == writes
+    # A stale listing must not allow overwriting a newly visible conflicting file.
+    monkeypatch.setattr(drive, "listing", lambda *args, **kwargs: {})
+    with pytest.raises(c.CoordinationError, match="upload_checksum_mismatch"):
+        drive.put(local, name)
+    assert (drive.root / name).read_bytes() == b"conflict"
+    # Verification reads the destination bytes, not its reported listing size.
+    (drive.root / name).write_bytes(b"original")
+    drive.put(local, name)
+
+
+@pytest.mark.parametrize(
+    "args,stage,exit_code",
+    [
+        (["lsjson", "testremote:missing"], "listing", 3),
+        (["lsjson", "testremote:private"], "listing", 7),
+        (["mkdir", "testremote:nested/path"], "directory_creation", 5),
+        (["copyto", "local", "testremote:target", "--immutable"], "immutable_upload", 1),
+        (["copyto", "testremote:source", "local"], "read_back", 4),
+    ],
+)
+def test_rclone_safe_stage_diagnostics(tmp_path, monkeypatch, capsys, args, stage, exit_code):
+    secret = "private-provider-password"
+    monkeypatch.setenv("REPOSEER_REGISTRY_DSN", secret)
+    monkeypatch.setenv("GITHUB_TOKEN", secret)
+    monkeypatch.setenv("RCLONE_EXCLUDE", "*")
+    monkeypatch.setenv("RCLONE_MAX_SIZE", "1")
+
+    def failed(command, **kwargs):
+        assert "--local-no-preallocate" in command
+        assert "RCLONE_EXCLUDE" not in kwargs["env"]
+        assert "RCLONE_MAX_SIZE" not in kwargs["env"]
+        return subprocess.CompletedProcess(command, exit_code, secret, secret)
+
+    monkeypatch.setattr(c.subprocess, "run", failed)
+    drive = c.Drive("testremote:")
+    if exit_code == 3:
+        assert drive._run(args, missing_ok=True) is None
+    with pytest.raises(SystemExit):
+        c.cli_guard(lambda: drive._run(args))
+    diagnostics = capsys.readouterr().err
+    assert secret not in diagnostics
+    assert json.loads(diagnostics) == dict(
+        error_code="rclone_operation_failed", rclone_stage=stage, rclone_exit_code=exit_code
     )
-    registry.workers["D2"]["is_enabled"] = False
-    with pytest.raises(c.CoordinationError, match="disabled"):
-        d.dispatch("screen_package", "D2", 100, tmp_path / "out", registry=registry)
+
+    def timed_out(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, 600, output=secret, stderr=secret)
+
+    monkeypatch.setattr(c.subprocess, "run", timed_out)
+    with pytest.raises(c.CoordinationError, match="rclone_operation_timeout") as error:
+        drive._run(args)
+    assert error.value.diagnostics == dict(rclone_stage=stage)
+
+
+def test_desktop_metadata_keeps_declared_checksums_authoritative(tmp_path):
+    drive = Drive(tmp_path / "remote")
+    root = tmp_path / "bundle"
+    value = assignment()
+    c.write_json(root / "ASSIGNMENT.json", value)
+    c.atomic_bytes(root / "raw/payload.json", b"original")
+    c.atomic_bytes(root / "raw/desktop.ini", b"OS metadata")
+    c.seal_bundle(root, value, str(uuid4()))
+    sealed = (root / "CHECKSUMS.sha256").read_bytes()
+    assert "raw/desktop.ini" not in c.verify_bundle(root)[2]
+    prefix = "crawl/submissions/C1/job/run"
+    drive.upload(root, prefix)
+    assert drive.writes[-1].endswith("READY.json")
+    c.atomic_bytes(drive.root / prefix / "extra/DESKTOP.INI", b"remote OS metadata")
+    downloaded = tmp_path / "download"
+    drive.download(prefix, downloaded)
+    c.verify_bundle(downloaded)
+    assert not (downloaded / "extra/DESKTOP.INI").exists()
+    drive.upload(root, prefix)  # Matching immutable replay ignores only OS metadata.
+    c.atomic_bytes(root / "raw/undeclared.json", b"unexpected")
+    with pytest.raises(c.CoordinationError, match="bundle_checksum_mismatch"):
+        c.verify_bundle(root)
+    (root / "raw/undeclared.json").unlink()
+    c.atomic_bytes(drive.root / prefix / "undeclared.json", b"unexpected")
+    with pytest.raises(c.CoordinationError, match="unexpected_remote_bundle_files"):
+        drive.upload(root, prefix)
+    # Legacy bundles explicitly declaring desktop.ini must retain and verify it.
+    sha, size = c.fingerprint(root / "raw/desktop.ini")
+    checksums = sealed + f"{sha} {size} raw/desktop.ini\n".encode()
+    c.atomic_bytes(root / "CHECKSUMS.sha256", checksums, immutable=False)
+    marker = c.read_json(root / "READY.json")
+    c.write_json(
+        root / "READY.json", dict(marker, payload_sha256=c.digest(checksums)), immutable=False
+    )
+    assert "raw/desktop.ini" in c.verify_bundle(root)[2]
+    drive.upload(root, "legacy/run")
+    drive.download("legacy/run", tmp_path / "legacy")
+    c.verify_bundle(tmp_path / "legacy")
+    (root / "raw/desktop.ini").write_bytes(b"corrupted")
+    with pytest.raises(c.CoordinationError, match="bundle_checksum_mismatch"):
+        c.verify_bundle(root)
+    (root / "raw/desktop.ini").unlink()
+    with pytest.raises(c.CoordinationError, match="bundle_checksum_mismatch"):
+        c.verify_bundle(root)
 
 
 def test_partial_exit_one_is_bundled_and_upload_retries_without_api(
@@ -1128,7 +1372,18 @@ def test_worker_dry_run_and_interruption_keep_failure_receipt(tmp_path, monkeypa
         c.read_json(root / "failure_receipt.json")["reason_code"] == "collector_process_interrupted"
     )
     assert not (root / "READY.json").exists()
+    with pytest.raises(c.CoordinationError, match="collector_process_interrupted"):
+        w.run("C1", path, tmp_path / "work", runner=interrupted)
+    c.write_json(
+        root / "metadata/collection_runs" / f"integration_{uuid4()}.json",
+        dict(status="running"),
+    )
     old = c.files(root)
+    with pytest.raises(
+        c.CoordinationError, match="unfinished_integration_run_requires_coordinator"
+    ):
+        w.run("C1", path, tmp_path / "work", runner=interrupted)
+    assert c.files(root) == old
     new_value = c.sign_assignment(dict(value, claim_token=str(uuid4())))
     c.write_json(path, new_value, immutable=False)
     with pytest.raises(c.CoordinationError, match="collector_process_interrupted"):
