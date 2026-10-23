@@ -1,6 +1,8 @@
-"""Sequential C1-C7 runner. No registry credential or database connection."""
+"""Mounted-Drive CSV crawlers plus the legacy C1-C7 runner; no worker DB access."""
 
 import argparse
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -15,10 +17,17 @@ from tools.coordination._common import (
     CoordinationError,
     Drive,
     atomic_bytes,
+    checked_mount_path,
     cli_guard,
+    collection_options,
+    copy_verified,
+    digest,
+    files,
     fingerprint,
     format_utc_timestamp,
     integration_evidence,
+    local_drive_workspace,
+    mounted_display_path,
     no_worker_dsn,
     notification,
     now,
@@ -29,12 +38,14 @@ from tools.coordination._common import (
     require,
     safe_path,
     seal_bundle,
+    slug,
     timestamp,
     uid,
     validate_assignment,
     validate_notification,
     validate_ready,
     verify_bundle,
+    verify_drive_screening,
     worker_id,
     write_json,
 )
@@ -342,6 +353,257 @@ def work(
     )
 
 
+def drive_part_facts(root: Path, expected: dict, run_id: str) -> dict:
+    """Reuse raw/provider verification, without constructing a legacy claim assignment."""
+    facts = integration_evidence(
+        root,
+        dict(
+            targets=expected["package_ids"],
+            expected_repo_full_name=expected["repo_full_name"],
+        ),
+        run_id,
+    )
+    require(facts["overall_status"] in {"complete", "partial"}, "drive_collection_not_successful")
+    require(
+        facts["collected_repository"] and facts["verified_package_ids"] == expected["package_ids"],
+        "drive_mapping_verification_failed",
+    )
+    require(
+        safe_path(root, "targets.txt").read_bytes()
+        == ("\n".join(expected["package_ids"]) + "\n").encode("utf-8"),
+        "drive_targets_mismatch",
+    )
+    return facts
+
+
+def verify_drive_part(root: Path, expected: dict, *, marker: dict | None = None) -> dict:
+    root = checked_mount_path(root)
+    marker = read_json(safe_path(root, "READY.json")) if marker is None else marker
+    require(
+        type(marker.get("schema_version")) is int
+        and all(marker.get(key) == value for key, value in expected.items()),
+        "drive_part_identity_mismatch",
+    )
+    require(
+        read_json(safe_path(root, "COLLECTION_INPUT.json")) == expected, "drive_part_input_mismatch"
+    )
+    checksums = safe_path(root, "CHECKSUMS.sha256")
+    declared = read_checksums(checksums)
+    require(fingerprint(checksums)[0] == marker["checksums_sha256"], "checksum_list_mismatch")
+    inventory = files(root, declared=declared)
+    require(
+        declared
+        == {
+            name: value
+            for name, value in inventory.items()
+            if name not in {"CHECKSUMS.sha256", "READY.json"}
+        },
+        "bundle_checksum_mismatch",
+    )
+    facts = drive_part_facts(root, expected, uid(marker["integration_run_id"]))
+    require(
+        marker["collection_status"] == facts["overall_status"]
+        and marker["completed_at_utc"] == facts["finished_at"],
+        "drive_part_status_mismatch",
+    )
+    return marker
+
+
+def collect_drive_part(root: Path, expected: dict, log: Path, *, runner=None) -> dict:
+    root = checked_mount_path(root)
+    if (root / "READY.json").exists():
+        return verify_drive_part(root, expected)
+    input_path = safe_path(root, "COLLECTION_INPUT.json")
+    started = input_path.exists()
+    require(started or not files(root), "untracked_local_collection_requires_inspection")
+    write_json(input_path, expected)
+    targets = safe_path(root, "targets.txt")
+    atomic_bytes(targets, ("\n".join(expected["package_ids"]) + "\n").encode("utf-8"))
+    manifests = sorted(safe_path(root, "metadata/collection_runs").glob("integration_*.json"))
+    require(len(manifests) <= 1, "multiple_local_integration_runs")
+    if not manifests:
+        require(not started, "drive_collection_interrupted_requires_inspection")
+        options = collection_options("initial")
+        command = [
+            "uv",
+            "run",
+            "--frozen",
+            "reposeer",
+            "collect-dataset",
+            "--targets-file",
+            str(targets),
+            "--data-dir",
+            str(root),
+            "--mode",
+            "live",
+        ]
+        for name, value in options.items():
+            command += [
+                "--" + name.replace("_", "-"),
+                ",".join(value) if isinstance(value, list) else str(value),
+            ]
+        # No Registry credential reaches the child, even from an operator's shell.
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key.upper() != "REPOSEER_REGISTRY_DSN"
+        }
+        interrupted = False
+        with tempfile.TemporaryFile(mode="w+b", dir=root.parent) as output:
+            try:
+                (runner or subprocess.run)(
+                    command,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    timeout=6 * 3600,
+                    env=environment,
+                )
+            except (OSError, subprocess.SubprocessError):
+                interrupted = True
+            output.seek(0)
+            text = redact(output.read(16 * 1024**2).decode("utf-8", errors="replace"))
+        atomic_bytes(log, text.encode("utf-8"), immutable=False)
+        require(not interrupted, "drive_collection_interrupted_requires_inspection")
+        manifests = sorted(safe_path(root, "metadata/collection_runs").glob("integration_*.json"))
+    require(len(manifests) == 1, "integration_manifest_missing")
+    manifest = read_json(manifests[0])
+    require(
+        manifest.get("finished_at") is not None, "drive_collection_interrupted_requires_inspection"
+    )
+    run_id = uid(manifests[0].stem.removeprefix("integration_"))
+    facts = drive_part_facts(root, expected, run_id)
+    inventory = files(root)
+    lines = "".join(
+        f"{sha} {size} {name}\n"
+        for name, (sha, size) in inventory.items()
+        if name not in {"CHECKSUMS.sha256", "READY.json"}
+    )
+    atomic_bytes(safe_path(root, "CHECKSUMS.sha256"), lines.encode("utf-8"))
+    write_json(
+        safe_path(root, "READY.json"),
+        dict(
+            **expected,
+            integration_run_id=run_id,
+            collection_status=facts["overall_status"],
+            checksums_sha256=digest(lines.encode("utf-8")),
+            completed_at_utc=facts["finished_at"],
+        ),
+    )
+    return verify_drive_part(root, expected)
+
+
+def publish_drive_part(source: Path, destination: Path, expected: dict) -> dict:
+    source, destination = checked_mount_path(source), checked_mount_path(destination)
+    marker = verify_drive_part(source, expected)
+    inventory = files(source, declared=read_checksums(source / "CHECKSUMS.sha256"))
+    existing = files(destination, declared=inventory)
+    require(set(existing) <= set(inventory), "unexpected_mounted_bundle_files")
+    require(
+        all(value == inventory[name] for name, value in existing.items()),
+        "mounted_path_checksum_conflict",
+    )
+    for name in sorted(set(inventory) - {"READY.json"}):
+        copy_verified(safe_path(source, name), safe_path(destination, name))
+    verify_drive_part(destination, expected, marker=marker)
+    copy_verified(safe_path(source, "READY.json"), safe_path(destination, "READY.json"))
+    require(verify_drive_part(destination, expected) == marker, "mounted_bundle_changed")
+    return marker
+
+
+def crawl_drive(
+    assignment: Path,
+    *,
+    data_root: Path | None = None,
+    dry_run: bool = False,
+    runner=None,
+) -> dict:
+    """Collect a published mounted CSV; no Registry, lease, token or rclone remote."""
+    assignment = checked_mount_path(assignment)
+    worker = worker_id(assignment.parent.name, "crawler")
+    run_id = uid(assignment.stem)
+    require(
+        assignment.suffix == ".csv" and assignment.parent.parent.name == "assignments",
+        "invalid_drive_assignment_path",
+    )
+    drive_root = assignment.parents[2]
+    safe_path(drive_root, f"assignments/{worker}/{run_id}.csv")
+    ready, _, assignments = verify_drive_screening(drive_root, run_id)
+    groups = {}
+    for row in assignments[worker]:
+        repo = slug(row["repo_full_name"]).casefold()
+        groups.setdefault(repo, []).append(row["package_id"])
+    base = local_drive_workspace("work", data_root, drive_root)
+    plan = []
+    for repo, packages in sorted(groups.items()):
+        packages = sorted(packages)
+        repository_id = digest(repo.encode("utf-8"))
+        for index, offset in enumerate(range(0, len(packages), 100), 1):
+            expected = dict(
+                schema_version=1,
+                sampling_run_id=run_id,
+                worker_id=worker,
+                repo_full_name=repo,
+                repository_id=repository_id,
+                part_index=index,
+                package_ids=packages[offset : offset + 100],
+                assignment_sha256=ready["assignments_sha256"][worker],
+                collection=collection_options("initial"),
+            )
+            suffix = f"{worker}/{run_id}/{repository_id}/part_{index:03d}"
+            plan.append(
+                (expected, safe_path(base, suffix), safe_path(drive_root, "submissions/" + suffix))
+            )
+    summary = dict(
+        status="planned" if dry_run else "completed",
+        dry_run=dry_run,
+        worker_id=worker,
+        sampling_run_id=run_id,
+        packages=len(assignments[worker]),
+        repositories=len(groups),
+        parts=len(plan),
+        unit="repository_parts",
+        completed=0,
+        partial=0,
+        failed=0,
+        skipped_existing=0,
+        output=mounted_display_path(drive_root / "submissions" / worker / run_id),
+        failures=[],
+    )
+    if dry_run:
+        return summary
+    for expected, local, destination in plan:
+        try:
+            if (destination / "READY.json").exists():
+                verify_drive_part(destination, expected)
+                summary["skipped_existing"] += 1
+                continue
+            require(
+                (local / "COLLECTION_INPUT.json").exists() or not files(destination),
+                "mounted_partial_submission_requires_local_workspace",
+            )
+            log = safe_path(
+                base,
+                f"{worker}/{run_id}/logs/{expected['repository_id']}-part_{expected['part_index']:03d}.log",
+            )
+            collect_drive_part(local, expected, log, runner=runner)
+            marker = publish_drive_part(local, destination, expected)
+            summary["completed" if marker["collection_status"] == "complete" else "partial"] += 1
+        except (CoordinationError, OSError, ValueError, TypeError, KeyError) as error:
+            summary["failed"] += 1
+            summary["failures"].append(
+                dict(
+                    repository_id=expected["repository_id"],
+                    part_index=expected["part_index"],
+                    error_code=str(error)
+                    if isinstance(error, CoordinationError)
+                    else type(error).__name__,
+                )
+            )
+    if summary["failed"]:
+        summary["status"] = "failed"
+    return summary
+
+
 def main():
     cli = parser(__doc__)
     commands = cli.add_subparsers(dest="command", required=True)
@@ -358,7 +620,17 @@ def main():
     sub.add_argument("--claim-token")
     sub.add_argument("--dry-run", action="store_true")
     sub.add_argument("--remote", default=argparse.SUPPRESS)
+    sub = commands.add_parser("crawl-drive", help="Collect a CSV from mounted Google Drive")
+    sub.add_argument("--assignment", type=Path, required=True)
+    sub.add_argument("--data-root", type=Path)
+    sub.add_argument("--dry-run", action="store_true")
     args = cli.parse_args()
+    if args.command == "crawl-drive":
+        result = crawl_drive(args.assignment, data_root=args.data_root, dry_run=args.dry_run)
+        if result["failed"]:
+            print(json.dumps(result, sort_keys=True))
+            raise SystemExit(1)
+        return result
     if args.command == "work":
         return work(
             args.worker,

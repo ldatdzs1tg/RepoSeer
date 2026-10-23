@@ -1,7 +1,8 @@
-"""Coordinator queues plus DB-free D2 screening. Run from the repository root."""
+"""Mounted-Drive screening/allocation plus legacy Registry coordination."""
 
 import argparse
 import csv
+import io
 import json
 import sys
 import tempfile
@@ -13,20 +14,29 @@ if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.coordination._common import (
+    ASSIGNMENT_FIELDS,
+    DRIVE_WORKERS,
+    MAPPING_FIELDS,
     MAX_METADATA,
     CoordinationError,
     Drive,
     Registry,
+    allocate_drive_assignments,
     artifact_row,
     atomic_bytes,
     canonical,
     check_claim,
+    checked_mount_path,
     cli_guard,
     collection_options,
+    copy_verified,
+    digest,
     enabled_worker,
     fingerprint,
     finish_job,
     format_utc_timestamp,
+    local_drive_workspace,
+    mounted_display_path,
     no_worker_dsn,
     now,
     parser,
@@ -35,6 +45,7 @@ from tools.coordination._common import (
     relative,
     require,
     safe_path,
+    screening_candidate,
     seal_bundle,
     sign_assignment,
     slug,
@@ -43,6 +54,7 @@ from tools.coordination._common import (
     uid,
     validate_assignment,
     verify_bundle,
+    verify_drive_screening,
     worker_id,
     write_json,
 )
@@ -116,6 +128,203 @@ def discovery_bundle(root):
         if local.exists():
             require(fingerprint(local)[0] == entry["sha256"], "sampling_artifact_checksum_mismatch")
     return manifest, rows
+
+
+def write_drive_table(path: Path, fields: tuple[str, ...], rows: list[dict]) -> None:
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=fields, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    atomic_bytes(path, stream.getvalue().encode("utf-8"))
+
+
+def drive_screening_summary(root: Path, run_id: str, *, reused: bool) -> dict:
+    _, mapping, assigned = verify_drive_screening(root, run_id)
+    return dict(
+        status="completed",
+        sampling_run_id=run_id,
+        reused=reused,
+        package_count=len(mapping),
+        **{
+            status: sum(row["screening_status"] == status for row in mapping)
+            for status in ("candidate", "unresolved", "ambiguous", "failed")
+        },
+        assignments={
+            worker: dict(packages=len(rows), repositories=len({r["repo_full_name"] for r in rows}))
+            for worker, rows in assigned.items()
+        },
+        mapping=mounted_display_path(root / f"screening/runs/{run_id}/mapping.csv"),
+    )
+
+
+def update_latest_drive_mapping(root: Path) -> None:
+    # Replaying an older run must not replace the most recently completed run's alias.
+    runs = safe_path(root, "screening/runs")
+    completed = []
+    for path in runs.iterdir():
+        checked_mount_path(path)
+        if path.is_dir() and (path / "READY.json").exists():
+            run_id = uid(path.name)
+            marker = read_json(safe_path(path, "READY.json"))
+            require(marker.get("sampling_run_id") == run_id, "drive_screening_ready_mismatch")
+            completed.append((timestamp(marker["generated_at_utc"]), run_id))
+    require(completed, "no_completed_screening")
+    _, latest = max(completed)
+    verify_drive_screening(root, latest)
+    copy_verified(
+        safe_path(runs, latest + "/mapping.csv"),
+        safe_path(root, "screening/mapping.csv"),
+        replace=True,
+    )
+
+
+def screen_drive(
+    run_dir: Path,
+    *,
+    data_root: Path | None = None,
+    dry_run: bool = False,
+    client=None,
+) -> dict:
+    """Screen a mounted D1 run and publish all seven assignments without a Registry."""
+    run_dir = checked_mount_path(run_dir)
+    run_id = uid(run_dir.name)
+    require(
+        run_dir.parent.name == "submissions" and run_dir.parent.parent.name == "discovery",
+        "invalid_discovery_run_path",
+    )
+    drive_root = run_dir.parents[2]
+    safe_path(drive_root, f"discovery/submissions/{run_id}/manifest.json")
+    manifest, packages = discovery_bundle(run_dir)
+    require(manifest["sampling_run_id"] == run_id, "sampling_directory_run_mismatch")
+    source_hashes = dict(
+        discovery_manifest_sha256=fingerprint(safe_path(run_dir, "manifest.json"))[0],
+        discovery_csv_sha256=fingerprint(safe_path(run_dir, "package_candidates.csv"))[0],
+    )
+    destination = safe_path(drive_root, f"screening/runs/{run_id}")
+    if (destination / "READY.json").exists():
+        result = drive_screening_summary(drive_root, run_id, reused=True)
+        if not dry_run:
+            update_latest_drive_mapping(drive_root)
+        return dict(result, dry_run=dry_run)
+    if dry_run:
+        return dict(
+            status="planned", dry_run=True, sampling_run_id=run_id, package_count=len(packages)
+        )
+    stage = safe_path(local_drive_workspace("screening", data_root, drive_root), run_id)
+    output = safe_path(stage, f"screening/runs/{run_id}")
+    if not (output / "READY.json").exists():
+        for name in ("manifest.json", "package_candidates.csv"):
+            copy_verified(
+                safe_path(run_dir, name), safe_path(stage, f"discovery/submissions/{run_id}/{name}")
+            )
+        mapping, evidence = [], []
+        with HTTPClient(timeout=30, max_retries=3, max_backoff_seconds=30) as http:
+            pypi = client or PyPIClient(http_client=http)
+            for package in packages:
+                key = package["package_id"]
+                checkpoint = safe_path(stage, f"results/{digest(key.encode('utf-8'))}.json")
+                if checkpoint.exists():
+                    saved = read_json(checkpoint)
+                    require(
+                        saved["source_hashes"] == source_hashes
+                        and saved["row"]["package_id"] == key,
+                        "screening_checkpoint_conflict",
+                    )
+                else:
+                    row = dict(
+                        sampling_run_id=run_id,
+                        package_id=key,
+                        package_name=key[5:],
+                        repo_full_name="",
+                        screening_status="failed",
+                        reason_code="pypi_request_failed",
+                        source_url=f"https://pypi.org/pypi/{key[5:]}/json",
+                        retrieved_at_utc=format_utc_timestamp(now()),
+                        evidence_sha256="",
+                    )
+                    item = None
+                    try:
+                        payload = pypi.get_package_info(key[5:])
+                        require(
+                            isinstance(payload, dict) and isinstance(payload.get("info"), dict),
+                            "pypi_response_invalid",
+                        )
+                        observed = format_utc_timestamp(now())
+                        info = payload["info"]
+                        item = dict(
+                            package_id=key,
+                            source_url=row["source_url"],
+                            retrieved_at_utc=observed,
+                            info={field: info.get(field) for field in ("name", "project_urls")},
+                        )
+                        encoded = canonical(item)
+                        require(len(encoded) <= MAX_METADATA, "pypi_response_invalid")
+                        sha = digest(encoded)
+                        repo, status, reason = screening_candidate(item)
+                        row.update(
+                            repo_full_name=repo,
+                            screening_status=status,
+                            reason_code=reason,
+                            retrieved_at_utc=observed,
+                            evidence_sha256=sha,
+                        )
+                    except HTTPClientError as error:
+                        row["reason_code"] = (
+                            "rate_limited"
+                            if error.status_code in {403, 429}
+                            else "pypi_request_failed"
+                        )
+                        item = None
+                    except (ValueError, TypeError):
+                        row["reason_code"], item = "pypi_response_invalid", None
+                    saved = dict(source_hashes=source_hashes, row=row, evidence=item)
+                    write_json(checkpoint, saved)
+                mapping.append(saved["row"])
+                if saved["evidence"] is not None:
+                    evidence.append(saved["evidence"])
+        assigned = allocate_drive_assignments(mapping)
+        write_drive_table(safe_path(output, "mapping.csv"), MAPPING_FIELDS, mapping)
+        atomic_bytes(
+            safe_path(output, "pypi_evidence.jsonl"),
+            b"".join(canonical(item) + b"\n" for item in evidence),
+        )
+        for worker, rows in assigned.items():
+            write_drive_table(
+                safe_path(stage, f"assignments/{worker}/{run_id}.csv"), ASSIGNMENT_FIELDS, rows
+            )
+        write_json(
+            safe_path(output, "READY.json"),
+            dict(
+                schema_version=1,
+                sampling_run_id=run_id,
+                mapping_sha256=fingerprint(output / "mapping.csv")[0],
+                evidence_sha256=fingerprint(output / "pypi_evidence.jsonl")[0],
+                assignments_sha256={
+                    worker: fingerprint(stage / f"assignments/{worker}/{run_id}.csv")[0]
+                    for worker in DRIVE_WORKERS
+                },
+                package_count=len(mapping),
+                assigned_package_count=sum(map(len, assigned.values())),
+                generated_at_utc=format_utc_timestamp(now()),
+                **source_hashes,
+            ),
+        )
+    local_marker, _, _ = verify_drive_screening(stage, run_id)
+    require(
+        all(local_marker[field] == value for field, value in source_hashes.items()),
+        "discovery_source_changed",
+    )
+    for name in ("mapping.csv", "pypi_evidence.jsonl"):
+        copy_verified(safe_path(output, name), safe_path(destination, name))
+    for worker in DRIVE_WORKERS:
+        name = f"assignments/{worker}/{run_id}.csv"
+        copy_verified(safe_path(stage, name), safe_path(drive_root, name))
+    # Verify the whole published set before exposing READY, including sync delays.
+    verify_drive_screening(drive_root, run_id, marker=local_marker)
+    copy_verified(safe_path(output, "READY.json"), safe_path(destination, "READY.json"))
+    result = drive_screening_summary(drive_root, run_id, reused=False)
+    update_latest_drive_mapping(drive_root)
+    return result
 
 
 def import_discovery(root, *, dry_run=False, registry=None, remote="reposeer:"):
@@ -1000,6 +1209,10 @@ def main():
         sub.add_argument("--limit", type=int, default=default)
         sub.add_argument("--out-dir", type=Path, required=True)
         sub.add_argument("--lease-hours", type=int, default=48)
+    sub = commands.add_parser("screen-drive", help="Screen a mounted D1 run and allocate C1-C7")
+    sub.add_argument("--run-dir", type=Path, required=True)
+    sub.add_argument("--data-root", type=Path)
+    sub.add_argument("--dry-run", action="store_true")
     sub = commands.add_parser("screen-local")
     sub.add_argument("--assignment", type=Path, required=True)
     sub.add_argument("--out-dir", type=Path, required=True)
@@ -1020,9 +1233,12 @@ def main():
     group.add_argument("--apply", action="store_true")
     group.add_argument("--dry-run", action="store_true")
     sub.add_argument("--pending-dir", type=Path, default=Path("data/coordination"))
-    for sub in commands.choices.values():
-        sub.add_argument("--remote", default=argparse.SUPPRESS)
+    for name, sub in commands.choices.items():
+        if name != "screen-drive":
+            sub.add_argument("--remote", default=argparse.SUPPRESS)
     args = cli.parse_args()
+    if args.command == "screen-drive":
+        return screen_drive(args.run_dir, data_root=args.data_root, dry_run=args.dry_run)
     registry = Registry()
     if args.command in {"import-discovery", "import-screening"}:
         function = import_discovery if args.command == "import-discovery" else import_screening

@@ -1,13 +1,158 @@
-# Distributed collection: one coordinator, D1, D2 and C1-C7
+# Distributed collection with mounted Google Drive
+
+The recommended student workflow uses Google Drive for desktop as a mounted folder.
+**It does not use Supabase, SQL, rclone, claims, leases, or Central Ingestion.**
+D1 sampling and the existing PyPI/GitHub/external collectors remain unchanged.
+The older Registry workflow is retained separately under **Legacy** below; do not
+mix its JSON assignments or ingestion commands with the new CSV workflow.
+
+## One-time student setup (Windows CMD)
+
+Install Python 3.12+, Git and Google Drive for desktop, then obtain access to the
+shared `RepoSeer-Data` folder. Every member's mounted absolute path may differ.
+Once the updated branch is available:
+
+```cmd
+py -m pip install uv
+git clone --branch feat/distributed-crawl-coordination https://github.com/ldatdzs1tg/RepoSeer.git "%USERPROFILE%\RepoSeer"
+cd /d "%USERPROFILE%\RepoSeer"
+uv sync --frozen
+notepad .env
+```
+
+Crawlers put their own `GITHUB_TOKEN=...` in this private local `.env`; never copy it
+to shared storage. No database credential or rclone configuration is needed.
+Crawlers need read access to the D1 inputs, screening run and all seven assignment
+CSVs for cross-worker checks, plus write access to their own submissions folder.
+Allow Drive Desktop to download input files before running the commands below.
+
+## D1: unchanged discovery
+
+```cmd
+uv run --frozen reposeer discover-packages --source pypi-simple --count 1000 --seed 20261022 --batch-size 50 --data-dir data
+```
+
+Using the Sampling Run ID printed by this command, copy **unchanged**
+`data\registry\runs\<run_id>\manifest.json` and `package_candidates.csv` to shared
+`discovery\submissions\<run_id>\`. Keep the remaining D1 artifacts locally.
+D1's sampling, ordering, CSV schema and package identities are not modified.
+
+## D2: screen and allocate in one command
+
+Copy the absolute path of the D1 run folder from Explorer:
+
+```cmd
+uv run --frozen python tools/coordination/dispatcher.py screen-drive --run-dir "G:\...\RepoSeer-Data\discovery\submissions\<run_id>"
+```
+
+Replace the example path with your own mounted path. D2 validates the original D1
+CSV hash/schema/order and screens every package through the existing PyPI client
+and Source/Repository/Code mapping rule. Results remain `candidate`, `unresolved`,
+`ambiguous` or `failed`; discovering a URL does not establish a verified mapping.
+All packages remain in mapping.csv. Only candidates are assigned.
+
+Repositories are grouped case-insensitively, sorted by descending package count
+then repository name, and assigned to the worker with the fewest packages, then
+fewest repositories, then lowest worker ID. Packages within a group are sorted.
+This is deterministic, never splits a repository between workers, and does not
+exclude repositories merely because an earlier sampling run contained them.
+Empty workers receive a header-only CSV. Compact PyPI evidence stores the original
+name/project_urls used for each successful decision and its canonical JSON SHA-256.
+
+D2 stages outputs at `C:\RepoSeerData\screening\<run_id>\`, checkpoints each package,
+copies via temporary files, verifies every hash/size by read-back, then publishes
+`screening/runs/<run_id>/READY.json` last. READY includes hashes for mapping, evidence,
+all seven assignments, and the original D1 inputs. Retry the same command after a
+copy interruption: it reuses local screening results. A published run is verified
+and reused without PyPI requests. Conflicting published bytes are never replaced.
+`screening/mapping.csv` is a convenience copy of the latest completed run by its
+READY generation timestamp, with run ID as a tie-break; it is not a merged registry.
+Replaying an older run does not roll that convenience copy back.
+
+## C1-C7: one CSV path, one command
+
+Each crawler opens their own assignment folder and copies its CSV's absolute path:
+
+```cmd
+uv run --frozen python tools/coordination/worker.py crawl-drive --assignment "G:\...\RepoSeer-Data\assignments\C1\<run_id>.csv"
+```
+
+C2-C7 change only the path; worker and sampling run are derived from it. The command
+verifies D2 READY, mapping/evidence, and all seven assignment hashes and allocation
+before collection. A not-yet-synced, missing or changed input fails safely.
+It calls the existing `uv run --frozen reposeer collect-dataset` with initial limits:
+1 page / 30 records per GitHub group; hackernews / 1 page / 1 record / 1 candidate.
+A repository with more than 100 packages is split into sorted `part_001`, `part_002`,
+etc. of at most 100 packages, all under the same crawler. Every assigned package
+must be verified by the collected PyPI/GitHub evidence against its assigned repository;
+a changed or unresolved mapping preserves local evidence and reports failure.
+
+Each part is uploaded immediately with raw, processed, metadata, reports, targets
+and collection-input provenance. CHECKSUMS covers every payload; READY is written
+last and records the actual integration run and `complete` or `partial` status.
+Logs stay local, outside the submitted part, and are redacted. Summary counts use
+repository parts (`unit: repository_parts`), including completed, partial, failed
+and skipped_existing. A reported failure makes the CLI exit nonzero.
+
+## Output and safe retries
+
+```text
+RepoSeer-Data/
+  discovery/submissions/<run_id>/manifest.json, package_candidates.csv
+  screening/mapping.csv                         # latest completed run only
+  screening/runs/<run_id>/mapping.csv, pypi_evidence.jsonl, READY.json
+  assignments/C1/<run_id>.csv                   # C1 through C7
+  submissions/C1/<run_id>/<repository_id>/part_001/
+    COLLECTION_INPUT.json, targets.txt
+    raw/, processed/, metadata/, reports/
+    CHECKSUMS.sha256, READY.json
+```
+
+`repository_id` is the full 64-character SHA-256 of the lowercase `owner/repo`.
+Crawlers work locally at `C:\RepoSeerData\work\Cn\<run_id>\<repository_id>\part_001\`.
+Use `--data-root` to override the local base on another machine; Linux/macOS default
+to `~/.local/share/reposeer/screening` and `~/.local/share/reposeer/work`. Never select
+a Drive-mounted directory for computation, checkpoints or Parquet processing.
+
+Rerun the same command and retain the same local workspace. A fully verified Drive
+part is skipped even on a fresh machine. A finished local run is uploaded again
+without new collection if its upload was interrupted. Modified/missing declared
+files or unexpected ordinary files fail; only undeclared `desktop.ini` is ignored.
+Symlinks/junctions, traversal and credential paths are rejected. Interrupted runs
+without a finished integration manifest require inspection of the existing child
+checkpoints; the integration pipeline has no automatic resume engine. Do not delete
+raw data or overwrite partial/conflicting shared files to make a retry succeed.
+A remote partial upload with no corresponding local workspace is left for inspection.
+
+`--dry-run` validates inputs and reports the plan without API calls or writes.
+Run one D2 command at a time and one crawler process per assignment; no distributed lock is
+provided. READY means the publisher verified its mounted copy, **not** that every
+other machine has synced it. Each reader independently verifies all required files.
+There is no new progress database or cross-run deduplication. New submissions are
+self-contained inputs for a future offline aggregation step; **legacy ingest.py
+does not consume them**. No ML labels or dataset contracts are changed.
+
+Offline validation:
+
+```cmd
+uv run --frozen --offline ruff check tools/coordination tests/coordination
+uv run --frozen --offline pytest tests/coordination/test_drive_only.py -q
+```
+
+## Legacy: Supabase/rclone workflow
+
+The instructions below apply only to the earlier Registry-based JSON assignments.
+They are not prerequisites for `screen-drive` or `crawl-drive`. Existing assignments,
+submissions and Registry records are neither migrated nor modified automatically.
 
 This is a manually operated batch file protocol. PostgreSQL contains metadata;
 immutable run directories contain the data. There is no worker API, scheduler,
 Google Sheets sync, automatic worker activation, or production migration runner.
 The tools leave T-020/T-020A and canonical contract 0.1.0 unchanged.
 
-## Team member quick start
+### Team member quick start
 
-### One-time setup (Windows CMD)
+#### One-time setup (Windows CMD)
 
 Once the coordinator shares the updated branch, install Python 3.12+ and Git first.
 Use a local checkout and your own GitHub token:
@@ -33,7 +178,7 @@ desktop, or a Google Drive OAuth remote. Ask the coordinator for access to your
 own assignments, submissions, inbox and processed inbox. Transport compatibility
 settings and checksums are handled by the command; no per-transfer filters are needed.
 
-### Daily command
+#### Daily command
 
 From your checkout, run one assigned job and exit:
 
@@ -49,7 +194,7 @@ Keep `C:\RepoSeerData\coordination\work\C1`: rerun the same command after a tran
 failure to reuse collected data. For ambiguity, expired work, or an unfinished crawl,
 send the summary/error code to the coordinator and keep your local files.
 
-## Coordinator operations
+### Coordinator operations
 
 Members only need the quick start above. The coordinator retains Registry access,
 runs the existing D1/D2 steps below, and dispatches at most **one unfinished eligible
@@ -70,7 +215,7 @@ retain a partial run while its job retries. These folders do not show a live cra
 progress and cannot establish current Registry status; Supabase remains authoritative.
 An optional overview Sheet is maintained manually.
 
-### Setup and permissions
+#### Setup and permissions
 
 On a clean checkout, after this feature is merged:
 
@@ -134,7 +279,7 @@ uv run python tools/coordination/dispatcher.py activate --worker C1 --display-na
 Repeat explicitly for C2-C7 using real assigned names. Disabled slots cannot be
 dispatched. `activate` is an explicit DB write; do not run during code verification.
 
-### Windows / Google Drive for desktop troubleshooting
+#### Windows / Google Drive for desktop troubleshooting
 
 An alias such as `reposeer:` backed by a mounted G: folder uses rclone's **local**
 backend. Coordination commands always pass `--local-no-preallocate`, including
@@ -206,7 +351,7 @@ by comparing `Drive.remote_fingerprint(remote_name)` with `fingerprint(local_pat
 Worker dry-run validates the assignment without a Registry DSN; ingestion independently
 rechecks the live claim before accepting any canonical artifacts.
 
-#### Recover the existing C1 publication (coordinator only)
+##### Recover the existing C1 publication (coordinator only)
 
 No production publication was executed while implementing this workflow. In the
 coordinator CMD terminal, with its existing Registry credential, inspect and recover
@@ -228,7 +373,7 @@ Do not run another dispatcher concurrently. Stop for a stale claim, expired leas
 conflicting bytes or a transport error; preserve the journal and inspect its safe
 stage/exit diagnostics. Do not reset or create another job for this recovery.
 
-### D1: discover names, never crawl
+#### D1: discover names, never crawl
 
 The coordinator streams sorted current registry IDs into an exclusions snapshot:
 
@@ -271,7 +416,7 @@ package/screen job. Example actual counter names:
 `{"names_seen":1000,"packages_inserted":950,"duplicates_skipped":50,"screen_jobs_created":950}`.
 For dashboard display, packages_seen = names_seen, new_packages = packages_inserted.
 
-### D2: screen current source metadata
+#### D2: screen current source metadata
 
 ```powershell
 uv run python tools/coordination/dispatcher.py dispatch-screen --worker D2 --limit 100 --out-dir data/coordination/assignments/D2 --lease-hours 48
@@ -310,7 +455,7 @@ An already verified package keeps its repository/mapping unchanged; candidate-on
 screening cannot relink it. Case-equivalent repository candidates share one repository and one initial crawl
 job, even when many packages refer to it. Re-import does not increase attempts.
 
-### C1-C7: one sequential collector per machine
+#### C1-C7: one sequential collector per machine
 
 Coordinator assigns one repository job per worker for the normal `work` command,
 without reusing live claims (the dispatcher still supports a limit up to 10):
@@ -378,7 +523,7 @@ Use a short local disk data-root (for example `C:/RepoSeerData/C1`) if Drive Str
 Windows path-length limit rejects the two UUID segments plus artifact names.
 Spaces in paths are supported by quoting and argument arrays; no shell is used.
 
-#### Activity coverage and follow-up scopes
+##### Activity coverage and follow-up scopes
 
 | Scope | max_pages/group | max_records/group | Next automatic scope |
 |---|---:|---:|---|
@@ -403,7 +548,7 @@ requests. They are **not cursor resume**. New raw observations keep their own ID
 and timestamps. After followup:2, budget_limited remains visible with no further
 automatic job. Full cursor recovery is a separate task.
 
-#### Packages discovered after a repository was collected
+##### Packages discovered after a repository was collected
 
 A successful screening import records last_screening_run_id, then attempts reuse
 only for its new candidate packages (at most 100), after committing the import.
@@ -432,7 +577,7 @@ are reported without promotion or automatic row merging. Review each result's
 reason_code; restore the original immutable evidence or screen again through an
 explicit operator workflow rather than editing hashes to force verification.
 
-### Coordinator: ingest, audit and catalog
+#### Coordinator: ingest, audit and catalog
 
 Use local C: TEMP for Parquet work. Workspace files are verified downloads; they
 may be large. No mutable DuckDB is opened on Drive Stream.
@@ -569,7 +714,7 @@ for a separate future sync, never a distributed lock. No background task is inst
 After manual success, Task Scheduler can invoke the ingest command periodically
 with **Do not start a new instance** configured; do not store secrets in task arguments.
 
-### Offline verification and production checklist
+#### Offline verification and production checklist
 
 ```powershell
 uv sync --extra dev --frozen
