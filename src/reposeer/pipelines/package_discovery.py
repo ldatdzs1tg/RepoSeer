@@ -169,7 +169,12 @@ class PackageDiscoveryPipeline:
         self.progress = progress
         self.clock = clock or (lambda: datetime.now(UTC))
 
-    def run(self, options: PackageDiscoveryOptions) -> PackageDiscoveryResult:
+    def run(
+        self,
+        options: PackageDiscoveryOptions,
+        *,
+        validate_sample: Callable[[list[str]], None] | None = None,
+    ) -> PackageDiscoveryResult:
         options.validate()
         paths = StoragePaths(options.data_dir)
         registry = paths.base_dir / "registry"
@@ -336,6 +341,7 @@ class PackageDiscoveryPipeline:
             parsing,
             dict(file_sha256=exclusion_hash, excluded_name_count=excluded_name_count),
             snapshot.path if snapshot else None,
+            validate_sample=validate_sample,
         )
         report_progress(self.progress, "completed", message="Completed")
         return result
@@ -352,6 +358,8 @@ class PackageDiscoveryPipeline:
         parsing,
         exclusion,
         snapshot_path,
+        *,
+        validate_sample=None,
     ):
         if len(names) != options.count or len(set(names)) != options.count:
             raise PackageDiscoveryError("invalid_selected_sample")
@@ -447,6 +455,8 @@ class PackageDiscoveryPipeline:
                 ),
                 limitations=list(LIMITATIONS),
             )
+            if validate_sample is not None:
+                validate_sample(names)
             write_json_atomic(stage / "manifest.json", manifest)
             os.replace(stage, final)
         return PackageDiscoveryResult(

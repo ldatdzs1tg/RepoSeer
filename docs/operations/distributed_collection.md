@@ -2,7 +2,8 @@
 
 The recommended student workflow uses Google Drive for desktop as a mounted folder.
 **It does not use Supabase, SQL, rclone, claims, leases, or Central Ingestion.**
-D1 sampling and the existing PyPI/GitHub/external collectors remain unchanged.
+D1 sampling remains deterministic; Drive exclusions prevent resampling screened packages.
+The existing PyPI/GitHub/external collectors remain unchanged.
 The older Registry workflow is retained separately under **Legacy** below; do not
 mix its JSON assignments or ingestion commands with the new CSV workflow.
 
@@ -26,11 +27,41 @@ Crawlers need read access to the D1 inputs, screening run and all seven assignme
 CSVs for cross-worker checks, plus write access to their own submissions folder.
 Allow Drive Desktop to download input files before running the commands below.
 
-## D1: unchanged discovery
+## One-time mapping migration or fresh-folder initialization
+
+Before using D1 or D2, run these commands against your mounted shared folder:
 
 ```cmd
-uv run --frozen reposeer discover-packages --source pypi-simple --count 1000 --seed 20261022 --batch-size 50 --data-dir data
+uv run --frozen python tools/coordination/dispatcher.py bootstrap-mapping --drive-root "<RepoSeer-Data>" --dry-run
+uv run --frozen python tools/coordination/dispatcher.py bootstrap-mapping --drive-root "<RepoSeer-Data>"
 ```
+
+Bootstrap alone scans completed historical runs. It verifies every run's READY,
+evidence, D1 input and assignments, orders runs by READY generation time then run ID,
+and retains the first screening row for each package. Historical files remain
+immutable. An existing legacy latest-run alias must exactly match the latest verified
+run before replacement; unexpected bytes require inspection. A fresh folder with no
+completed runs or legacy alias gets a header-only master. Once initialized, bootstrap
+only validates the master and reports `already_initialized`; it never silently rebuilds
+a missing or corrupt master. Dry-run performs no writes.
+
+## D1: sample new packages using the cumulative master
+
+```cmd
+uv run --frozen reposeer discover-packages --source pypi-simple --count 1000 --seed 20261024 --batch-size 50 --drive-root "<RepoSeer-Data>" --data-dir data
+```
+
+Replace `<RepoSeer-Data>` with the absolute shared folder path, not `mapping.csv`.
+D1 verifies `screening/mapping.csv` against `mapping.meta.json` and excludes all
+previously screened packages, including unresolved, ambiguous and failed results.
+An optional `--exclude-file` is normalized and combined with master exclusions in a
+local temporary file; your original exclusions and shared files are never changed.
+The existing sampling algorithm, seed, ordering, CSV and manifest schemas are retained.
+The manifest's exclusion hash/count describe the actual combined exclusion file.
+D1 rechecks master metadata before committing its sample and before reporting success;
+if it changes, discard that sample and start a new one. Missing metadata, bad hashes,
+malformed/duplicate/unsorted rows or an unfinished update fail closed. Without
+`--drive-root`, the original discovery behavior and `--exclude-file` remain supported.
 
 Using the Sampling Run ID printed by this command, copy **unchanged**
 `data\registry\runs\<run_id>\manifest.json` and `package_candidates.csv` to shared
@@ -42,14 +73,28 @@ D1's sampling, ordering, CSV schema and package identities are not modified.
 Copy the absolute path of the D1 run folder from Explorer:
 
 ```cmd
-uv run --frozen python tools/coordination/dispatcher.py screen-drive --run-dir "G:\...\RepoSeer-Data\discovery\submissions\<run_id>"
+uv run --frozen python tools/coordination/dispatcher.py screen-drive --run-dir "<RepoSeer-Data>\discovery\submissions\<run_id>"
 ```
 
 Replace the example path with your own mounted path. D2 validates the original D1
 CSV hash/schema/order and screens every package through the existing PyPI client
 and Source/Repository/Code mapping rule. Results remain `candidate`, `unresolved`,
 `ambiguous` or `failed`; discovering a URL does not establish a verified mapping.
-All packages remain in mapping.csv. Only candidates are assigned.
+All packages remain in the immutable per-run mapping. Only candidates are assigned.
+Before any PyPI request or assignment publication, D2 rejects a new run containing
+packages already in the master; resample with D1's `--drive-root`. A completed run
+is verified and reused, so retrying an interrupted master merge makes no new requests.
+
+D2 automatically shows a live progress bar on stderr with processed/total, percentage,
+elapsed time and estimated time remaining. Mapped counts repository candidates;
+Unresolved means no candidate was found, Ambiguous means conflicting candidates,
+and Failed means screening could not complete (including HTTP 404). Unmapped is the
+sum of Unresolved, Ambiguous and Failed. Cached counts validated checkpoints reused
+without another PyPI request. Counts advance only after a persisted result is loaded
+or saved. Add `--no-progress` to suppress progress. When stderr is redirected to a
+log, D2 writes a plain snapshot every 25 packages and at completion, without terminal
+control sequences. The final result JSON stays on stdout. Dry-runs and already
+published runs do not start progress.
 
 Repositories are grouped case-insensitively, sorted by descending package count
 then repository name, and assigned to the worker with the fewest packages, then
@@ -65,9 +110,33 @@ copies via temporary files, verifies every hash/size by read-back, then publishe
 all seven assignments, and the original D1 inputs. Retry the same command after a
 copy interruption: it reuses local screening results. A published run is verified
 and reused without PyPI requests. Conflicting published bytes are never replaced.
-`screening/mapping.csv` is a convenience copy of the latest completed run by its
-READY generation timestamp, with run ID as a tie-break; it is not a merged registry.
-Replaying an older run does not roll that convenience copy back.
+After per-run READY publication, D2 merges into cumulative `screening/mapping.csv`.
+The existing nine-column mapping schema is retained, sorted by canonical package ID,
+with one immutable first-seen row per package. All four statuses are retained; this
+master is not evidence of successful repository collection. Identical replays make no
+writes. Historical overlaps from different runs retain the original master row and
+are reported; conflicting content from the same run fails. Final JSON retains the
+existing fields and adds `master` counters: `previously_stored`, `new_packages_added`,
+`historical_duplicates`, and `total_unique_packages`.
+
+Only D2 (including bootstrap) writes the master. It stages CSV processing locally,
+verifies bytes, writes `mapping.pending.json`, checks the previous master again,
+replaces the CSV through a verified temporary copy, then publishes metadata and
+verifies both before removing the journal. Metadata contains schema version, exact
+CSV SHA-256, row count, UTC update time, and last merged run ID (null for an empty
+master). D1 refuses to sample while a journal exists. Rerun D2 or bootstrap after an
+interruption: it verifies the journal's immutable source runs and either retries the
+old validated state, completes metadata for the verified new CSV, or removes a verified
+stale journal. Unverifiable states retain all files and require inspection; do not
+delete the journal or replace conflicting files to force recovery. Every reader
+verifies its own mounted bytes because Drive synchronization may lag.
+
+Run D2 commands sequentially and wait for Drive synchronization before other members
+sample. Exclusive journal creation detects competing updates on the same mount;
+there is no cross-machine distributed lock. Normal D1 and D2 operations read the
+single master without scanning history. Its streaming reader has a separate 512 MiB
+file safeguard and 1 MiB line safeguard, without the per-run 10,000-row limit;
+per-run and assignment limits remain unchanged.
 
 ## C1-C7: one CSV path, one command
 
@@ -99,7 +168,9 @@ and skipped_existing. A reported failure makes the CLI exit nonzero.
 ```text
 RepoSeer-Data/
   discovery/submissions/<run_id>/manifest.json, package_candidates.csv
-  screening/mapping.csv                         # latest completed run only
+  screening/mapping.csv                         # cumulative, all screened statuses
+  screening/mapping.meta.json                   # master checksum and row count
+  screening/mapping.pending.json                # only during an unfinished update
   screening/runs/<run_id>/mapping.csv, pypi_evidence.jsonl, READY.json
   assignments/C1/<run_id>.csv                   # C1 through C7
   submissions/C1/<run_id>/<repository_id>/part_001/
@@ -128,15 +199,16 @@ A remote partial upload with no corresponding local workspace is left for inspec
 Run one D2 command at a time and one crawler process per assignment; no distributed lock is
 provided. READY means the publisher verified its mounted copy, **not** that every
 other machine has synced it. Each reader independently verifies all required files.
-There is no new progress database or cross-run deduplication. New submissions are
+Cross-run deduplication applies to package screening, not repository collection. New submissions are
 self-contained inputs for a future offline aggregation step; **legacy ingest.py
 does not consume them**. No ML labels or dataset contracts are changed.
 
 Offline validation:
 
 ```cmd
-uv run --frozen --offline ruff check tools/coordination tests/coordination
-uv run --frozen --offline pytest tests/coordination/test_drive_only.py -q
+uv run --frozen ruff check src/reposeer/cli tools/coordination tests/coordination
+uv run --frozen python -m pytest tests/coordination/test_drive_only.py -q
+uv run --frozen python -m pytest tests/integration/test_package_discovery.py -q
 ```
 
 ## Legacy: Supabase/rclone workflow

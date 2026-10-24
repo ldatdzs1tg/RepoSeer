@@ -17,6 +17,8 @@ from types import MappingProxyType, SimpleNamespace
 from uuid import UUID
 
 from reposeer.contracts.identity import canonical_github_url, format_utc_timestamp, package_id
+from reposeer.storage import screening_mapping as master_mapping
+from reposeer.storage.screening_mapping import MAPPING_FIELDS as MAPPING_FIELDS
 
 COLLECTION_BUDGETS = MappingProxyType(
     {"initial": (1, 30), "followup:1": (2, 100), "followup:2": (4, 300)}
@@ -386,7 +388,11 @@ def cli_guard(function):
         subprocess.SubprocessError,
     ) as error:
         # Never print exception bodies from subprocesses, DB, HTTP, or untrusted files.
-        code = str(error) if isinstance(error, CoordinationError) else type(error).__name__
+        code = (
+            str(error)
+            if isinstance(error, (CoordinationError, master_mapping.ScreeningMappingError))
+            else type(error).__name__
+        )
         details = error.diagnostics if isinstance(error, CoordinationError) else {}
         print(json.dumps({"error_code": code, **details}), file=sys.stderr)
         raise SystemExit(1) from None
@@ -400,17 +406,6 @@ def parser(description):
 
 # Mounted-Drive CSV contracts are independent of legacy Registry assignments.
 DRIVE_WORKERS = tuple(f"C{number}" for number in range(1, 8))
-MAPPING_FIELDS = (
-    "sampling_run_id",
-    "package_id",
-    "package_name",
-    "repo_full_name",
-    "screening_status",
-    "reason_code",
-    "source_url",
-    "retrieved_at_utc",
-    "evidence_sha256",
-)
 ASSIGNMENT_FIELDS = (
     "sampling_run_id",
     "worker_id",
@@ -421,17 +416,17 @@ ASSIGNMENT_FIELDS = (
 
 
 def checked_mount_path(path: Path) -> Path:
-    path = Path(path)
-    require(path.is_absolute(), "absolute_mounted_path_required")
-    require(".." not in path.parts, "unsafe_mounted_path")
-    # Win32 rename/open otherwise reject the long run/repository/part paths.
-    prefix = "\\\\?\\"
-    if sys.platform == "win32" and not str(path).startswith(prefix):
-        value = str(path)
-        path = Path(prefix + ("UNC" + "\\" + value[2:] if value.startswith("\\" * 2) else value))
-    for ancestor in (path, *path.parents):
-        require(not ancestor.is_symlink() and not ancestor.is_junction(), "symlink_rejected")
-    return path
+    try:
+        return master_mapping.checked_mount_path(path)
+    except master_mapping.ScreeningMappingError as error:
+        raise CoordinationError(str(error)) from None
+
+
+def read_cumulative_mapping(root: Path, *, allow_pending: bool = False):
+    try:
+        return master_mapping.read_cumulative_mapping(root, allow_pending=allow_pending)
+    except master_mapping.ScreeningMappingError as error:
+        raise CoordinationError(str(error)) from None
 
 
 def mounted_display_path(path: Path) -> str:

@@ -4,15 +4,21 @@ import argparse
 import csv
 import io
 import json
+import os
 import sys
 import tempfile
 from datetime import timedelta
 from pathlib import Path
+from time import monotonic
 from uuid import uuid4
 
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from rich.console import Console, Group
+from rich.live import Live
+from rich.progress import BarColumn, Progress, TextColumn
+from rich.text import Text
 from tools.coordination._common import (
     ASSIGNMENT_FIELDS,
     DRIVE_WORKERS,
@@ -41,6 +47,7 @@ from tools.coordination._common import (
     now,
     parser,
     read_checksums,
+    read_cumulative_mapping,
     read_json,
     relative,
     require,
@@ -65,6 +72,11 @@ from reposeer.contracts.models import RawRecord
 from reposeer.exceptions import HTTPClientError
 from reposeer.pipelines.collection import _repository_candidate
 from reposeer.pipelines.package_discovery import CSV_FIELDS
+from reposeer.storage.screening_mapping import (
+    read_mapping_csv,
+    validate_mapping_row,
+    validate_master_metadata,
+)
 
 CLAIM_SQL = """SELECT j.*,r.repo_full_name FROM reposeer.crawl_jobs j
  LEFT JOIN reposeer.repositories r USING(repository_id)
@@ -157,25 +169,387 @@ def drive_screening_summary(root: Path, run_id: str, *, reused: bool) -> dict:
     )
 
 
-def update_latest_drive_mapping(root: Path) -> None:
-    # Replaying an older run must not replace the most recently completed run's alias.
+def _merge_master_rows(existing: dict[str, dict], new_rows: list[dict]):
+    merged = dict(existing)
+    added = duplicates = 0
+    for row in new_rows:
+        validate_mapping_row(row)
+        key = row["package_id"]
+        old = merged.get(key)
+        if old is None:
+            merged[key] = row
+            added += 1
+        elif old != row:
+            require(
+                old["sampling_run_id"] != row["sampling_run_id"], f"master_same_run_conflict:{key}"
+            )
+            duplicates += 1
+    return merged, dict(
+        previously_stored=len(existing),
+        new_packages_added=added,
+        historical_duplicates=duplicates,
+        total_unique_packages=len(merged),
+    )
+
+
+def _stage_master(stage: Path, rows: dict[str, dict], run_id: str | None, *, meta=None):
+    path = stage / "mapping.csv"
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=MAPPING_FIELDS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows[key] for key in sorted(rows))
+        stream.flush()
+        os.fsync(stream.fileno())
+    if meta is None:
+        meta = dict(
+            schema_version=1,
+            mapping_sha256=fingerprint(path)[0],
+            row_count=len(rows),
+            updated_at_utc=format_utc_timestamp(now()),
+            last_merged_run_id=run_id,
+        )
+    require(read_mapping_csv(path, meta) == rows, "master_staging_mismatch")
+    write_json(stage / "mapping.meta.json", meta)
+    return meta
+
+
+def _master_state(root: Path):
+    path = safe_path(root, "screening/mapping.csv")
+    meta = safe_path(root, "screening/mapping.meta.json")
+    return (
+        fingerprint(path)[0] if path.exists() else None,
+        read_json(meta) if meta.exists() else None,
+    )
+
+
+def _publish_pending_master(root: Path, pending: dict, stage: Path):
+    journal = safe_path(root, "screening/mapping.pending.json")
+    require(read_json(journal) == pending, "master_journal_changed")
+    current_sha, current_meta = _master_state(root)
+    previous = pending["previous_metadata"]
+    next_meta = pending["next_metadata"]
+    require(current_meta in (previous, next_meta), "master_recovery_metadata_conflict")
+    if current_sha != pending["next_mapping_sha256"]:
+        require(
+            current_sha == pending["previous_mapping_sha256"] and current_meta == previous,
+            "master_changed_during_update",
+        )
+    copy_verified(stage / "mapping.csv", safe_path(root, "screening/mapping.csv"), replace=True)
+    copy_verified(
+        stage / "mapping.meta.json", safe_path(root, "screening/mapping.meta.json"), replace=True
+    )
+    actual, _ = read_cumulative_mapping(root, allow_pending=True)
+    require(actual == next_meta, "master_publication_metadata_mismatch")
+    require(read_json(journal) == pending, "master_journal_changed")
+    journal.unlink()
+
+
+def _local_master_stage(root: Path, scratch: str) -> Path:
+    stage = checked_mount_path(Path(scratch).absolute())
+    require(not stage.resolve().is_relative_to(root.resolve()), "master_staging_must_be_local")
+    return stage
+
+
+def _begin_master_update(root: Path, rows, *, previous_meta, previous_sha, run_ids, operation):
+    run_id = run_ids[-1] if run_ids else None
+    with tempfile.TemporaryDirectory(prefix="reposeer-master-") as scratch:
+        stage = _local_master_stage(root, scratch)
+        next_meta = _stage_master(stage, rows, run_id)
+        pending = dict(
+            schema_version=1,
+            run_id=run_id,
+            previous_mapping_sha256=previous_sha,
+            next_mapping_sha256=next_meta["mapping_sha256"],
+            next_row_count=len(rows),
+            previous_metadata=previous_meta,
+            next_metadata=next_meta,
+            operation=operation,
+            runs=run_ids,
+        )
+        require(
+            _master_state(root) == (previous_sha, previous_meta), "master_changed_during_update"
+        )
+        journal = safe_path(root, "screening/mapping.pending.json")
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        # Exclusive creation also catches a second writer on the same mounted filesystem.
+        # Cross-machine synchronization is still governed by the documented single writer.
+        with journal.open("xb") as stream:
+            stream.write(canonical(pending))
+            stream.flush()
+            os.fsync(stream.fileno())
+        _publish_pending_master(root, pending, stage)
+
+
+def _verified_history(root: Path, run_ids: list[str]):
+    rows, order, duplicates, total = {}, [], 0, 0
+    for run_id in run_ids:
+        marker, mapping, _ = verify_drive_screening(root, uid(run_id))
+        order.append((timestamp(marker["generated_at_utc"]), run_id))
+        rows, counts = _merge_master_rows(rows, mapping)
+        duplicates += counts["historical_duplicates"]
+        total += len(mapping)
+    require(order == sorted(order), "bootstrap_run_order_mismatch")
+    return rows, duplicates, total
+
+
+def recover_pending_mapping(root: Path) -> bool:
+    """Finish only a journal whose old or new state and immutable sources verify."""
+    root = checked_mount_path(root)
+    path = safe_path(root, "screening/mapping.pending.json")
+    if not path.exists():
+        return False
+    pending = read_json(path)
+    require(
+        set(pending)
+        == {
+            "schema_version",
+            "run_id",
+            "previous_mapping_sha256",
+            "next_mapping_sha256",
+            "next_row_count",
+            "previous_metadata",
+            "next_metadata",
+            "operation",
+            "runs",
+        },
+        "master_journal_schema_mismatch",
+    )
+    require(
+        type(pending["schema_version"]) is int and pending["schema_version"] == 1,
+        "master_journal_version",
+    )
+    next_meta = validate_master_metadata(pending["next_metadata"])
+    require(
+        pending["next_mapping_sha256"] == next_meta["mapping_sha256"]
+        and type(pending["next_row_count"]) is int
+        and pending["next_row_count"] == next_meta["row_count"]
+        and pending["run_id"] == next_meta["last_merged_run_id"],
+        "master_journal_metadata_mismatch",
+    )
+    run_ids = pending["runs"]
+    require(
+        isinstance(run_ids, list) and all(isinstance(run, str) for run in run_ids),
+        "master_journal_runs_mismatch",
+    )
+    require(
+        len(set(run_ids)) == len(run_ids)
+        and pending["run_id"] == (run_ids[-1] if run_ids else None),
+        "master_journal_runs_mismatch",
+    )
+    operation, previous = pending["operation"], pending["previous_metadata"]
+    previous_sha = pending["previous_mapping_sha256"]
+    require(
+        previous_sha is None
+        or (
+            isinstance(previous_sha, str)
+            and len(previous_sha) == 64
+            and all(c in "0123456789abcdef" for c in previous_sha)
+        ),
+        "master_journal_previous_checksum",
+    )
+    if operation == "merge":
+        validate_master_metadata(previous)
+        require(
+            run_ids == [pending["run_id"]] and previous_sha == previous["mapping_sha256"],
+            "master_journal_runs_mismatch",
+        )
+        _, new_rows, _ = verify_drive_screening(root, uid(pending["run_id"]))
+    else:
+        require(operation == "bootstrap" and previous is None, "master_journal_operation_mismatch")
+        history, _, _ = _verified_history(root, run_ids)
+        if previous_sha is not None:
+            require(
+                run_ids
+                and previous_sha
+                == read_json(safe_path(root, f"screening/runs/{run_ids[-1]}/READY.json"))[
+                    "mapping_sha256"
+                ],
+                "legacy_mapping_alias_mismatch",
+            )
+    current_sha, current_meta = _master_state(root)
+    require(current_meta in (previous, next_meta), "master_recovery_metadata_conflict")
+    if current_sha == pending["next_mapping_sha256"]:
+        rows = read_mapping_csv(safe_path(root, "screening/mapping.csv"), next_meta)
+        if operation == "bootstrap":
+            require(rows == history, "master_recovery_source_mismatch")
+        else:
+            merged, counts = _merge_master_rows(rows, new_rows)
+            require(
+                merged == rows and counts["new_packages_added"] == 0,
+                "master_recovery_source_mismatch",
+            )
+    else:
+        require(
+            current_sha == previous_sha and current_meta == previous,
+            "master_recovery_state_conflict",
+        )
+        if operation == "bootstrap":
+            rows = history
+        else:
+            _, old_rows = read_cumulative_mapping(root, allow_pending=True)
+            rows, _ = _merge_master_rows(old_rows, new_rows)
+    with tempfile.TemporaryDirectory(prefix="reposeer-master-recovery-") as scratch:
+        stage = _local_master_stage(root, scratch)
+        _stage_master(stage, rows, pending["run_id"], meta=next_meta)
+        _publish_pending_master(root, pending, stage)
+    return True
+
+
+def merge_cumulative_mapping(root: Path, run_id: str, *, snapshot=None, dry_run=False):
+    root = checked_mount_path(root)
+    if snapshot is None:
+        if not dry_run:
+            recover_pending_mapping(root)
+        snapshot = read_cumulative_mapping(root)
+    meta, existing = snapshot
+    _, mapping, _ = verify_drive_screening(root, run_id)
+    rows, counts = _merge_master_rows(existing, mapping)
+    if counts["new_packages_added"] and not dry_run:
+        _begin_master_update(
+            root,
+            rows,
+            previous_meta=meta,
+            previous_sha=meta["mapping_sha256"],
+            run_ids=[run_id],
+            operation="merge",
+        )
+    return counts
+
+
+def bootstrap_mapping(drive_root: Path, *, dry_run: bool = False) -> dict:
+    root = checked_mount_path(drive_root)
+    if not dry_run:
+        recover_pending_mapping(root)
+    else:
+        require(
+            not safe_path(root, "screening/mapping.pending.json").exists(),
+            "master_update_pending_retry_D2",
+        )
+    if safe_path(root, "screening/mapping.meta.json").exists():
+        _, rows = read_cumulative_mapping(root)
+        return dict(status="already_initialized", dry_run=dry_run, total_unique_packages=len(rows))
     runs = safe_path(root, "screening/runs")
     completed = []
-    for path in runs.iterdir():
-        checked_mount_path(path)
-        if path.is_dir() and (path / "READY.json").exists():
-            run_id = uid(path.name)
-            marker = read_json(safe_path(path, "READY.json"))
-            require(marker.get("sampling_run_id") == run_id, "drive_screening_ready_mismatch")
-            completed.append((timestamp(marker["generated_at_utc"]), run_id))
-    require(completed, "no_completed_screening")
-    _, latest = max(completed)
-    verify_drive_screening(root, latest)
-    copy_verified(
-        safe_path(runs, latest + "/mapping.csv"),
-        safe_path(root, "screening/mapping.csv"),
-        replace=True,
+    if runs.exists():
+        for path in runs.iterdir():
+            checked_mount_path(path)
+            if path.is_dir() and (path / "READY.json").exists():
+                run_id = uid(path.name)
+                marker = read_json(safe_path(path, "READY.json"))
+                completed.append((timestamp(marker["generated_at_utc"]), run_id))
+    run_ids = [run_id for _, run_id in sorted(completed)]
+    rows, duplicates, total = _verified_history(root, run_ids)
+    alias = safe_path(root, "screening/mapping.csv")
+    previous_sha = fingerprint(alias)[0] if alias.exists() else None
+    if previous_sha is not None:
+        require(
+            run_ids
+            and previous_sha
+            == read_json(safe_path(root, f"screening/runs/{run_ids[-1]}/READY.json"))[
+                "mapping_sha256"
+            ],
+            "legacy_mapping_alias_mismatch",
+        )
+    result = dict(
+        status="planned" if dry_run else "initialized",
+        dry_run=dry_run,
+        completed_historical_runs=len(run_ids),
+        total_rows_read=total,
+        historical_duplicates=duplicates,
+        total_unique_packages=len(rows),
     )
+    if not dry_run:
+        _begin_master_update(
+            root,
+            rows,
+            previous_meta=None,
+            previous_sha=previous_sha,
+            run_ids=run_ids,
+            operation="bootstrap",
+        )
+    return result
+
+
+class _ScreeningProgress:
+    """Report persisted rows on stderr, keeping the CLI's stdout JSON untouched."""
+
+    def __init__(self, total: int, *, enabled: bool = True, started_at: float | None = None):
+        self.total = total
+        self.enabled = enabled
+        self.started_at = monotonic() if started_at is None else started_at
+        self.processed = self.cached = 0
+        self.counts = dict.fromkeys(("candidate", "unresolved", "ambiguous", "failed"), 0)
+        self.console = None
+        self.live = None
+
+    def __enter__(self):
+        if self.enabled:
+            interactive = sys.stderr.isatty()
+            self.console = Console(stderr=True, force_terminal=interactive)
+            if interactive:
+                self.bar = Progress(
+                    TextColumn("Screening"),
+                    BarColumn(bar_width=None),
+                    TextColumn("{task.completed:.0f}/{task.total:.0f} ({task.percentage:.1f}%)"),
+                    console=self.console,
+                    auto_refresh=False,
+                )
+                self.task = self.bar.add_task("Screening", total=self.total)
+                self.live = Live(
+                    console=self.console,
+                    get_renderable=self._render,
+                    refresh_per_second=4,
+                    redirect_stdout=False,
+                )
+                self.live.start(refresh=True)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.live is not None:
+            self.live.stop()
+
+    def _details(self) -> str:
+        mapped = self.counts["candidate"]
+        unresolved = self.counts["unresolved"]
+        ambiguous = self.counts["ambiguous"]
+        failed = self.counts["failed"]
+        remaining = self.total - self.processed
+        elapsed = max(0, monotonic() - self.started_at)
+        eta = (
+            str(timedelta(seconds=int(elapsed * remaining / self.processed)))
+            if self.processed
+            else "--:--"
+        )
+        return (
+            f"Mapped: {mapped} | Unresolved: {unresolved} | Ambiguous: {ambiguous} | Failed: {failed}\n"
+            f"Unmapped: {unresolved + ambiguous + failed} | Cached: {self.cached} | Remaining: {remaining}\n"
+            f"Elapsed: {timedelta(seconds=int(elapsed))} | ETA: {eta}"
+        )
+
+    def _render(self):
+        return Group(
+            Text("D2 Screening PyPI Packages"),
+            self.bar.get_renderable(),
+            Text(self._details()),
+        )
+
+    def advance(self, row: dict, *, is_cached: bool) -> None:
+        status = row["screening_status"]
+        self.counts[status] = self.counts.get(status, 0) + 1
+        self.processed += 1
+        self.cached += int(is_cached)
+        if not self.enabled:
+            return
+        if self.live is not None:
+            self.bar.update(self.task, completed=self.processed)
+        elif self.processed % 25 == 0 or self.processed == self.total:
+            self.console.print(
+                f"[D2] {self.processed}/{self.total} ({self.processed / self.total * 100:.1f}%) "
+                + self._details().replace("\n", " | "),
+                markup=False,
+                highlight=False,
+                soft_wrap=True,
+            )
 
 
 def screen_drive(
@@ -184,8 +558,10 @@ def screen_drive(
     data_root: Path | None = None,
     dry_run: bool = False,
     client=None,
+    no_progress: bool = False,
 ) -> dict:
     """Screen a mounted D1 run and publish all seven assignments without a Registry."""
+    started_at = monotonic()
     run_dir = checked_mount_path(run_dir)
     run_id = uid(run_dir.name)
     require(
@@ -201,11 +577,21 @@ def screen_drive(
         discovery_csv_sha256=fingerprint(safe_path(run_dir, "package_candidates.csv"))[0],
     )
     destination = safe_path(drive_root, f"screening/runs/{run_id}")
+    if not dry_run:
+        recover_pending_mapping(drive_root)
+    snapshot = read_cumulative_mapping(drive_root)
     if (destination / "READY.json").exists():
         result = drive_screening_summary(drive_root, run_id, reused=True)
-        if not dry_run:
-            update_latest_drive_mapping(drive_root)
-        return dict(result, dry_run=dry_run)
+        master = merge_cumulative_mapping(drive_root, run_id, snapshot=snapshot, dry_run=dry_run)
+        return dict(result, dry_run=dry_run, master=master)
+    duplicates = sorted({row["package_id"] for row in packages} & snapshot[1].keys())
+    require(
+        not duplicates,
+        "screening_packages_already_screened:"
+        + str(len(duplicates))
+        + ":resample_D1:examples="
+        + ",".join(key[:120] for key in duplicates[:5]),
+    )
     if dry_run:
         return dict(
             status="planned", dry_run=True, sampling_run_id=run_id, package_count=len(packages)
@@ -218,12 +604,18 @@ def screen_drive(
                 safe_path(run_dir, name), safe_path(stage, f"discovery/submissions/{run_id}/{name}")
             )
         mapping, evidence = [], []
-        with HTTPClient(timeout=30, max_retries=3, max_backoff_seconds=30) as http:
+        with (
+            HTTPClient(timeout=30, max_retries=3, max_backoff_seconds=30) as http,
+            _ScreeningProgress(
+                len(packages), enabled=not no_progress, started_at=started_at
+            ) as progress,
+        ):
             pypi = client or PyPIClient(http_client=http)
             for package in packages:
                 key = package["package_id"]
                 checkpoint = safe_path(stage, f"results/{digest(key.encode('utf-8'))}.json")
-                if checkpoint.exists():
+                is_cached = checkpoint.exists()
+                if is_cached:
                     saved = read_json(checkpoint)
                     require(
                         saved["source_hashes"] == source_hashes
@@ -282,6 +674,7 @@ def screen_drive(
                 mapping.append(saved["row"])
                 if saved["evidence"] is not None:
                     evidence.append(saved["evidence"])
+                progress.advance(saved["row"], is_cached=is_cached)
         assigned = allocate_drive_assignments(mapping)
         write_drive_table(safe_path(output, "mapping.csv"), MAPPING_FIELDS, mapping)
         atomic_bytes(
@@ -323,8 +716,7 @@ def screen_drive(
     verify_drive_screening(drive_root, run_id, marker=local_marker)
     copy_verified(safe_path(output, "READY.json"), safe_path(destination, "READY.json"))
     result = drive_screening_summary(drive_root, run_id, reused=False)
-    update_latest_drive_mapping(drive_root)
-    return result
+    return dict(result, master=merge_cumulative_mapping(drive_root, run_id, snapshot=snapshot))
 
 
 def import_discovery(root, *, dry_run=False, registry=None, remote="reposeer:"):
@@ -1213,6 +1605,12 @@ def main():
     sub.add_argument("--run-dir", type=Path, required=True)
     sub.add_argument("--data-root", type=Path)
     sub.add_argument("--dry-run", action="store_true")
+    sub.add_argument("--no-progress", action="store_true", help="Suppress D2 progress on stderr")
+    sub = commands.add_parser(
+        "bootstrap-mapping", help="Initialize the cumulative mapping from verified history"
+    )
+    sub.add_argument("--drive-root", type=Path, required=True)
+    sub.add_argument("--dry-run", action="store_true")
     sub = commands.add_parser("screen-local")
     sub.add_argument("--assignment", type=Path, required=True)
     sub.add_argument("--out-dir", type=Path, required=True)
@@ -1234,11 +1632,18 @@ def main():
     group.add_argument("--dry-run", action="store_true")
     sub.add_argument("--pending-dir", type=Path, default=Path("data/coordination"))
     for name, sub in commands.choices.items():
-        if name != "screen-drive":
+        if name not in {"screen-drive", "bootstrap-mapping"}:
             sub.add_argument("--remote", default=argparse.SUPPRESS)
     args = cli.parse_args()
     if args.command == "screen-drive":
-        return screen_drive(args.run_dir, data_root=args.data_root, dry_run=args.dry_run)
+        return screen_drive(
+            args.run_dir,
+            data_root=args.data_root,
+            dry_run=args.dry_run,
+            no_progress=args.no_progress,
+        )
+    if args.command == "bootstrap-mapping":
+        return bootstrap_mapping(args.drive_root, dry_run=args.dry_run)
     registry = Registry()
     if args.command in {"import-discovery", "import-screening"}:
         function = import_discovery if args.command == "import-discovery" else import_screening
