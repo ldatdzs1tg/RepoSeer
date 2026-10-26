@@ -582,10 +582,20 @@ def verify_drive_screening(
         )
     source = read_drive_csv(safe_path(origin, "package_candidates.csv"), CSV_FIELDS)
     mapping = read_drive_csv(safe_path(base, "mapping.csv"), MAPPING_FIELDS)
+    source_ids = [row["package_id"] for row in source]
+    skipped = marker.get("skipped_existing_package_ids", [])
+    require(isinstance(skipped, list), "invalid_skipped_existing_package_ids")
+    skipped_ids = {subject(key) for key in skipped}
     require(
-        [r["package_id"] for r in source] == [r["package_id"] for r in mapping]
-        and len(mapping) == marker["package_count"]
-        and mapping,
+        len(skipped_ids) == len(skipped)
+        and skipped == [key for key in source_ids if key in skipped_ids],
+        "skipped_existing_package_ids_mismatch",
+    )
+    require(
+        source_ids
+        and [key for key in source_ids if key not in skipped_ids]
+        == [row["package_id"] for row in mapping]
+        and len(mapping) == marker["package_count"],
         "mapping_package_mismatch",
     )
     evidence = {}

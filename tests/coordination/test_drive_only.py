@@ -451,6 +451,9 @@ def test_screen_drive_cli_progress_modes_preserve_json(flag, tmp_path, capsys, m
             "sampling_run_id",
             "reused",
             "package_count",
+            "input_package_count",
+            "skipped_existing_count",
+            "skipped_existing_examples",
             "candidate",
             "unresolved",
             "ambiguous",
@@ -566,16 +569,61 @@ def test_fresh_bootstrap_cli_and_missing_master_fail_closed(tmp_path, monkeypatc
     assert not client.calls and not (source / "assignments").exists()
 
 
-def test_d2_rejects_overlap_before_api_and_retains_same_run_conflicts(tmp_path):
-    root, run, run_id = discovery(tmp_path, ["old", "network", "unresolved"])
+def test_d2_skips_overlap_and_retains_same_run_conflicts(tmp_path, monkeypatch):
+    root, run, run_id = discovery(tmp_path, ["old"])
     d.screen_drive(run, data_root=tmp_path / "s", client=PyPI())
-    _, duplicate, duplicate_id = discovery(tmp_path, ["network", "unresolved", "new"])
+    original_row = sm.read_cumulative_mapping(root)[1]["pypi:old"]
+    _, mixed, mixed_id = discovery(tmp_path, ["old", "new", "other"])
+    source_ids = [row["package_id"] for row in d.discovery_bundle(mixed)[1]]
+    expected = [key for key in source_ids if key != "pypi:old"]
+    inputs = c.files(mixed)
     before = c.files(root)
     client = PyPI()
-    with pytest.raises(c.CoordinationError, match="already_screened:2:resample_D1"):
-        d.screen_drive(duplicate, data_root=tmp_path / "other", client=client)
-    assert not client.calls and c.files(root) == before
-    assert not (root / f"assignments/C1/{duplicate_id}.csv").exists()
+    monkeypatch.setattr(
+        sys, "argv", ["dispatcher.py", "screen-drive", "--run-dir", str(mixed), "--dry-run"]
+    )
+    plan = d.main()
+    assert plan == dict(
+        status="planned",
+        dry_run=True,
+        sampling_run_id=mixed_id,
+        package_count=3,
+        to_screen=2,
+        skipped_existing_count=1,
+        skipped_existing_examples=["pypi:old"],
+    )
+    assert c.files(root) == before and not client.calls
+    totals = []
+    original_progress = d._ScreeningProgress
+
+    def progress(total, **kwargs):
+        totals.append(total)
+        return original_progress(total, **kwargs)
+
+    monkeypatch.setattr(d, "_ScreeningProgress", progress)
+    result = d.screen_drive(mixed, data_root=tmp_path / "s", client=client)
+    assert client.calls == [key[5:] for key in expected] and totals == [2]
+    assert result["package_count"] == 2 and result["input_package_count"] == 3
+    assert result["skipped_existing_count"] == 1
+    assert result["skipped_existing_examples"] == ["pypi:old"]
+    marker, mapping, assigned = c.verify_drive_screening(root, mixed_id)
+    assert marker["skipped_existing_package_ids"] == ["pypi:old"]
+    assert [row["package_id"] for row in mapping] == expected
+    assert {row["package_id"] for rows in assigned.values() for row in rows} == set(expected)
+    evidence = root / f"screening/runs/{mixed_id}/pypi_evidence.jsonl"
+    assert {
+        json.loads(line)["package_id"] for line in evidence.read_text(encoding="utf-8").splitlines()
+    } == set(expected)
+    checkpoints = tmp_path / "s" / mixed_id / "results"
+    assert {path.stem for path in checkpoints.glob("*.json")} == {
+        c.digest(key.encode()) for key in expected
+    }
+    assert c.files(mixed) == inputs
+    assert sm.read_cumulative_mapping(root)[1]["pypi:old"] == original_row
+    before = c.files(root)
+    reused = d.screen_drive(mixed, data_root=tmp_path / "s", client=client)
+    assert reused["reused"] and reused["skipped_existing_count"] == 1
+    assert c.files(root) == before and len(client.calls) == 2
     meta, rows = sm.read_cumulative_mapping(root)
     rows["pypi:old"]["reason_code"] = "changed"
     stage = tmp_path / "changed"
@@ -586,7 +634,92 @@ def test_d2_rejects_overlap_before_api_and_retains_same_run_conflicts(tmp_path):
     before = c.files(root)
     with pytest.raises(c.CoordinationError, match="master_same_run_conflict"):
         d.screen_drive(run, data_root=tmp_path / "s", client=client)
+    assert len(client.calls) == 2 and c.files(root) == before
+
+
+def test_d2_all_duplicate_run_publishes_empty_results_without_clients(tmp_path, monkeypatch):
+    names = ["old", "network", "unresolved", "ambiguous", "other", "extra"]
+    root, first, _ = discovery(tmp_path, names)
+    d.screen_drive(first, data_root=tmp_path / "s", client=PyPI())
+    assert {row["screening_status"] for row in sm.read_cumulative_mapping(root)[1].values()} == {
+        "candidate",
+        "failed",
+        "unresolved",
+        "ambiguous",
+    }
+    _, run, run_id = discovery(tmp_path, names)
+    skipped = [row["package_id"] for row in d.discovery_bundle(run)[1]]
+    master_paths = [root / "screening" / name for name in ("mapping.csv", "mapping.meta.json")]
+    master_before = [(path.read_bytes(), path.stat().st_mtime_ns) for path in master_paths]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("All-duplicate runs must not initialize clients or progress")
+
+    monkeypatch.setattr(d, "HTTPClient", forbidden)
+    monkeypatch.setattr(d, "_ScreeningProgress", forbidden)
+    before = c.files(root)
+    plan = d.screen_drive(run, data_root=tmp_path / "s", dry_run=True)
+    assert plan["to_screen"] == 0 and plan["package_count"] == len(names)
+    assert plan["skipped_existing_count"] == len(names)
+    assert plan["skipped_existing_examples"] == skipped[:5]
+    assert c.files(root) == before
+    result = d.screen_drive(run, data_root=tmp_path / "s")
+    assert result["package_count"] == 0 and result["input_package_count"] == len(names)
+    assert result["skipped_existing_count"] == len(names)
+    assert result["skipped_existing_examples"] == skipped[:5]
+    marker, mapping, assigned = c.verify_drive_screening(root, run_id)
+    assert mapping == [] and all(rows == [] for rows in assigned.values())
+    assert marker["skipped_existing_package_ids"] == skipped
+    assert marker["schema_version"] == 1
+    output = root / f"screening/runs/{run_id}"
+    assert (output / "mapping.csv").read_bytes() == (",".join(c.MAPPING_FIELDS) + "\n").encode()
+    assert (output / "pypi_evidence.jsonl").read_bytes() == b""
+    for worker in c.DRIVE_WORKERS:
+        assert (root / f"assignments/{worker}/{run_id}.csv").read_bytes() == (
+            ",".join(c.ASSIGNMENT_FIELDS) + "\n"
+        ).encode()
+    assert not (tmp_path / "s" / run_id / "results").exists()
+    assert [(path.read_bytes(), path.stat().st_mtime_ns) for path in master_paths] == master_before
+    before = c.files(root)
+    assert d.screen_drive(run, data_root=tmp_path / "s")["reused"]
+    assert c.files(root) == before
+    for invalid in (
+        None,
+        "pypi:old",
+        [skipped[0]] * 2,
+        ["pypi:unknown"],
+        list(reversed(skipped)),
+        ["pypi:OLD"],
+        [],
+    ):
+        with pytest.raises(c.CoordinationError):
+            c.verify_drive_screening(
+                root, run_id, marker=dict(marker, skipped_existing_package_ids=invalid)
+            )
+
+
+def test_d2_legacy_ready_and_new_assignments_remain_compatible(tmp_path):
+    root, first, first_id = discovery(tmp_path, ["old"])
+    d.screen_drive(first, data_root=tmp_path / "s", client=PyPI())
+    ready = root / f"screening/runs/{first_id}/READY.json"
+    legacy = c.read_json(ready)
+    legacy.pop("skipped_existing_package_ids")
+    c.write_json(ready, legacy, immutable=False)  # Simulate a published pre-skip run.
+    assert len(c.verify_drive_screening(root, first_id)[1]) == 1
+    client = PyPI()
+    before = c.files(root)
+    reused = d.screen_drive(first, data_root=tmp_path / "s", client=client)
+    assert reused["reused"] and reused["skipped_existing_count"] == 0
+    assert reused["input_package_count"] == 1
     assert not client.calls and c.files(root) == before
+    _, run, run_id = discovery(tmp_path, ["old", "fresh"])
+    d.screen_drive(run, data_root=tmp_path / "s", client=client)
+    assert client.calls == ["fresh"]
+    result = w.crawl_drive(
+        root / f"assignments/C1/{run_id}.csv", data_root=tmp_path / "w", dry_run=True
+    )
+    assert result["packages"] == result["parts"] == 1
+    assert not (tmp_path / "w").exists()
 
 
 @pytest.mark.parametrize("phase", ["mapping.csv", "mapping.meta.json", "verification"])

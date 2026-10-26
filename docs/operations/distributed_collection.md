@@ -77,13 +77,19 @@ uv run --frozen python tools/coordination/dispatcher.py screen-drive --run-dir "
 ```
 
 Replace the example path with your own mounted path. D2 validates the original D1
-CSV hash/schema/order and screens every package through the existing PyPI client
+CSV hash/schema/order and screens new packages through the existing PyPI client
 and Source/Repository/Code mapping rule. Results remain `candidate`, `unresolved`,
 `ambiguous` or `failed`; discovering a URL does not establish a verified mapping.
-All packages remain in the immutable per-run mapping. Only candidates are assigned.
-Before any PyPI request or assignment publication, D2 rejects a new run containing
-packages already in the master; resample with D1's `--drive-root`. A completed run
-is verified and reused, so retrying an interrupted master merge makes no new requests.
+D2 automatically skips packages already in the master, including failed, unresolved
+and ambiguous results, while preserving D1 order and original inputs. Only new
+packages enter the per-run mapping/evidence and candidate assignments; progress counts
+only these packages. Dry-run reports `package_count` (input), `to_screen`,
+`skipped_existing_count` and up to five `skipped_existing_examples`. Completed results
+keep `package_count` as screened rows and add `input_package_count` and the skip fields.
+READY records `skipped_existing_package_ids`; old READY files default to no skips.
+A fully duplicate run publishes empty mapping/evidence and seven header-only assignments,
+without PyPI requests or a master rewrite. Published runs are verified and reused,
+so retries preserve their recorded skip list without re-screening.
 
 D2 automatically shows a live progress bar on stderr with processed/total, percentage,
 elapsed time and estimated time remaining. Mapped counts repository candidates;

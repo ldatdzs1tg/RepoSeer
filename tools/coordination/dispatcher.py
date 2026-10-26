@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+from contextlib import nullcontext
 from datetime import timedelta
 from pathlib import Path
 from time import monotonic
@@ -151,12 +152,16 @@ def write_drive_table(path: Path, fields: tuple[str, ...], rows: list[dict]) -> 
 
 
 def drive_screening_summary(root: Path, run_id: str, *, reused: bool) -> dict:
-    _, mapping, assigned = verify_drive_screening(root, run_id)
+    marker, mapping, assigned = verify_drive_screening(root, run_id)
+    skipped = marker.get("skipped_existing_package_ids", [])
     return dict(
         status="completed",
         sampling_run_id=run_id,
         reused=reused,
         package_count=len(mapping),
+        input_package_count=len(mapping) + len(skipped),
+        skipped_existing_count=len(skipped),
+        skipped_existing_examples=skipped[:5],
         **{
             status: sum(row["screening_status"] == status for row in mapping)
             for status in ("candidate", "unresolved", "ambiguous", "failed")
@@ -584,17 +589,18 @@ def screen_drive(
         result = drive_screening_summary(drive_root, run_id, reused=True)
         master = merge_cumulative_mapping(drive_root, run_id, snapshot=snapshot, dry_run=dry_run)
         return dict(result, dry_run=dry_run, master=master)
-    duplicates = sorted({row["package_id"] for row in packages} & snapshot[1].keys())
-    require(
-        not duplicates,
-        "screening_packages_already_screened:"
-        + str(len(duplicates))
-        + ":resample_D1:examples="
-        + ",".join(key[:120] for key in duplicates[:5]),
-    )
+    existing_ids = set(snapshot[1])
+    skipped_ids = [row["package_id"] for row in packages if row["package_id"] in existing_ids]
+    new_packages = [row for row in packages if row["package_id"] not in existing_ids]
     if dry_run:
         return dict(
-            status="planned", dry_run=True, sampling_run_id=run_id, package_count=len(packages)
+            status="planned",
+            dry_run=True,
+            sampling_run_id=run_id,
+            package_count=len(packages),
+            to_screen=len(new_packages),
+            skipped_existing_count=len(skipped_ids),
+            skipped_existing_examples=skipped_ids[:5],
         )
     stage = safe_path(local_drive_workspace("screening", data_root, drive_root), run_id)
     output = safe_path(stage, f"screening/runs/{run_id}")
@@ -605,13 +611,21 @@ def screen_drive(
             )
         mapping, evidence = [], []
         with (
-            HTTPClient(timeout=30, max_retries=3, max_backoff_seconds=30) as http,
-            _ScreeningProgress(
-                len(packages), enabled=not no_progress, started_at=started_at
+            (
+                HTTPClient(timeout=30, max_retries=3, max_backoff_seconds=30)
+                if new_packages
+                else nullcontext()
+            ) as http,
+            (
+                _ScreeningProgress(
+                    len(new_packages), enabled=not no_progress, started_at=started_at
+                )
+                if new_packages
+                else nullcontext()
             ) as progress,
         ):
-            pypi = client or PyPIClient(http_client=http)
-            for package in packages:
+            pypi = (client or PyPIClient(http_client=http)) if new_packages else None
+            for package in new_packages:
                 key = package["package_id"]
                 checkpoint = safe_path(stage, f"results/{digest(key.encode('utf-8'))}.json")
                 is_cached = checkpoint.exists()
@@ -697,6 +711,7 @@ def screen_drive(
                     for worker in DRIVE_WORKERS
                 },
                 package_count=len(mapping),
+                skipped_existing_package_ids=skipped_ids,
                 assigned_package_count=sum(map(len, assigned.values())),
                 generated_at_utc=format_utc_timestamp(now()),
                 **source_hashes,
