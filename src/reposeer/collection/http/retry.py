@@ -34,11 +34,7 @@ def is_retryable_exception(exc: BaseException) -> bool:
         )
     if isinstance(
         exc,
-        (
-            httpx.TimeoutException,
-            httpx.NetworkError,
-            httpx.RemoteProtocolError,
-        ),
+        httpx.TimeoutException | httpx.NetworkError | httpx.RemoteProtocolError,
     ):
         return True
     return False

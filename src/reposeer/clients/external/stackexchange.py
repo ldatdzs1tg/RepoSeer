@@ -115,7 +115,7 @@ class StackExchangeClient(DiscoveryProvider):
 
                 creation_date = item.get("creation_date")
                 pub_date: datetime | None = None
-                if isinstance(creation_date, (int, float)):
+                if isinstance(creation_date, int | float):
                     pub_date = datetime.fromtimestamp(creation_date, tz=UTC)
 
                 score = item.get("score")

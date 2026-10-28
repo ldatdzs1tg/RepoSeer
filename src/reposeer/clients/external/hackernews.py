@@ -106,7 +106,7 @@ class HackerNewsClient(DiscoveryProvider):
                 pub_date: datetime | None = None
                 created_at_i = hit.get("created_at_i")
                 created_at = hit.get("created_at")
-                if isinstance(created_at_i, (int, float)):
+                if isinstance(created_at_i, int | float):
                     pub_date = datetime.fromtimestamp(created_at_i, tz=UTC)
                 elif isinstance(created_at, str):
                     try:
