@@ -161,6 +161,13 @@ def test_rejects_inconsistent_prediction_context(path, value):
 @pytest.mark.parametrize("path,value", [
     ("core_prediction", None), ("core_prediction.model.feature_set", "E1"),
     ("coverage.1.source_coverage", "partial"),
+    ("coverage.1.historical_validity", "unverified"),
+    ("coverage.1.window", None),
+    ("coverage.1.window.end_at", "2026-10-02T00:00:00.000Z"),
+    ("sources.1.query_set_hash", None),
+    ("core_prediction.feature_evidence_ids", ["evidence:external"]),
+    ("core_prediction.feature_evidence_ids", ["evidence:agent"]),
+    ("coverage.0.stage", "external"),
     ("coverage.2.processed_documents", 0),
     ("coverage.2.processed_documents", 2),
     ("evidence.0.citations.0.source_id", "orphan"),
@@ -180,10 +187,80 @@ def test_enhanced_evidence_coverage_and_impact_invariants(path, value):
         validate_final_report(data)
 
 
+@pytest.mark.parametrize("stage", ["external", "agent"])
+def test_e0_rejects_sources_without_core_coverage_even_without_evidence(stage):
+    data = example()
+    enhanced = example("final_report_enhanced")
+    data["sources"].append(enhanced["sources"][1])
+    data["coverage"].append(next(c for c in enhanced["coverage"] if c["stage"] == stage))
+    data["prediction"]["feature_source_ids"].append("source:article")
+    with pytest.raises(ValidationError, match="coverage in an allowed stage"):
+        validate_final_report(data)
+
+
+@pytest.mark.parametrize("status", ["complete", "partial"])
+def test_e0_accepts_core_coverage_when_source_also_has_external_coverage(status):
+    data = example()
+    data["coverage"][0].update(
+        status=status, missing_reason="some_core_fields_missing" if status == "partial" else None
+    )
+    data["coverage"].append({**data["coverage"][0], "coverage_id": "also-external",
+                             "stage": "external"})
+    assert validate_final_report(data).mode_used == "CORE"
+
+
+@pytest.mark.parametrize("status", ["not_requested", "unavailable", "failed"])
+def test_enhanced_requires_external_insights_even_without_feature_evidence(status):
+    data = example("final_report_enhanced")
+    data["evidence"] = []
+    data["prediction"]["feature_evidence_ids"] = []
+    data["external_insights_status"] = status
+    data["external_insights_reason"] = None if status == "not_requested" else "discovery_failed"
+    with pytest.raises(ValidationError, match="complete or partial external insights"):
+        validate_final_report(data)
+
+
+def test_partial_external_coverage_cannot_supply_enhanced_inputs():
+    data = example("final_report_enhanced")
+    data["coverage"][1].update(status="partial", missing_reason="incomplete_query_window")
+    with pytest.raises(ValidationError, match="complete as-of external census coverage"):
+        validate_final_report(data)
+
+
+@pytest.mark.parametrize("feature_set", ["E1", "E2"])
+def test_partial_insights_can_accompany_complete_enhanced_inputs(feature_set):
+    data = example("final_report_enhanced")
+    data["external_insights_status"] = "partial"
+    data["external_insights_reason"] = "optional_insights_missing"
+    data["prediction"]["model"]["feature_set"] = feature_set
+    if feature_set == "E1":
+        data["prediction"]["feature_evidence_ids"] = ["evidence:external"]
+    assert validate_final_report(data).mode_used == "ENHANCED"
+
+
+def test_external_coverage_keeps_query_sets_separate():
+    data = example("final_report_enhanced")
+    other = {**data["sources"][1], "source_id": "source:other"}
+    data["sources"].append(other)
+    data["prediction"]["feature_source_ids"].append(other["source_id"])
+    data["coverage"][1]["source_ids"].append(other["source_id"])
+    validate_final_report(data)
+    other["query_set_hash"] = "d" * 64
+    with pytest.raises(ValidationError, match="one non-null query-set hash"):
+        validate_final_report(data)
+    separate = {**data["coverage"][1], "coverage_id": "other-query-set",
+                "source_ids": [other["source_id"]]}
+    data["coverage"][1]["source_ids"].remove(other["source_id"])
+    data["coverage"].append(separate)
+    validate_final_report(data)
+
+
 def test_report_only_evidence_can_be_late_but_never_become_a_feature():
     data = example("final_report")
     late = "2026-10-01T00:05:00.000Z"
-    data["sources"][1].update(valid_at=late, retrieved_at=late, available_at=late)
+    data["sources"][1].update(
+        valid_at=late, retrieved_at=late, available_at=late, query_set_hash=None
+    )
     for coverage in data["coverage"][1:]:
         coverage["historical_validity"] = "unverified"
     assert validate_final_report(data).prediction.probability == 0.24

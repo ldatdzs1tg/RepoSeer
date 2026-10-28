@@ -441,18 +441,32 @@ class PredictedReport(ReportContext):
                 raise ValueError("ENHANCED requires an explicitly requested E1/E2 model")
             if self.core_prediction is None or self.core_prediction.model.feature_set != "E0":
                 raise ValueError("ENHANCED must retain its independent CORE result")
+            if self.external_insights_status not in {"complete", "partial"}:
+                raise ValueError("ENHANCED requires complete or partial external insights")
             core_sources = set(self.core_prediction.feature_source_ids)
             selected_sources = set(self.prediction.feature_source_ids)
             external_sources = selected_sources - core_sources
             if not core_sources <= selected_sources or not external_sources:
                 raise ValueError("ENHANCED requires CORE inputs plus external source lineage")
-            complete_external = {
-                source_id for c in self.coverage for source_id in c.source_ids
-                if c.stage == "external" and c.status == "complete"
-                and c.source_coverage == "complete" and c.historical_validity == "verified"
-            }
+            sources_by_id = {source.source_id: source for source in self.sources}
+            complete_external = set()
+            for coverage in self.coverage:
+                if not (
+                    coverage.stage == "external" and coverage.status == "complete"
+                    and coverage.source_coverage == "complete"
+                    and coverage.historical_validity == "verified"
+                    and coverage.window is not None
+                    and external_sources.intersection(coverage.source_ids)
+                ):
+                    continue
+                query_hashes = {
+                    sources_by_id[source_id].query_set_hash for source_id in coverage.source_ids
+                }
+                if None in query_hashes or len(query_hashes) != 1:
+                    raise ValueError("ENHANCED external coverage requires one non-null query-set hash")
+                complete_external.update(coverage.source_ids)
             if not external_sources <= complete_external:
-                raise ValueError("ENHANCED requires complete as-of external census coverage")
+                raise ValueError("ENHANCED requires complete as-of external census coverage with a window")
             if self.prediction.model.feature_set == "E2" and not any(
                 c.stage == "agent" and c.status == "complete" and c.historical_validity == "verified"
                 for c in self.coverage
@@ -485,15 +499,18 @@ class PredictedReport(ReportContext):
                 raise ValueError("model artifact cannot be frozen after report generation")
             if self.backtest and prediction.model.frozen_at >= self.backtest.test_window.start_at:
                 raise ValueError("prospective backtests require models frozen before the test period")
+            allowed_stages = {"core"} if prediction.model.feature_set == "E0" else {
+                "core", "external", "agent"
+            }
             covered = {
                 source_id for item in self.coverage
-                if item.stage in {"core", "external", "agent"}
+                if item.stage in allowed_stages
                 and item.status in {"complete", "partial"}
                 and item.historical_validity == "verified"
                 for source_id in item.source_ids
             }
             if not set(prediction.feature_source_ids) <= covered:
-                raise ValueError("model inputs require explicit as-of coverage")
+                raise ValueError("model inputs require explicit as-of coverage in an allowed stage")
         return self
 
 

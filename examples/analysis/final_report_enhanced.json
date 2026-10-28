@@ -60,7 +60,10 @@
       "status": "complete",
       "source_coverage": "complete",
       "historical_validity": "verified",
-      "window": null,
+      "window": {
+        "start_at": "2026-09-01T00:00:00.000Z",
+        "end_at": "2026-10-01T00:00:00.000Z"
+      },
       "records_observed": 1,
       "eligible_documents": null,
       "processed_documents": null,
@@ -75,7 +78,10 @@
       "status": "complete",
       "source_coverage": "complete",
       "historical_validity": "verified",
-      "window": null,
+      "window": {
+        "start_at": "2026-09-01T00:00:00.000Z",
+        "end_at": "2026-10-01T00:00:00.000Z"
+      },
       "records_observed": 1,
       "eligible_documents": 1,
       "processed_documents": 1,

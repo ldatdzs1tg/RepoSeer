@@ -93,7 +93,11 @@ Chỉ `in_domain` được trả prediction. Validator không thay thế kiểm 
 
 ## Mode, fallback và precedence
 
-- CORE chọn model E0 trong `prediction`; `core_prediction=null`.
+- CORE chọn model E0 trong `prediction`; `core_prediction=null`. Với mọi E0, kể cả
+  trong `core_prediction`, từng `feature_source_ids` phải có coverage `stage="core"`,
+  `status="complete"/"partial"`, `historical_validity="verified"` và qua temporal gate.
+  Coverage external/agent không thay thế core coverage; cùng source có coverage ở
+  stage khác vẫn hợp lệ nếu có core coverage đáp ứng các điều kiện này.
 - ENHANCED chọn E1/E2 trong `prediction`, đồng thời giữ kết quả E0 độc lập ở
   `core_prediction`. Không trộn hoặc trung bình hai xác suất.
 - Yêu cầu ENHANCED nhưng không đạt gate: `mode_used="CORE"`,
@@ -182,9 +186,28 @@ Mỗi `AnalysisCoverage` gắn stage `core/external/agent/impact` và nguồn/wi
 Unavailable/not-requested không có count 0; counts phải null. Agent complete yêu cầu
 mọi eligible document đã được xử lý. Prediction sources phải có coverage as-of rõ
 ràng; partial core coverage chỉ được model dùng khi applicability/policy cho phép.
-ENHANCED cần complete external census và E2 cần complete agent processing; nếu không
-đạt thì producer phải chọn CORE fallback hoặc no-score. Validator không tự sửa dữ
-liệu hoặc tự tạo score để che lỗi.
+ENHANCED giữ toàn bộ CORE source inputs và phải bổ sung ít nhất một external source
+(`prediction.feature_source_ids` trừ `core_prediction.feature_source_ids`). Mỗi source
+bổ sung cần `query_set_hash` SHA-256 không null và ít nhất một coverage `stage="external"`,
+`status="complete"`, `source_coverage="complete"`, `historical_validity="verified"`, có
+`window` cụ thể kết thúc không sau cutoff. Mọi source trong cùng coverage dùng để chứng
+minh input phải có cùng query-set hash không null; query-set khác nhau dùng coverage
+record riêng, không bắt buộc các record độc lập có cùng hash. `window=null` hay count 0
+không thay thế bằng chứng đầy đủ của source–query–window. E2 vẫn cần complete agent
+processing và provenance as-of cho evidence được dùng.
+
+Khi `mode_used="ENHANCED"`, `external_insights_status` chỉ được là `complete` hoặc
+`partial`. `partial` có thể phản ánh insights tùy chọn bị thiếu, nhưng mọi model input
+vẫn phải qua coverage gates. External report-only insights trong CORE/fallback không
+bắt buộc có complete query/window coverage. Nếu không đạt gate, producer phải chọn
+CORE fallback hoặc no-score; validator chỉ từ chối report không nhất quán, không tự
+đổi mode hoặc tạo/điều chỉnh probability.
+
+T-021 chỉ kiểm tra sự hiện diện và tính nhất quán nội bộ của source/query/window
+lineage. Hash tồn tại không chứng minh tương thích với training pipeline: feature
+builder/model preflight ở T-023/T-025/T-027 phải đối chiếu query-set/window policy với
+frozen Model B registry. Việc ràng buộc từng specialist agent với tập signal được phép
+thuộc T-024; `AnalysisEvidence` vẫn là generic contract dùng chung.
 
 ## Dependency impact tùy chọn
 

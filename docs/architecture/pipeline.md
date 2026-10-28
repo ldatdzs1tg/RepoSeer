@@ -530,9 +530,9 @@ flowchart TB
   G["D12 independent dependency impact"] --> BUILD
   BUILD --> STATE{"result_status?"}
   STATE -->|predicted| RISK["Probability + 12m horizon + model-specific SHAP"]
-  STATE -->|already_abandoned| AB["Verified cessation; probability=null"]
-  STATE -->|scheduled_cessation| SC["Official plan, effective date; probability=null"]
-  STATE -->|unresolved / insufficient / failed| ERR["Reason, coverage gap, OOD; probability=null"]
+  STATE -->|already_abandoned| AB["Verified cessation; prediction fields omitted"]
+  STATE -->|scheduled_cessation| SC["Official plan, effective date; prediction fields omitted"]
+  STATE -->|unresolved / insufficient / failed| ERR["Reason, coverage gap, OOD; prediction fields omitted"]
   RISK --> FACT["Evidence-based explanation; score unchanged"]
   FACT --> VALID["Validate status/prediction exclusivity and lineage"]
   AB --> VALID
@@ -558,7 +558,7 @@ flowchart TB
 | Impact | Observed corpus counts and graph semantics, or `unavailable` |
 | Lineage | Source revisions, availability times, query hashes, missing reasons, policy/model versions |
 
-**Invariant:** `prediction` exists only when `result_status=predicted`; all status/error branches return `probability=null`, not `0`. A retrospective score must not be presented as prospective historical accuracy.
+**Invariant:** Only `result_status="predicted"` includes `prediction` and `prediction.probability`. Known-status/no-score branches omit `prediction`, `core_prediction`, and `probability` entirely, including null-valued fields. A retrospective score must not be presented as prospective historical accuracy.
 
 ## D14 — Orchestration, Caching, and Failures
 
