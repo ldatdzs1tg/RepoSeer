@@ -1,0 +1,261 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "final_report",
+  "analysis_run_id": "00000000-0000-4000-8000-000000000010",
+  "package_id": "pypi:synthetic-demo",
+  "mapping": {
+    "repo_id": "github:repository:900000001",
+    "repo_group_id": "github:repository:900000001",
+    "mapping_revision": "synthetic-mapping-1",
+    "scope": "packages/synthetic-demo",
+    "scope_quality": "package_scoped",
+    "valid_from": "2026-10-01T00:00:00.000Z",
+    "valid_to": null,
+    "available_at": "2026-10-01T00:00:00.000Z",
+    "source_ids": [
+      "source:core"
+    ]
+  },
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "generated_at": "2026-10-01T00:10:00.000Z",
+  "purpose": "current_inference",
+  "horizon_months": 12,
+  "horizon_end_at": "2027-10-01T00:00:00.000Z",
+  "mode_requested": "ENHANCED",
+  "mode_used": "ENHANCED",
+  "enhanced_status": "used",
+  "fallback_reason": null,
+  "external_insights_status": "complete",
+  "external_insights_reason": null,
+  "applicability": {
+    "status": "in_domain",
+    "policy_version": "demo-applicability-1",
+    "reasons": [],
+    "limitations": [
+      "Synthetic calibration population; not a real risk estimate."
+    ]
+  },
+  "coverage": [
+    {
+      "coverage_id": "core-metadata",
+      "stage": "core",
+      "source_ids": [
+        "source:core"
+      ],
+      "status": "complete",
+      "source_coverage": "complete",
+      "historical_validity": "verified",
+      "window": null,
+      "records_observed": 1,
+      "eligible_documents": null,
+      "processed_documents": null,
+      "missing_reason": null
+    },
+    {
+      "coverage_id": "external-discovery",
+      "stage": "external",
+      "source_ids": [
+        "source:article"
+      ],
+      "status": "complete",
+      "source_coverage": "complete",
+      "historical_validity": "verified",
+      "window": null,
+      "records_observed": 1,
+      "eligible_documents": null,
+      "processed_documents": null,
+      "missing_reason": null
+    },
+    {
+      "coverage_id": "agent-extraction",
+      "stage": "agent",
+      "source_ids": [
+        "source:article"
+      ],
+      "status": "complete",
+      "source_coverage": "complete",
+      "historical_validity": "verified",
+      "window": null,
+      "records_observed": 1,
+      "eligible_documents": 1,
+      "processed_documents": 1,
+      "missing_reason": null
+    }
+  ],
+  "sources": [
+    {
+      "source_id": "source:core",
+      "source": "pypi_json",
+      "source_url": "https://example.test/synthetic-demo/pypi.json",
+      "source_record_id": "synthetic-demo",
+      "revision": "synthetic-core-v1",
+      "content_sha256": null,
+      "query_set_hash": null,
+      "retrieved_at": "2026-10-01T00:00:00.000Z",
+      "valid_at": "2026-10-01T00:00:00.000Z",
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "temporal_basis": "observation",
+      "raw_record_ids": [
+        "raw:00000000-0000-4000-8000-000000000001"
+      ],
+      "missing_fields": []
+    },
+    {
+      "source_id": "source:article",
+      "source": "web_article",
+      "source_url": "https://example.test/synthetic-demo/tutorial",
+      "source_record_id": null,
+      "revision": "synthetic-text-1",
+      "content_sha256": "383f57299f1ab5a7b26cc11e7264945086dbe91bad1995ad18ae4ce3b82a6568",
+      "query_set_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "retrieved_at": "2026-10-01T00:00:00.000Z",
+      "valid_at": "2026-10-01T00:00:00.000Z",
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "temporal_basis": "observation",
+      "raw_record_ids": [
+        "raw:00000000-0000-4000-8000-000000000002"
+      ],
+      "missing_fields": []
+    },
+    {
+      "source_id": "source:graph",
+      "source": "deps_dev",
+      "source_url": "https://example.test/synthetic-demo/graph",
+      "source_record_id": "synthetic-demo",
+      "revision": "synthetic-corpus-1",
+      "content_sha256": null,
+      "query_set_hash": null,
+      "retrieved_at": "2026-10-01T00:00:00.000Z",
+      "valid_at": "2026-10-01T00:00:00.000Z",
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "temporal_basis": "observation",
+      "raw_record_ids": [
+        "raw:00000000-0000-4000-8000-000000000003"
+      ],
+      "missing_fields": []
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "evidence:external",
+      "package_id": "pypi:synthetic-demo",
+      "origin": "external",
+      "context": "same_function",
+      "signal_type": "functional_demand",
+      "claim": "The retrieved tutorial discusses the package use case.",
+      "event_at": "2026-10-01T00:00:00.000Z",
+      "citations": [
+        {
+          "source_id": "source:article",
+          "quote": "A tutorial describes a use case for synthetic-demo.",
+          "start_offset": 0,
+          "end_offset": 51
+        }
+      ],
+      "use": "feature",
+      "exclusion_reason": null,
+      "uncertainty": "One tutorial does not establish adoption or user counts.",
+      "agent": null
+    },
+    {
+      "evidence_id": "evidence:agent",
+      "package_id": "pypi:synthetic-demo",
+      "origin": "agent",
+      "context": "same_function",
+      "signal_type": "functional_demand",
+      "claim": "The retrieved tutorial discusses the package use case.",
+      "event_at": "2026-10-01T00:00:00.000Z",
+      "citations": [
+        {
+          "source_id": "source:article",
+          "quote": "A tutorial describes a use case for synthetic-demo.",
+          "start_offset": 0,
+          "end_offset": 51
+        }
+      ],
+      "use": "feature",
+      "exclusion_reason": null,
+      "uncertainty": "One tutorial does not establish adoption or user counts.",
+      "agent": {
+        "agent_id": "functional-demand",
+        "agent_version": "demo-agent-1",
+        "model_version": "demo-llm-1",
+        "prompt_version": "demo-prompt-1"
+      }
+    }
+  ],
+  "dependency_impact": {
+    "impact_status": "available",
+    "graph_kind": "observed_potential",
+    "graph_as_of": "2026-10-01T00:00:00.000Z",
+    "corpus_id": "synthetic-corpus-1",
+    "corpus_package_count": 40,
+    "target_version": null,
+    "environment": null,
+    "resolver_version": null,
+    "direct_dependents": 2,
+    "transitive_dependents": 5,
+    "counts_are_lower_bounds": false,
+    "source_ids": [
+      "source:graph"
+    ],
+    "missing_reason": null
+  },
+  "backtest": null,
+  "limitations": [
+    "All identities, sources, evidence and scores are synthetic."
+  ],
+  "result_status": "predicted",
+  "prediction": {
+    "result_status": "predicted",
+    "probability": 0.31,
+    "risk_level": "moderate",
+    "model": {
+      "model_id": "synthetic-model-b",
+      "model_version": "demo-b-1",
+      "artifact_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "feature_set": "E2",
+      "feature_schema_version": "demo-e2-1",
+      "preprocessing_version": "demo-preprocess-1",
+      "calibration_version": "demo-calibration-1",
+      "risk_threshold_version": "demo-thresholds-1",
+      "training_population": "Synthetic packages only; no real model was trained.",
+      "calibration_population": "Synthetic examples only; no validated performance claim.",
+      "trained_through_at": "2025-12-31T23:59:59.999Z",
+      "frozen_at": "2026-09-01T00:00:00.000Z"
+    },
+    "feature_source_ids": [
+      "source:core",
+      "source:article"
+    ],
+    "feature_evidence_ids": [
+      "evidence:external",
+      "evidence:agent"
+    ],
+    "explanation": null
+  },
+  "core_prediction": {
+    "result_status": "predicted",
+    "probability": 0.24,
+    "risk_level": "moderate",
+    "model": {
+      "model_id": "synthetic-model-a",
+      "model_version": "demo-a-1",
+      "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "feature_set": "E0",
+      "feature_schema_version": "demo-core-1",
+      "preprocessing_version": "demo-preprocess-1",
+      "calibration_version": "demo-calibration-1",
+      "risk_threshold_version": "demo-thresholds-1",
+      "training_population": "Synthetic packages only; no real model was trained.",
+      "calibration_population": "Synthetic examples only; no validated performance claim.",
+      "trained_through_at": "2025-12-31T23:59:59.999Z",
+      "frozen_at": "2026-09-01T00:00:00.000Z"
+    },
+    "feature_source_ids": [
+      "source:core"
+    ],
+    "feature_evidence_ids": [],
+    "explanation": null
+  }
+}

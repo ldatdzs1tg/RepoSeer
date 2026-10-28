@@ -1,0 +1,73 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "final_report",
+  "analysis_run_id": "00000000-0000-4000-8000-000000000010",
+  "package_id": "pypi:synthetic-demo",
+  "mapping": null,
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "generated_at": "2026-10-01T00:10:00.000Z",
+  "purpose": "current_inference",
+  "horizon_months": 12,
+  "horizon_end_at": "2027-10-01T00:00:00.000Z",
+  "mode_requested": "CORE",
+  "mode_used": null,
+  "enhanced_status": "not_requested",
+  "fallback_reason": null,
+  "external_insights_status": "not_requested",
+  "external_insights_reason": null,
+  "applicability": {
+    "status": "unknown",
+    "policy_version": "demo-applicability-1",
+    "reasons": [
+      "mapping_unresolved"
+    ],
+    "limitations": [
+      "Synthetic calibration population; not a real risk estimate."
+    ]
+  },
+  "coverage": [
+    {
+      "coverage_id": "core-metadata",
+      "stage": "core",
+      "source_ids": [
+        "source:core"
+      ],
+      "status": "complete",
+      "source_coverage": "complete",
+      "historical_validity": "verified",
+      "window": null,
+      "records_observed": 1,
+      "eligible_documents": null,
+      "processed_documents": null,
+      "missing_reason": null
+    }
+  ],
+  "sources": [
+    {
+      "source_id": "source:core",
+      "source": "pypi_json",
+      "source_url": "https://example.test/synthetic-demo/pypi.json",
+      "source_record_id": "synthetic-demo",
+      "revision": "synthetic-core-v1",
+      "content_sha256": null,
+      "query_set_hash": null,
+      "retrieved_at": "2026-10-01T00:00:00.000Z",
+      "valid_at": "2026-10-01T00:00:00.000Z",
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "temporal_basis": "observation",
+      "raw_record_ids": [
+        "raw:00000000-0000-4000-8000-000000000001"
+      ],
+      "missing_fields": []
+    }
+  ],
+  "evidence": [],
+  "dependency_impact": null,
+  "backtest": null,
+  "limitations": [
+    "All identities, sources, evidence and scores are synthetic."
+  ],
+  "result_status": "mapping_unresolved",
+  "reason_code": "no_verified_package_repository_mapping",
+  "reason": "No verified GitHub repository mapping is available for this package."
+}
