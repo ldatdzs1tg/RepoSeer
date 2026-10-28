@@ -1,0 +1,114 @@
+{
+  "package_id": "pypi:synthetic-demo",
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "generated_at": "2026-10-01T00:10:00.000Z",
+  "documents": [
+    {
+      "article": {
+        "schema_version": "0.1.0",
+        "record_type": "article",
+        "article_id": "article:sha256:d9fdbb48a3fee005b4ad99023ec935efa1d9380768294ca63d6a6de9a6c7a474",
+        "original_url": "https://example.test/synthetic/1",
+        "canonical_url": "https://example.test/synthetic/1",
+        "title": "Synthetic context 1",
+        "article_kind": "announcement",
+        "authors": null,
+        "language_code": "en",
+        "published_at": "2026-09-20T00:00:00.000Z",
+        "published_date": "2026-09-20",
+        "published_precision": "timestamp",
+        "updated_at": null,
+        "content_status": "full",
+        "content_text": "Synthetic demo use case 1.",
+        "content_sha256": "799aa6d572c41282546f0a68d42697e17caebbc0ca8eb7d3cdd98b3f3162eac2",
+        "content_available_at": null,
+        "technology_mentions": [],
+        "repo_ids": [
+          "github:repository:900000001"
+        ],
+        "package_ids": [
+          "pypi:synthetic-demo"
+        ],
+        "provenance": {
+          "source": "web_article",
+          "source_url": "https://example.test/synthetic/1",
+          "retrieved_at": "2026-09-20T00:00:00.000Z",
+          "valid_at": "2026-09-20T00:00:00.000Z",
+          "available_at": null,
+          "temporal_basis": "observation",
+          "raw_record_ids": [
+            "raw:00000000-0000-4000-8000-000000000001"
+          ],
+          "missing_fields": []
+        }
+      },
+      "relevance": {
+        "article_id": "article:sha256:d9fdbb48a3fee005b4ad99023ec935efa1d9380768294ca63d6a6de9a6c7a474",
+        "target_package_id": "pypi:synthetic-demo",
+        "target_repo_id": "github:repository:900000001",
+        "content_sha256": "799aa6d572c41282546f0a68d42697e17caebbc0ca8eb7d3cdd98b3f3162eac2",
+        "context_level": "package_specific",
+        "decision": "relevant",
+        "match_method": "synthetic",
+        "reason_code": "synthetic_verified_link",
+        "evidence_spans": [
+          {
+            "text": "Synthetic demo use case 1.",
+            "start_offset": 0,
+            "end_offset": 26
+          }
+        ],
+        "evidence_urls": [],
+        "link_evidence": [],
+        "raw_record_ids": [
+          "raw:00000000-0000-4000-8000-000000000001"
+        ],
+        "rule_version": "0.1.0-conservative"
+      },
+      "provider": "synthetic",
+      "query_intent": "direct_package",
+      "query_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "origin_id": null,
+      "outcome_disclosure": false
+    }
+  ],
+  "censuses": [
+    {
+      "census_id": "recent",
+      "provider": "synthetic",
+      "context": "direct_package",
+      "query_intent": "direct_package",
+      "window": {
+        "start_at": "2026-09-01T00:00:00.000Z",
+        "end_at": "2026-10-01T00:00:00.000Z"
+      },
+      "source": {
+        "source": "source_archive",
+        "source_url": "https://example.test/census/recent",
+        "retrieved_at": "2026-10-01T00:00:00.000Z",
+        "valid_at": "2026-10-01T00:00:00.000Z",
+        "available_at": "2026-10-01T00:00:00.000Z",
+        "temporal_basis": "observation",
+        "raw_record_ids": [
+          "raw:00000000-0000-4000-8000-000000000099"
+        ],
+        "missing_fields": [],
+        "source_id": "census:recent",
+        "source_record_id": "recent",
+        "revision": "synthetic-v1",
+        "content_sha256": null,
+        "query_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "retrieval_policy_version": "synthetic-1",
+      "filters_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "status": "complete",
+      "source_coverage": "complete",
+      "document_source_ids": [
+        "external:e20c3e6a3eaf93308a3f0cf0fa547eef49b8b739cbd4f1d956fc3419664d1252"
+      ],
+      "missing_reason": null
+    }
+  ],
+  "agent_events": [],
+  "agent_coverage": []
+}
