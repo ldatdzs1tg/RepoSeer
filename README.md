@@ -765,3 +765,16 @@ DB-free screening/crawlers, and verified immutable ingestion. PostgreSQL credent
 stay on one coordinator; workers exchange assignment/READY bundles through rclone.
 See [setup, PowerShell commands, recovery and deployment limits](docs/operations/distributed_collection.md).
 Production migrations, worker activation and scheduling remain explicit operator steps.
+
+## External context analysis (T-025)
+
+Offline `reposeer.analysis.external.analyze_external_context` returns T-021 cited
+context and coverage plus nullable E1 source/query/window counts and verified E2
+agent-event counts. It uses exact T-018 Article/relevance revisions. Current crawler
+observations do not prove historical availability or complete source coverage;
+missing proofs stay report-only/null. No LLM, collection, labels or model scoring
+runs implicitly. See [interfaces, trust boundaries and examples](docs/architecture/external_context.md).
+
+```powershell
+uv run --frozen python -m scripts.analyze_external_context --input examples/external_context/current_capture_request.json
+```

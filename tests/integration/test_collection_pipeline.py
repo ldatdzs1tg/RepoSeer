@@ -7,21 +7,31 @@ from uuid import uuid4
 import httpx
 import polars as pl
 import pytest
+from pydantic import ValidationError
 from tests.integration.test_external_crawl_pipeline import HTML
 from tests.unit.processing.test_normalization import activity_raw, document_raw, repository_raw
 from typer.core import TyperOption
 from typer.main import get_command
 from typer.testing import CliRunner
 
+from reposeer.analysis.external import (
+    ExternalContextRequest,
+    ExternalContextResult,
+    ExternalDocument,
+    analyze_external_context,
+)
 from reposeer.cli.app import app
 from reposeer.clients.github import GitHubClient
 from reposeer.clients.pypi import PyPIClient
 from reposeer.collection.http.client import HTTPClient
 from reposeer.collectors.external.crawler.safety import URLPolicy
 from reposeer.config import settings
+from reposeer.contracts import Article
+from reposeer.contracts.models import Provenance
 from reposeer.pipelines.collection import CollectionPipeline
 from reposeer.pipelines.external import ExternalPipeline
 from reposeer.pipelines.external_crawl import ExternalCrawlPipeline
+from reposeer.processing.relevance import RelevanceAssessment, validate_assessment_evidence
 from reposeer.profiling.report import ProfilingReportGenerator
 from reposeer.services.activity_batch_service import ActivityBatchService
 from reposeer.storage.paths import StoragePaths
@@ -537,3 +547,83 @@ def test_invalid_targets_fail_before_manifest_or_network(tmp_path, targets):
     with pytest.raises(ValueError):
         pipeline.run(targets)
     assert not (tmp_path / "metadata").exists()
+
+
+
+def test_persisted_external_context_handoff_preserves_observation_and_unknown_history(environment):
+    pipeline, paths, _, _, _ = environment
+    collected = pipeline.run(["pypi:flask"])
+    assert collected.status == "complete", read(collected.manifest_path)
+    datasets = {name: pl.read_parquet(paths.processed_dir / name / (name + ".parquet"))
+                for name in ("external_documents", "external_relevance", "external_lineage")}
+    assessment_row = next(row for row in datasets["external_relevance"].iter_rows(named=True)
+                          if row["target_package_id"] == "pypi:flask" and row["decision"] == "relevant")
+    article_row, = [row for row in datasets["external_documents"].iter_rows(named=True)
+                   if all(row[key] == assessment_row[key]
+                          for key in ("article_id", "raw_record_id", "content_sha256"))]
+    lineage_row, = [row for row in datasets["external_lineage"].iter_rows(named=True)
+                   if all(row[key] == article_row[key] for key in ("article_id", "raw_record_id"))]
+
+    def decode_lists(row):
+        return {key[:-5] if key.endswith("_json") else key:
+                json.loads(value) if key.endswith("_json") else value
+                for key, value in row.items()}
+
+    article_data = decode_lists(article_row)
+    raw_id = article_data.pop("raw_record_id")
+    article_data.pop("run_id")
+    provenance = {key: article_data.pop(key) for key in Provenance.model_fields
+                  if key != "raw_record_ids"}
+    provenance["raw_record_ids"] = [raw_id]
+    article = Article.model_validate(dict(
+        article_data, record_type="article", provenance=Provenance.model_validate(provenance)))
+    relevance_data = decode_lists(assessment_row)
+    relevance_data["raw_record_ids"] = [relevance_data.pop("raw_record_id")]
+    relevance = RelevanceAssessment.model_validate(relevance_data)
+    validate_assessment_evidence(relevance, article)
+    metadata = json.loads(lineage_row["metadata_json"])
+    discovery = metadata.get("discovery", {})
+    layers = (metadata, discovery, discovery.get("payload", {}))
+    identity = {key: next((layer[key] for layer in layers if layer.get(key) is not None), None)
+                for key in ("discovery_provider", "query_intent", "query_set_hash")}
+    document = ExternalDocument(
+        article=article, relevance=relevance, provider=identity["discovery_provider"] or "unknown",
+        query_intent=identity["query_intent"] or "unknown", query_set_hash=identity["query_set_hash"])
+    raw = next(record for record in JsonlStorage().read_contract_records(paths.raw_dir / "external/documents.jsonl")
+               if record.raw_record_id == raw_id)
+    assert article.provenance.retrieved_at == raw.retrieved_at == article_row["retrieved_at"]
+    assert article.provenance.valid_at == article_row["valid_at"]
+    assert article.provenance.available_at == article_row["available_at"]
+    assert article.content_available_at == article_row["content_available_at"]
+    assert article.provenance.raw_record_ids == relevance.raw_record_ids == [raw_id]
+    # A pre-capture cutoff does not make the current text historically available.
+    assert article.published_at is not None and article.published_at < article.provenance.retrieved_at
+    req = ExternalContextRequest(
+        package_id=relevance.target_package_id, cutoff_at=article.published_at,
+        generated_at=article.provenance.retrieved_at, documents=[document])
+    result = analyze_external_context(req, verifier=None)
+    assert ExternalContextResult.model_validate(result.model_dump()) == result
+    assert result.sources == [document.source()]
+    assert result.sources[0].raw_record_ids == [raw_id]
+    assert result.sources[0].query_set_hash == identity["query_set_hash"]
+    assert result.e1 == result.e2 == []  # No fabricated query/window or census.
+    assert result.external_insights_status == "partial"
+    assert all(item.historical_validity == "unverified" and item.source_coverage == "unknown"
+               and item.missing_reason for item in result.coverage)
+    assert result.evidence and all(item.use == "report_only" and item.exclusion_reason
+                                   for item in result.evidence)
+    for item in result.evidence:
+        for citation in item.citations:
+            assert citation.source_id == document.source_id
+            assert article.content_text[citation.start_offset:citation.end_offset] == citation.quote
+    assert set(result.report_fields()) == {
+        "sources", "evidence", "coverage", "external_insights_status", "external_insights_reason",
+    }
+    for field, value, reason in (
+        ("content_sha256", "0" * 64, "assessment_content_revision_mismatch"),
+        ("raw_record_ids", ["raw:" + str(uuid4())], "assessment_raw_reference_mismatch"),
+    ):
+        mismatched = RelevanceAssessment.model_validate(dict(relevance.model_dump(), **{field: value}))
+        with pytest.raises(ValidationError, match=reason):
+            ExternalDocument(article=article, relevance=mismatched, provider=document.provider,
+                             query_intent=document.query_intent, query_set_hash=document.query_set_hash)

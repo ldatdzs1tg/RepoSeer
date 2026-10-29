@@ -1,0 +1,135 @@
+{
+  "package_id": "pypi:synthetic-demo",
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "sources": [
+    {
+      "source": "source_archive",
+      "source_url": "https://example.test/census/recent",
+      "retrieved_at": "2026-10-01T00:00:00.000Z",
+      "valid_at": "2026-10-01T00:00:00.000Z",
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "temporal_basis": "observation",
+      "raw_record_ids": [
+        "raw:00000000-0000-4000-8000-000000000099"
+      ],
+      "missing_fields": [],
+      "source_id": "census:recent",
+      "source_record_id": "recent",
+      "revision": "synthetic-v1",
+      "content_sha256": null,
+      "query_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "source": "web_article",
+      "source_url": "https://example.test/synthetic/1",
+      "retrieved_at": "2026-09-20T00:00:00.000Z",
+      "valid_at": "2026-09-20T00:00:00.000Z",
+      "available_at": null,
+      "temporal_basis": "observation",
+      "raw_record_ids": [
+        "raw:00000000-0000-4000-8000-000000000001"
+      ],
+      "missing_fields": [],
+      "source_id": "external:e20c3e6a3eaf93308a3f0cf0fa547eef49b8b739cbd4f1d956fc3419664d1252",
+      "source_record_id": "article:sha256:d9fdbb48a3fee005b4ad99023ec935efa1d9380768294ca63d6a6de9a6c7a474",
+      "revision": null,
+      "content_sha256": "799aa6d572c41282546f0a68d42697e17caebbc0ca8eb7d3cdd98b3f3162eac2",
+      "query_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "external:e20c3e6a3eaf93308a3f0cf0fa547eef49b8b739cbd4f1d956fc3419664d1252:span:0",
+      "package_id": "pypi:synthetic-demo",
+      "origin": "external",
+      "context": "direct_package",
+      "signal_type": "context",
+      "claim": "Synthetic demo use case 1.",
+      "event_at": "2026-09-20T00:00:00.000Z",
+      "citations": [
+        {
+          "source_id": "external:e20c3e6a3eaf93308a3f0cf0fa547eef49b8b739cbd4f1d956fc3419664d1252",
+          "quote": "Synthetic demo use case 1.",
+          "start_offset": 0,
+          "end_offset": 26
+        }
+      ],
+      "use": "report_only",
+      "exclusion_reason": "source_availability_unverified",
+      "uncertainty": null,
+      "agent": null
+    }
+  ],
+  "coverage": [
+    {
+      "coverage_id": "external:recent",
+      "stage": "external",
+      "source_ids": [
+        "census:recent",
+        "external:e20c3e6a3eaf93308a3f0cf0fa547eef49b8b739cbd4f1d956fc3419664d1252"
+      ],
+      "status": "partial",
+      "source_coverage": "unknown",
+      "historical_validity": "unverified",
+      "window": {
+        "start_at": "2026-09-01T00:00:00.000Z",
+        "end_at": "2026-10-01T00:00:00.000Z"
+      },
+      "records_observed": 1,
+      "eligible_documents": 0,
+      "processed_documents": 0,
+      "missing_reason": "census_member_availability_unverified"
+    }
+  ],
+  "e1": [
+    {
+      "census_id": "recent",
+      "provider": "synthetic",
+      "context": "direct_package",
+      "query_intent": "direct_package",
+      "query_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "retrieval_policy_version": "synthetic-1",
+      "filters_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "window": {
+        "start_at": "2026-09-01T00:00:00.000Z",
+        "end_at": "2026-10-01T00:00:00.000Z"
+      },
+      "count": null,
+      "rate_per_30_days": null,
+      "missing_reason": "census_member_availability_unverified"
+    }
+  ],
+  "trends": [],
+  "e2": [
+    {
+      "census_id": "recent",
+      "signal_type": "maintenance",
+      "count": null,
+      "missing_reason": "source_census_unverified"
+    },
+    {
+      "census_id": "recent",
+      "signal_type": "functional_demand",
+      "count": null,
+      "missing_reason": "source_census_unverified"
+    },
+    {
+      "census_id": "recent",
+      "signal_type": "migration",
+      "count": null,
+      "missing_reason": "source_census_unverified"
+    }
+  ],
+  "excluded_documents": {
+    "external:e20c3e6a3eaf93308a3f0cf0fa547eef49b8b739cbd4f1d956fc3419664d1252": "source_availability_unverified"
+  },
+  "rejected_agent_events": {},
+  "external_insights_status": "partial",
+  "external_insights_reason": "external_evidence_or_coverage_incomplete",
+  "limitations": [
+    "Counts describe only the verified declared source/query/window corpus, not the whole web.",
+    "Current T-020 captures do not establish historical availability or a complete census.",
+    "Archive/census/D07 verification requires trusted injected backend implementations.",
+    "External context does not assign labels, official status or change model probabilities."
+  ]
+}
