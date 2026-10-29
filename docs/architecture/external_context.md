@@ -52,6 +52,17 @@ Each ExternalDocument contains:
 Get articles from canonical_normalization_results and assessments from the T-018
 NormalizationPipelineResult, joining exact revision/raw references. Preserve all
 unknown fields from T-020 rather than backfilling published dates as availability.
+For persisted T-020 output, read `processed/external_documents/external_documents.parquet`,
+`external_relevance/external_relevance.parquet` and `external_lineage/external_lineage.parquet`.
+Join article/assessment by `article_id`, `raw_record_id`, content hash and target package;
+join lineage by `(article_id, raw_record_id)`, never title or URL. Restore `record_type`,
+JSON list columns and observation-specific `Provenance.raw_record_ids`, then validate
+`Article`, `RelevanceAssessment` and `validate_assessment_evidence()` before constructing
+an `ExternalDocument`. Copy provider/intent/query hash from the actual lineage metadata;
+missing provider/intent may be `"unknown"`, while missing query hash stays null. This
+sentinel is not verified identity. Preserve all timestamps/nulls; absent window/census
+proof means no census, and no historical verifier means no invented historical features.
+The offline T-020 integration test demonstrates this round trip without a new adapter.
 A raw discovery candidate is not an Article. The module does not promote T-018's
 unresolved/technology-only decisions into same-function or alternative evidence.
 
@@ -93,7 +104,11 @@ and trusted origin identity within each census. It preserves all observations an
 citations without counting rediscovery, revisions or syndicated copies twice.
 Count is distinct relevant original items in the declared corpus. rate_per_30_days
 is 30 * count / full window days. Zero requires a genuinely verified empty census;
-missing/partial scope is null. Adjacent windows produce log1p(recent)-log1p(previous)
+missing/partial scope is null. A verified empty census can complete with no relevant
+evidence: count/rate are zero and `external_insights_status="complete"` describes only
+the declared scope, not package health or the whole Internet. With no evidence and no
+verified census, insights remain unavailable with a reason; report-only context and
+partially verified scopes remain partial. Adjacent windows produce log1p(recent)-log1p(previous)
 only with identical provider, context, intent, query-set, policy and filters and
 equal duration. A mismatch yields a null trend and reason, never a popularity claim.
 
@@ -112,17 +127,21 @@ historical source list. E2 counts distinct event IDs separately for maintenance,
 functional_demand and migration in each declared window; it is independent of E1.
 Repeated events are counted once. Contradictory claims/times for the same event,
 context and signal fail closed for upstream bounded conflict review; rejected
-events carry audit reasons and prevent producing E2 counts. No coverage extrapolation
+events carry audit reasons and invalidate E2 only for censuses attributed by their bound
+citation source membership. Citations spanning multiple censuses affect each one;
+unknown/unassigned source identity conservatively invalidates every possible census.
+Rejected context/time claims cannot narrow that scope. E1 counts/rates/trends are
+independent of these agent failures. No coverage extrapolation
 or abandonment/ground-truth labeling happens here.
 
 ## Verification
 
 ~~~powershell
 uv run --frozen ruff check src tests scripts
-uv run --frozen pytest tests/unit/analysis tests/contracts/test_analysis_contract.py -q
+uv run --frozen --with pytest --with pytest-asyncio python -m pytest tests/unit/analysis/test_external_context.py tests/contracts/test_analysis_contract.py -q
+uv run --frozen --with pytest --with pytest-asyncio python -m pytest tests/integration/test_collection_pipeline.py -q -k external_context
 uv run --frozen python -m scripts.export_analysis_contract --check
 uv run --frozen python -m scripts.validate_analysis_examples
-uv run --frozen pytest -q -m "not smoke"
 ~~~
 
 Tests use explicit fake trusted verifiers for synthetic positive census/event cases.

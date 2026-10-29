@@ -304,6 +304,21 @@ def _census_reason(census, request, by_id, eligible_ids, verifier):
     return None
 
 
+def _rejected_census_scope(event, censuses, by_id):
+    """Use bound source membership; rejected context/time cannot safely narrow it."""
+    citations = {citation.source_id for citation in event.evidence.citations}
+    affected, attributed = set(), set()
+    for census in censuses:
+        members = citations.intersection(census.document_source_ids)
+        if members:
+            affected.add(census.census_id)
+            attributed.update(members)
+    if not citations or not citations.issubset(by_id) or attributed != citations:
+        # An unknown/unassigned citation cannot exclude any declared census.
+        return {census.census_id for census in censuses}
+    return affected
+
+
 def analyze_external_context(request: ExternalContextRequest, *,
                              verifier: EvidenceVerifier | None = None) -> ExternalContextResult:
     """Pure analysis. Current/unknown captures yield report-only context and null features."""
@@ -392,6 +407,7 @@ def analyze_external_context(request: ExternalContextRequest, *,
                                   if reason is None else None), missing_reason=reason,
             ))
     rejected, events, seen_event = {}, [], {}
+    rejected_censuses = set()
     for event in sorted(request.agent_events, key=lambda e: (e.event_id, e.evidence.evidence_id)):
         item = event.evidence
         reason = None
@@ -417,6 +433,7 @@ def analyze_external_context(request: ExternalContextRequest, *,
             raise ValueError("conflicting_agent_event_requires_review")
         if reason is not None:
             rejected[item.evidence_id] = reason
+            rejected_censuses.update(_rejected_census_scope(event, request.censuses, by_id))
             continue
         if key not in seen_event:
             events.append((event.event_id, item))
@@ -440,7 +457,7 @@ def analyze_external_context(request: ExternalContextRequest, *,
         elif verifier is None or not verifier.agent_processing(
                 matching[0], [by_id[key] for key in sorted(relevant_ids)]):
             reason = "agent_processing_unverified"
-        elif rejected:
+        elif census.census_id in rejected_censuses:
             reason = "agent_events_rejected"
         for signal in ("maintenance", "functional_demand", "migration"):
             count = len({event_id for event_id, item in events
@@ -457,7 +474,7 @@ def analyze_external_context(request: ExternalContextRequest, *,
     statuses = Counter(c.status for c in coverage)
     status = "complete" if not excluded and not rejected and not (
         statuses["partial"] or statuses["unavailable"]) else "partial"
-    if not evidence:
+    if not evidence and not any(count is not None for count in measured.values()):
         status = "unavailable"
     return ExternalContextResult(
         package_id=request.package_id, cutoff_at=request.cutoff_at,

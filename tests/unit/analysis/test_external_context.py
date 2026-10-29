@@ -126,6 +126,8 @@ def test_absent_census_verifier_never_promotes_complete_flags_or_zero():
     assert result.e1[0].rate_per_30_days is None
     assert result.e1[0].missing_reason == "source_census_unverified"
     assert result.coverage[0].records_observed is None
+    assert result.external_insights_status == "unavailable"
+    assert result.external_insights_reason is not None
 
 
 def test_verified_empty_census_can_mean_zero():
@@ -133,6 +135,27 @@ def test_verified_empty_census_can_mean_zero():
     assert result.e1[0].count == 0
     assert result.e1[0].rate_per_30_days == 0
     assert result.coverage[0].records_observed == 0
+    assert result.evidence == []
+    assert result.coverage[0].status == result.coverage[0].source_coverage == "complete"
+    assert result.coverage[0].historical_validity == "verified"
+    assert result.external_insights_status == "complete"
+    assert result.external_insights_reason is None
+
+
+@pytest.mark.parametrize("status,source_coverage", [
+    ("partial", "partial"), ("complete", "unknown"), ("unavailable", "unknown"),
+])
+def test_empty_incomplete_census_preserves_null_and_missing_reason(status, source_coverage):
+    item = census([])
+    item.status, item.source_coverage = status, source_coverage
+    item.missing_reason = None if status == "complete" else "source_incomplete"
+    result = analyze(request([], [item]))
+    assert result.e1[0].count is result.e1[0].rate_per_30_days is None
+    assert result.e1[0].missing_reason is not None
+    assert result.coverage[0].source_coverage != "complete"
+    assert result.coverage[0].historical_validity == "unverified"
+    assert result.external_insights_status in {"partial", "unavailable"}
+    assert result.external_insights_reason is not None
 
 
 def test_current_capture_unknown_availability_remains_report_only_and_null():
@@ -299,6 +322,48 @@ def test_bad_agent_events_rejected_without_changing_e1(case):
     assert all(e.count is None for e in result.e2)
 
 
+@pytest.mark.parametrize("scope", ["one", "reviewed_empty", "shared", "unknown"])
+def test_rejected_events_only_invalidate_proven_census_scope(scope):
+    old = document(2, date="2026-08-20T00:00:00.000Z")
+    recent = document()
+    previous = TimeRange(start_at="2026-08-02T00:00:00.000Z", end_at=WINDOW.start_at)
+    censuses = [census([old], census_id="previous", window=previous), census([recent])]
+    old_coverage = agent_coverage([old]).model_copy(update={
+        "coverage_id": "agent:previous", "window": previous,
+    })
+    good = [] if scope == "reviewed_empty" else [event(recent)]
+    req = request([old, recent], censuses, agent_events=good,
+                  agent_coverage=[old_coverage, agent_coverage([recent])])
+    baseline = analyze(req)
+    bad = event(old, event_id="event:bad", evidence_id="signal:bad")
+    bad.evidence.citations[0].quote = "x" * len(old.article.content_text)
+    if scope == "shared":
+        bad.evidence.citations.extend(event(recent).evidence.citations)
+    elif scope == "unknown":
+        bad.evidence.citations[0].source_id = "external:unknown"
+    req.agent_events.append(bad)
+    result = analyze(req)
+    assert result.e1 == baseline.e1 and result.trends == baseline.trends
+    assert all(item.count == 1 for item in result.e1)
+    assert result.rejected_agent_events == {"signal:bad": (
+        "agent_sources_ineligible" if scope == "unknown" else "agent_quote_or_context_mismatch"
+    )}
+    old_counts = [item for item in result.e2 if item.census_id == "previous"]
+    recent_counts = [item for item in result.e2 if item.census_id == "recent"]
+    assert all(item.count is None and item.missing_reason == "agent_events_rejected"
+               for item in old_counts)
+    if scope in {"shared", "unknown"}:
+        assert all(item.count is None and item.missing_reason == "agent_events_rejected"
+                   for item in recent_counts)
+    else:
+        assert recent_counts == [item for item in baseline.e2 if item.census_id == "recent"]
+        assert {item.signal_type: item.count for item in recent_counts} == {
+            "maintenance": 0, "functional_demand": 0 if scope == "reviewed_empty" else 1,
+            "migration": 0,
+        }
+    assert result == analyze(req)
+
+
 def test_conflicting_event_identity_fails_closed():
     doc = document()
     one, two = event(doc), event(doc, evidence_id="signal:2")
@@ -322,6 +387,46 @@ def test_result_integrates_t021_without_mutating_prediction_or_training_fields()
     assert report["prediction"] == original["prediction"]
     assert report["core_prediction"] == original["core_prediction"]
     assert report["result_status"] == original["result_status"]
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_verified_external_context_integrates_t021_enhanced_without_changing_scores(empty):
+    docs = [] if empty else [document()]
+    processing = agent_coverage(docs)
+    if empty:
+        processing.source_ids = ["census:recent"]
+    req = request(docs, agent_events=[] if empty else [event(docs[0])],
+                  agent_coverage=[processing])
+    original = json.loads((ROOT / "examples/analysis/final_report_enhanced.json").read_text(encoding="utf-8"))
+    core = json.loads((ROOT / "examples/analysis/final_report_core.json").read_text(encoding="utf-8"))
+    assert original["core_prediction"] == core["prediction"]
+    for verifier in (SyntheticVerifier(), None):
+        result = analyze_external_context(req, verifier=verifier)
+        report = copy.deepcopy(original)
+        fields = result.report_fields()
+        assert set(fields) == {
+            "sources", "evidence", "coverage", "external_insights_status", "external_insights_reason",
+        }
+        report["sources"].extend(fields.pop("sources"))
+        report["coverage"] = copy.deepcopy(core["coverage"]) + fields.pop("coverage")
+        report.update(fields)
+        report["prediction"]["feature_source_ids"] = (
+            core["prediction"]["feature_source_ids"] + [source.source_id for source in result.sources])
+        report["prediction"]["feature_evidence_ids"] = [
+            item.evidence_id for item in result.evidence if item.use == "feature"]
+        assert report["prediction"]["probability"] == original["prediction"]["probability"]
+        assert report["core_prediction"] == original["core_prediction"]
+        assert report["coverage"][:len(core["coverage"])] == core["coverage"]
+        if verifier is None:
+            assert all(item.count is None for item in result.e1)
+            with pytest.raises(ValidationError, match="ENHANCED requires"):
+                validate_final_report(report)
+        else:
+            validated = validate_final_report(report)
+            assert validated.external_insights_status == "complete"
+            assert result.external_insights_reason is None
+            assert result.e1[0].count == (0 if empty else 1)
+            assert validated.core_prediction.model_dump(mode="json") == original["core_prediction"]
 
 
 def test_cli_reads_only_explicit_request_and_does_not_overwrite_output(tmp_path):
