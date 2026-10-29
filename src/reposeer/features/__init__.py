@@ -1,5 +1,6 @@
 """Feature extraction modules for repository, package, and activity metrics."""
 from reposeer.features.activity import ActivityFeatureResult, ActivityFeatures
+from reposeer.features.builder import FEATURE_COLUMNS, FeatureBuilder
 from reposeer.features.package import PackageFeatureResult, PackageFeatures
 from reposeer.features.repository import (
     FORBIDDEN_COUNTER_FIELDS,
@@ -13,9 +14,11 @@ from reposeer.features.repository import (
 )
 
 __all__ = [
+    "FEATURE_COLUMNS",
     "FORBIDDEN_COUNTER_FIELDS",
     "ActivityFeatureResult",
     "ActivityFeatures",
+    "FeatureBuilder",
     "PackageFeatureResult",
     "PackageFeatures",
     "RepositoryFeatures",

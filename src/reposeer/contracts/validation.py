@@ -187,7 +187,15 @@ def validate_technology_link_pair(
 
 
 def validate_snapshot_pair(request: SnapshotBuildRequest, result: SnapshotBuildResult) -> None:
-    _pair(request, result)
+    # For failed builds the request may contain invalid records that caused the failure,
+    # so we skip strict request re-validation and only enforce lightweight invariants.
+    if result.snapshot is None:
+        validate_record(result)
+        for field in ("schema_version", "request_id", "run_id"):
+            if getattr(request, field) != getattr(result, field):
+                raise ValueError(f"request/result {field} mismatch")
+    else:
+        _pair(request, result)
     for coverage in request.coverage:
         if coverage.time_range is not None and coverage.time_range.end_at > request.cutoff_at:
             raise ValueError("snapshot coverage extends past cutoff")
