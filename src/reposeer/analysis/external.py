@@ -9,7 +9,6 @@ import hashlib
 import json
 import math
 import re
-from collections import Counter
 from datetime import datetime
 from typing import Literal, Protocol
 
@@ -471,11 +470,21 @@ def analyze_external_context(request: ExternalContextRequest, *,
             included_agent_coverage.add(matching[0].coverage_id)
     unique([item.evidence_id for item in evidence], "output evidence IDs")
     unique([item.coverage_id for item in coverage], "output coverage IDs")
-    statuses = Counter(c.status for c in coverage)
-    status = "complete" if not excluded and not rejected and not (
-        statuses["partial"] or statuses["unavailable"]) else "partial"
-    if not evidence and not any(count is not None for count in measured.values()):
+    verified_census = any(count is not None for count in measured.values())
+    incomplete_coverage = any(
+        item.status != "complete" or item.source_coverage != "complete"
+        or item.historical_validity != "verified" for item in coverage)
+    incomplete_documents = any(
+        document.relevance.decision == "unresolved"
+        or (document.relevance.decision == "relevant" and document.source_id in excluded)
+        for document in request.documents)
+    no_source_data = not request.documents and not evidence and not verified_census
+    if no_source_data and all(census.status == "unavailable" for census in request.censuses):
         status = "unavailable"
+    elif verified_census and not incomplete_coverage and not incomplete_documents and not rejected:
+        status = "complete"
+    else:
+        status = "partial"
     return ExternalContextResult(
         package_id=request.package_id, cutoff_at=request.cutoff_at,
         sources=[sources[key] for key in sorted(sources)], evidence=evidence, coverage=coverage,

@@ -103,12 +103,16 @@ Dedup uses connected components of canonical article identity, exact content has
 and trusted origin identity within each census. It preserves all observations and
 citations without counting rediscovery, revisions or syndicated copies twice.
 Count is distinct relevant original items in the declared corpus. rate_per_30_days
-is 30 * count / full window days. Zero requires a genuinely verified empty census;
-missing/partial scope is null. A verified empty census can complete with no relevant
-evidence: count/rate are zero and `external_insights_status="complete"` describes only
-the declared scope, not package health or the whole Internet. With no evidence and no
-verified census, insights remain unavailable with a reason; report-only context and
-partially verified scopes remain partial. Adjacent windows produce log1p(recent)-log1p(previous)
+is 30 * count / full window days. Zero requires a verified census with no relevant items;
+missing/partial scope is null. A verified census with no relevant evidence, whether
+empty or containing only irrelevant documents, can return count/rate zero and
+`external_insights_status="complete"`. Irrelevant filtering is a normal outcome and
+retains its audit reasons; complete describes only the declared corpus/scope, not
+package health or the whole Internet. Attempted but unverified/incomplete censuses,
+unresolved relevance and report-only context are partial, even without evidence.
+No inputs, or wholly unavailable sources with no processable data or verified
+measurement, are unavailable. Partial/unavailable insights require a reason;
+missing/unverified counts stay null, never zero. Adjacent windows produce log1p(recent)-log1p(previous)
 only with identical provider, context, intent, query-set, policy and filters and
 equal duration. A mismatch yields a null trend and reason, never a popularity claim.
 

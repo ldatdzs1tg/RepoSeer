@@ -126,7 +126,8 @@ def test_absent_census_verifier_never_promotes_complete_flags_or_zero():
     assert result.e1[0].rate_per_30_days is None
     assert result.e1[0].missing_reason == "source_census_unverified"
     assert result.coverage[0].records_observed is None
-    assert result.external_insights_status == "unavailable"
+    # The census was attempted; missing verification is partial, not source unavailability.
+    assert result.external_insights_status == "partial"
     assert result.external_insights_reason is not None
 
 
@@ -142,10 +143,36 @@ def test_verified_empty_census_can_mean_zero():
     assert result.external_insights_reason is None
 
 
-@pytest.mark.parametrize("status,source_coverage", [
-    ("partial", "partial"), ("complete", "unknown"), ("unavailable", "unknown"),
+@pytest.mark.parametrize("decision,expected_count,expected_status", [
+    ("irrelevant", 0, "complete"), ("unresolved", None, "partial"),
 ])
-def test_empty_incomplete_census_preserves_null_and_missing_reason(status, source_coverage):
+def test_census_relevance_filtering_preserves_audit_and_status(decision, expected_count, expected_status):
+    doc = document()
+    doc.relevance.decision = decision
+    doc.relevance.context_level = None
+    doc.relevance.evidence_spans = []
+    doc.relevance.reason_code = "synthetic_" + decision
+    result = analyze(request([doc]))
+    assert result.e1[0].count == expected_count
+    assert result.external_insights_status == expected_status
+    assert result.evidence == []
+    assert result.excluded_documents == {doc.source_id: "synthetic_" + decision}
+    if decision == "irrelevant":
+        assert result.e1[0].rate_per_30_days == 0
+        assert result.coverage[0].status == result.coverage[0].source_coverage == "complete"
+        assert result.coverage[0].historical_validity == "verified"
+        assert result.external_insights_reason is None
+    else:
+        assert result.e1[0].missing_reason == "relevance_unresolved"
+        assert result.coverage[0].historical_validity == "unverified"
+        assert result.external_insights_reason is not None
+
+
+@pytest.mark.parametrize("status,source_coverage,expected_status", [
+    ("partial", "partial", "partial"), ("complete", "unknown", "partial"),
+    ("unavailable", "unknown", "unavailable"),
+])
+def test_empty_incomplete_census_preserves_null_and_missing_reason(status, source_coverage, expected_status):
     item = census([])
     item.status, item.source_coverage = status, source_coverage
     item.missing_reason = None if status == "complete" else "source_incomplete"
@@ -154,7 +181,7 @@ def test_empty_incomplete_census_preserves_null_and_missing_reason(status, sourc
     assert result.e1[0].missing_reason is not None
     assert result.coverage[0].source_coverage != "complete"
     assert result.coverage[0].historical_validity == "unverified"
-    assert result.external_insights_status in {"partial", "unavailable"}
+    assert result.external_insights_status == expected_status
     assert result.external_insights_reason is not None
 
 
@@ -463,6 +490,7 @@ def test_no_census_returns_explicit_unavailable_feature_scope():
 def test_empty_request_without_census_preserves_unknown_counts():
     result = analyze_external_context(request([], []))
     assert result.external_insights_status == "unavailable"
+    assert result.external_insights_reason is not None
     assert result.coverage[0].records_observed is None
     assert result.coverage[0].eligible_documents is None
     assert result.coverage[0].processed_documents is None
