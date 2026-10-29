@@ -1,0 +1,44 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "specialist_agent_request",
+  "analysis_run_id": "00000000-0000-4000-8000-000000000010",
+  "request_id": "00000000-0000-4000-8000-000000000002",
+  "agent_kind": "functional_trend_demand",
+  "package_id": "pypi:synthetic-demo",
+  "repo_id": "github:repository:900000001",
+  "mapping_revision": "synthetic-mapping-1",
+  "package_scope": "packages/synthetic-demo",
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "routing_policy_version": "synthetic-router-1",
+  "evidence": [
+    {
+      "evidence_id": "evidence:functional:1",
+      "package_id": "pypi:synthetic-demo",
+      "subject_id": "function:offline-first-tools",
+      "context_level": "function_level",
+      "topic": "functional",
+      "source_kind": "external",
+      "source_id": "source:functional:1",
+      "source_url": "https://example.test/synthetic-demo/functional",
+      "source_record_id": null,
+      "source_revision": "synthetic-functional-revision-1",
+      "source_content_sha256": "7babedc9b96b122ea7a3ff80e09a1701ca1819c9c3c88e7623bce6eef1dda87e",
+      "original_event_id": "synthetic-original-event-functional-1",
+      "passage_text": "A discussion describes growing interest in offline-first Python tools.",
+      "passage_start_offset": 250,
+      "passage_sha256": "7babedc9b96b122ea7a3ff80e09a1701ca1819c9c3c88e7623bce6eef1dda87e",
+      "event_at": "2026-09-28T00:00:00.000Z",
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "valid_at": "2026-10-01T00:00:00.000Z",
+      "fetched_at": "2026-10-01T00:00:00.000Z",
+      "gate": {
+        "decision": "eligible",
+        "decision_id": "d06:synthetic:functional:1",
+        "policy_version": "synthetic-d06-policy-1",
+        "checked_at": "2026-10-01T00:01:00.000Z",
+        "availability_proof_ref": "raw:synthetic:functional:1",
+        "allowed_use": "feature_candidate"
+      }
+    }
+  ]
+}

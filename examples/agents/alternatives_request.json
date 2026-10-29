@@ -1,0 +1,44 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "specialist_agent_request",
+  "analysis_run_id": "00000000-0000-4000-8000-000000000010",
+  "request_id": "00000000-0000-4000-8000-000000000003",
+  "agent_kind": "alternatives_migration",
+  "package_id": "pypi:synthetic-demo",
+  "repo_id": "github:repository:900000001",
+  "mapping_revision": "synthetic-mapping-1",
+  "package_scope": "packages/synthetic-demo",
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "routing_policy_version": "synthetic-router-1",
+  "evidence": [
+    {
+      "evidence_id": "evidence:alternatives:1",
+      "package_id": "pypi:synthetic-demo",
+      "subject_id": "pypi:synthetic-demo",
+      "context_level": "alternative_level",
+      "topic": "alternatives",
+      "source_kind": "external",
+      "source_id": "source:alternatives:1",
+      "source_url": "https://example.test/synthetic-demo/alternatives",
+      "source_record_id": null,
+      "source_revision": "synthetic-alternatives-revision-1",
+      "source_content_sha256": "5d9a06fa425ca2af456ba4c2cf22e04e8ab31470c8020e66967553526390b526",
+      "original_event_id": "synthetic-original-event-alternatives-1",
+      "passage_text": "One maintainer reports migrating from synthetic-demo to alternate-demo.",
+      "passage_start_offset": 500,
+      "passage_sha256": "5d9a06fa425ca2af456ba4c2cf22e04e8ab31470c8020e66967553526390b526",
+      "event_at": "2026-09-29T00:00:00.000Z",
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "valid_at": "2026-10-01T00:00:00.000Z",
+      "fetched_at": "2026-10-01T00:00:00.000Z",
+      "gate": {
+        "decision": "eligible",
+        "decision_id": "d06:synthetic:alternatives:1",
+        "policy_version": "synthetic-d06-policy-1",
+        "checked_at": "2026-10-01T00:01:00.000Z",
+        "availability_proof_ref": "raw:synthetic:alternatives:1",
+        "allowed_use": "feature_candidate"
+      }
+    }
+  ]
+}

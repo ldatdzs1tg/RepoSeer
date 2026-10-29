@@ -1,0 +1,44 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "specialist_agent_response",
+  "analysis_run_id": "00000000-0000-4000-8000-000000000010",
+  "request_id": "00000000-0000-4000-8000-000000000002",
+  "agent_kind": "functional_trend_demand",
+  "package_id": "pypi:synthetic-demo",
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "generated_at": "2026-10-01T00:03:00.000Z",
+  "agent_version": "synthetic-functional-agent-1",
+  "model_version": "synthetic-llm-1",
+  "prompt_version": "synthetic-functional-prompt-1",
+  "status": "complete",
+  "signals": [
+    {
+      "signal_id": "signal:functional:1",
+      "package_id": "pypi:synthetic-demo",
+      "subject_id": "function:offline-first-tools",
+      "context_level": "function_level",
+      "signal_type": "emerging_use_case",
+      "statement": "A discussion identifies an emerging offline-first use case; it does not measure package users.",
+      "event_at": "2026-09-28T00:00:00.000Z",
+      "announced_at": null,
+      "effective_at": null,
+      "citations": [
+        {
+          "evidence_id": "evidence:functional:1",
+          "source_id": "source:functional:1",
+          "source_url": "https://example.test/synthetic-demo/functional",
+          "source_revision": "synthetic-functional-revision-1",
+          "source_record_id": null,
+          "original_event_id": "synthetic-original-event-functional-1",
+          "available_at": "2026-10-01T00:00:00.000Z",
+          "start_offset": 250,
+          "end_offset": 320,
+          "quote": "A discussion describes growing interest in offline-first Python tools."
+        }
+      ],
+      "proposed_use": "feature_candidate",
+      "uncertainty": "One cited discussion does not measure an ecosystem-wide rate."
+    }
+  ],
+  "error_code": null
+}

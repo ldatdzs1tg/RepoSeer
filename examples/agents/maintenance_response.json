@@ -1,0 +1,44 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "specialist_agent_response",
+  "analysis_run_id": "00000000-0000-4000-8000-000000000010",
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "agent_kind": "maintenance_lifecycle",
+  "package_id": "pypi:synthetic-demo",
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "generated_at": "2026-10-01T00:03:00.000Z",
+  "agent_version": "synthetic-maintenance-agent-1",
+  "model_version": "synthetic-llm-1",
+  "prompt_version": "synthetic-maintenance-prompt-1",
+  "status": "complete",
+  "signals": [
+    {
+      "signal_id": "signal:maintenance:1",
+      "package_id": "pypi:synthetic-demo",
+      "subject_id": "pypi:synthetic-demo",
+      "context_level": "package_specific",
+      "signal_type": "end_of_support_claim",
+      "statement": "An official future end-of-support plan is stated.",
+      "event_at": "2026-10-01T00:00:00.000Z",
+      "announced_at": "2026-10-01T00:00:00.000Z",
+      "effective_at": "2027-01-01T00:00:00.000Z",
+      "citations": [
+        {
+          "evidence_id": "evidence:maintenance:1",
+          "source_id": "source:maintenance:1",
+          "source_url": "https://example.test/synthetic-demo/maintenance",
+          "source_revision": "synthetic-maintenance-revision-1",
+          "source_record_id": "synthetic-item-1",
+          "original_event_id": "synthetic-original-event-maintenance-1",
+          "available_at": "2026-10-01T00:00:00.000Z",
+          "start_offset": 100,
+          "end_offset": 153,
+          "quote": "Maintenance of synthetic-demo will end on 2027-01-01."
+        }
+      ],
+      "proposed_use": "status_candidate",
+      "uncertainty": "An announcement is a plan, not a verified cessation event."
+    }
+  ],
+  "error_code": null
+}

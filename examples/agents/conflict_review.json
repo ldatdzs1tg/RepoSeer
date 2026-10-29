@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "conflict_review",
+  "analysis_run_id": "00000000-0000-4000-8000-000000000010",
+  "cluster_id": "cluster:synthetic:maintenance:1",
+  "subject_id": "pypi:synthetic-demo",
+  "signal_ids": [
+    "signal:maintenance:1",
+    "signal:maintenance:contradictory-2"
+  ],
+  "source_ids": [
+    "source:maintenance:1",
+    "source:maintenance:contradictory-2"
+  ],
+  "review_calls": 1,
+  "reviewer_version": "synthetic-reviewer-1",
+  "status": "unresolved",
+  "deterministic_recheck_passed": false,
+  "final_use": "report_only",
+  "reason": "Two source revisions give conflicting effective dates; original revisions do not resolve it."
+}

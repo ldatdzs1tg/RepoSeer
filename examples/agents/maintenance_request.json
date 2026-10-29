@@ -1,0 +1,44 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "specialist_agent_request",
+  "analysis_run_id": "00000000-0000-4000-8000-000000000010",
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "agent_kind": "maintenance_lifecycle",
+  "package_id": "pypi:synthetic-demo",
+  "repo_id": "github:repository:900000001",
+  "mapping_revision": "synthetic-mapping-1",
+  "package_scope": "packages/synthetic-demo",
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "routing_policy_version": "synthetic-router-1",
+  "evidence": [
+    {
+      "evidence_id": "evidence:maintenance:1",
+      "package_id": "pypi:synthetic-demo",
+      "subject_id": "pypi:synthetic-demo",
+      "context_level": "package_specific",
+      "topic": "maintenance",
+      "source_kind": "official",
+      "source_id": "source:maintenance:1",
+      "source_url": "https://example.test/synthetic-demo/maintenance",
+      "source_record_id": "synthetic-item-1",
+      "source_revision": "synthetic-maintenance-revision-1",
+      "source_content_sha256": "c68ab2edd6001c732d43c2535be57b9f2c519b754e282cafdce54a63827d63ab",
+      "original_event_id": "synthetic-original-event-maintenance-1",
+      "passage_text": "Maintenance of synthetic-demo will end on 2027-01-01.",
+      "passage_start_offset": 100,
+      "passage_sha256": "c68ab2edd6001c732d43c2535be57b9f2c519b754e282cafdce54a63827d63ab",
+      "event_at": "2026-10-01T00:00:00.000Z",
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "valid_at": "2026-10-01T00:00:00.000Z",
+      "fetched_at": "2026-10-01T00:00:00.000Z",
+      "gate": {
+        "decision": "eligible",
+        "decision_id": "d06:synthetic:maintenance:1",
+        "policy_version": "synthetic-d06-policy-1",
+        "checked_at": "2026-10-01T00:01:00.000Z",
+        "availability_proof_ref": "raw:synthetic:maintenance:1",
+        "allowed_use": "status_candidate"
+      }
+    }
+  ]
+}

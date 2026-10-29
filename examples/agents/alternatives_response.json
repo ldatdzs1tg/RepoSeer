@@ -1,0 +1,44 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "specialist_agent_response",
+  "analysis_run_id": "00000000-0000-4000-8000-000000000010",
+  "request_id": "00000000-0000-4000-8000-000000000003",
+  "agent_kind": "alternatives_migration",
+  "package_id": "pypi:synthetic-demo",
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "generated_at": "2026-10-01T00:03:00.000Z",
+  "agent_version": "synthetic-alternatives-agent-1",
+  "model_version": "synthetic-llm-1",
+  "prompt_version": "synthetic-alternatives-prompt-1",
+  "status": "complete",
+  "signals": [
+    {
+      "signal_id": "signal:alternatives:1",
+      "package_id": "pypi:synthetic-demo",
+      "subject_id": "pypi:synthetic-demo",
+      "context_level": "alternative_level",
+      "signal_type": "explicit_migration",
+      "statement": "One maintainer reports an explicit migration to an alternative; no population-wide adoption is inferred.",
+      "event_at": "2026-09-29T00:00:00.000Z",
+      "announced_at": null,
+      "effective_at": null,
+      "citations": [
+        {
+          "evidence_id": "evidence:alternatives:1",
+          "source_id": "source:alternatives:1",
+          "source_url": "https://example.test/synthetic-demo/alternatives",
+          "source_revision": "synthetic-alternatives-revision-1",
+          "source_record_id": null,
+          "original_event_id": "synthetic-original-event-alternatives-1",
+          "available_at": "2026-10-01T00:00:00.000Z",
+          "start_offset": 500,
+          "end_offset": 571,
+          "quote": "One maintainer reports migrating from synthetic-demo to alternate-demo."
+        }
+      ],
+      "proposed_use": "feature_candidate",
+      "uncertainty": "One cited discussion does not measure an ecosystem-wide rate."
+    }
+  ],
+  "error_code": null
+}
