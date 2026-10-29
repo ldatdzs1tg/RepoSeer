@@ -63,7 +63,8 @@ def make_release(
 ) -> PackageRelease:
     av = available_at if available_at is not None else uploaded_at
     va = valid_at if valid_at is not None else uploaded_at
-    prov = make_provenance(retrieved_at=CUTOFF, valid_at=va, available_at=av, raw_id=raw_id)
+    ret_at = max(CUTOFF, va, av)
+    prov = make_provenance(retrieved_at=ret_at, valid_at=va, available_at=av, raw_id=raw_id)
     return PackageRelease(
         schema_version="0.1.0",
         record_type="package_release",
@@ -93,7 +94,8 @@ def make_activity(
 ) -> RepositoryActivity:
     av = available_at if available_at is not None else event_at
     va = valid_at if valid_at is not None else event_at
-    prov = make_provenance(retrieved_at=CUTOFF, valid_at=va, available_at=av, raw_id=raw_id)
+    ret_at = max(CUTOFF, va, av)
+    prov = make_provenance(retrieved_at=ret_at, valid_at=va, available_at=av, raw_id=raw_id)
     repo_num = repo_id.split(":")[-1]
     act_id = f"github:activity:{repo_num}:{kind}:{activity_id_suffix}"
     return RepositoryActivity(
