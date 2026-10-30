@@ -19,17 +19,26 @@ process_app = typer.Typer(help="Replay saved raw JSONL offline into canonical pr
 @process_app.callback(invoke_without_command=True)
 def main(
     data_dir: Path | None = typer.Option(None, "--data-dir", help="Storage root; defaults to configured base directory."),
+    output_dir: Path | None = typer.Option(None, "--output-dir", help="Required local output for a sealed source submission"),
     raw: list[Path] | None = typer.Option(None, "--raw", help="Saved raw JSONL input; repeatable. Otherwise discover existing supported inputs."),
     targets_file: Path | None = typer.Option(None, "--targets-file", help="Strict JSON array of upstream VerifiedTargetContext objects."),
     cutoff_at: str | None = typer.Option(None, "--cutoff-at", help="Optional UTC YYYY-MM-DDTHH:mm:ss.sssZ for diagnostics, not historical proof."),
 ) -> None:
     """Normalize and persist local observations without APIs or LLM calls."""
     paths = StoragePaths(data_dir)
-    inputs = raw if raw is not None else paths.processing_inputs()
     try:
+        source_data = None
+        if (paths.base_dir / "READY.json").exists():
+            if output_dir is None or output_dir.resolve().is_relative_to(paths.base_dir.resolve().parent):
+                raise ValueError("sealed_storage_requires_separate_output_dir")
+            if (paths.base_dir / "COLLECTION_INPUT.json").exists():
+                from tools.coordination.external import resolve_verified_external_inputs
+
+                source_data = resolve_verified_external_inputs(paths.base_dir, cutoff=cutoff_at)
+        inputs = raw if raw is not None else paths.processing_inputs()
         targets = (TypeAdapter(list[VerifiedTargetContext]).validate_json(targets_file.read_bytes(), strict=True)
-                   if targets_file is not None else [])
-        result = ProcessedDatasetPipeline(paths).run(inputs, targets=targets, cutoff_at=cutoff_at)
+                   if targets_file is not None else source_data["targets"] if source_data else [])
+        result = ProcessedDatasetPipeline(StoragePaths(output_dir) if output_dir else paths).run(inputs, targets=targets, cutoff_at=cutoff_at)
     except (OSError, ValueError, TypeError, StorageError, pl.exceptions.PolarsError) as error:
         console.print(f"[red]Processing failed ({type(error).__name__}); check processing manifests when available.[/red]")
         raise typer.Exit(code=2) from error

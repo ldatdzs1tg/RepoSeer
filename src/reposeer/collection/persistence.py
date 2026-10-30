@@ -3,8 +3,21 @@
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
+
+
+def replace_atomic(source: Path, destination: Path) -> None:
+    """Keep atomic replacement; briefly retry Windows sharing/access locks, then fail."""
+    for attempt in range(4):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as error:
+            if os.name != "nt" or getattr(error, "winerror", None) not in {5, 32, 33} or attempt == 3:
+                raise
+            time.sleep(0.025 * (attempt + 1))
 
 
 def write_json_atomic(path: Path, data: Any) -> None:
@@ -19,7 +32,7 @@ def write_json_atomic(path: Path, data: Any) -> None:
             json.dump(data, temporary_file, ensure_ascii=False, indent=2, allow_nan=False)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
-        os.replace(temporary_path, path)
+        replace_atomic(temporary_path, path)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)

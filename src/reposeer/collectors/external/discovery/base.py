@@ -223,6 +223,8 @@ class ExternalDiscoveryCollector:
         package_id: str | None = None,
         historical_mode: bool = False,
         input_observation: RawRecord | None = None,
+        policy_budgeted: bool = False,
+        enabled_sources: set[str] | None = None,
     ) -> tuple[CollectionResult, dict[str, Any]]:
         """Execute planned search queries across configured discovery providers.
 
@@ -382,7 +384,16 @@ class ExternalDiscoveryCollector:
 
         pages_this_call = 0
         requests_this_call = 0
+        blocked_providers = {}
         for job in jobs:
+            if enabled_sources is not None and job.provider not in enabled_sources:
+                continue
+            if job.provider in blocked_providers:
+                job.status, job.missing_reason = "failed", blocked_providers[job.provider]
+                persist()
+                continue
+            if policy_budgeted and job.pages_fetched >= request.max_pages:
+                continue
             if job.status == "unavailable" or not job.has_more:
                 continue
             if len(raw_observations_by_id) >= request.max_records or requests_this_call >= TOTAL_REQUEST_LIMIT:
@@ -399,7 +410,7 @@ class ExternalDiscoveryCollector:
             job.status, job.missing_reason = "running", None
             # Retain audit history; only unresolved failures affect current coverage.
             job.errors = [error for error in job.errors if error["code"] == "validation_error"]
-            pages_this_job = 0
+            pages_this_job = job.pages_fetched if policy_budgeted else 0
             while pages_this_job < request.max_pages and requests_this_call < TOTAL_REQUEST_LIMIT:
                 cursor = job.next_cursor
                 before = getattr(getattr(provider, "http", None), "requests_attempted", None)
@@ -422,6 +433,9 @@ class ExternalDiscoveryCollector:
                     job.error_history.append(entry.model_dump())
                     job.status = "partial" if job.pages_fetched else "failed"
                     job.missing_reason = getattr(error, "code", code)
+                    if status in {400, 401, 403} and code != "rate_limited":
+                        job.missing_reason = "invalid_credentials"
+                    blocked_providers[job.provider] = job.missing_reason
                     if self.progress:
                         self.progress.record_error()
                     persist()

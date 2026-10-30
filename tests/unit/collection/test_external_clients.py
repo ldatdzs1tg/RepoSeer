@@ -434,6 +434,7 @@ def test_live_preflight_requires_authenticated_stackexchange_quota(monkeypatch):
                       STACKEXCHANGE_API_KEY="unit-stack", NEWS_API_KEY="unit-news",
                       REPOSEER_RSS_FEEDS="https://feeds.example/rss")
     quota = [300]
+    limited = [False]
     requests = []
 
     def handler(request):
@@ -443,6 +444,8 @@ def test_live_preflight_requires_authenticated_stackexchange_quota(monkeypatch):
         if request.url.host == "dev.to":
             return httpx.Response(200, json={"id": 1, "username": "user"})
         if request.url.host == "api.stackexchange.com":
+            if limited[0]:
+                return httpx.Response(429)
             assert request.headers["Authorization"] == "Bearer unit-stack"
             assert "key" not in request.url.params
             return httpx.Response(200, json={"items": [{}], "quota_max": quota[0], "quota_remaining": 10})
@@ -454,13 +457,23 @@ def test_live_preflight_requires_authenticated_stackexchange_quota(monkeypatch):
 
     monkeypatch.setattr(preflight, "RSSProvider", lambda feeds, http_client:
                         RSSProvider(feeds, http_client=http_client, policy=URLPolicy(lambda host: ["93.184.216.34"])))
-    with HTTPClient(transport=httpx.MockTransport(handler)) as http:
-        assert not preflight.check_providers(configuration=config, http_client=http)["ready"]
+    with HTTPClient(transport=httpx.MockTransport(handler), max_retries=1) as http:
+        blocked = preflight.check_providers(configuration=config, http_client=http)
+        assert not blocked["ready"] and blocked["configuration_valid"]
+        assert "stackexchange" in blocked["deferred_external_sources"]
+        assert "devto" in blocked["available_external_sources"] and "news" in blocked["available_external_sources"]
         quota[0] = 10000
         assert preflight.check_providers(configuration=config, http_client=http)["ready"]
         requests.clear()
         assert preflight.check_providers(configuration=config, http_client=http, include_github=False)["ready"]
         assert all(request.url.host != "api.github.com" for request in requests)
+
+        limited[0] = True
+        result = preflight.check_providers(configuration=config, http_client=http,
+                                          include_github=False, sources=["stackexchange"])
+        assert result["configuration_valid"] and not result["ready"]
+        assert result["provider_status"]["stackexchange"]["retry_after"] is None
+        assert result["provider_status"]["stackexchange"]["status"] == "quota_exhausted"
 
 
 def test_providers_backward_compatible_search():

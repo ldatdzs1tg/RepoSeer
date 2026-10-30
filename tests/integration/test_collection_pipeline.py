@@ -86,7 +86,9 @@ def environment(tmp_path, monkeypatch):
             return httpx.Response(200, json=[activity_raw(group).payload])
         if request.url.host == "hn.algolia.com":
             if options["fail_provider"]:
-                return httpx.Response(401, text="secret-provider-body")
+                if options["fail_provider"] == "network":
+                    raise httpx.ReadTimeout("private-network-message", request=request)
+                return httpx.Response(429 if options["fail_provider"] == "quota" else 401, text="secret-provider-body")
             name = "requests" if "requests" in request.url.params["query"].casefold() else "flask"
             hits = [] if options["empty"] else [{
                 "objectID": "42" if name == "flask" else "43", "title": "Package tutorial",
@@ -97,6 +99,14 @@ def environment(tmp_path, monkeypatch):
                          "url": f"https://blog.example/{outcome}", "created_at": "2024-01-01T00:00:00Z"}
                         for index, outcome in enumerate(options["crawl_outcomes"])]
             return httpx.Response(200, json={"hits": hits, "nbPages": 1})
+        if request.url.host == "dev.to":
+            return httpx.Response(200, json=[])
+        if request.url.host == "api.stackexchange.com":
+            return httpx.Response(200, json={"items": [], "has_more": False})
+        if request.url.host == "newsapi.org":
+            return httpx.Response(200, json={"status": "ok", "totalResults": 0, "articles": []})
+        if request.url.host == "feeds.example":
+            return httpx.Response(200, content=b'<rss version="2.0"><channel><title>Python</title></channel></rss>')
         if request.url.host == "blog.example":
             if request.url.path == "/timeout":
                 raise httpx.ReadTimeout("private-network-message", request=request)
@@ -184,9 +194,9 @@ def test_package_mapping_never_invents_repository_scope(environment, mapping, ex
         assert not result.child_run_ids.get("external_crawl")
 
 
-@pytest.mark.parametrize("failure", ["repository", "provider", "no_candidates", "unavailable", "crawler", "excluded", "activity_budget"])
-def test_partial_sources_preserve_successful_artifacts_and_report_truth(environment, failure):
-    pipeline, paths, _, options, _ = environment
+@pytest.mark.parametrize("failure", ["repository", "provider", "no_candidates", "unavailable", "crawler", "excluded", "activity_budget", "provider_quota_v2", "provider_network_v2"])
+def test_partial_sources_preserve_successful_artifacts_and_report_truth(environment, failure, monkeypatch):
+    pipeline, paths, calls, options, _ = environment
     if failure == "repository":
         options["failed_repo"] = "psf/requests"
     elif failure == "excluded":
@@ -200,10 +210,33 @@ def test_partial_sources_preserve_successful_artifacts_and_report_truth(environm
     elif failure == "crawler":
         options["fail_crawler"] = True
     sources = ["hackernews", "rss"] if failure == "unavailable" else ["hackernews"]
+    if failure in {"provider_quota_v2", "provider_network_v2"}:
+        options["fail_provider"] = "quota" if failure == "provider_quota_v2" else "network"
+        for name in ("devto_api_key", "stackexchange_api_key", "news_api_key"):
+            monkeypatch.setattr(settings, name, "test-credential")
+        monkeypatch.setattr(settings, "rss_feeds", "https://feeds.example/python.xml")
+        from reposeer.clients.external.rss import RSSProvider
+
+        monkeypatch.setattr("reposeer.pipelines.external.RSSProvider", lambda *args, **kwargs:
+            RSSProvider(*args, policy=URLPolicy(lambda host: ["93.184.216.34"]), **kwargs))
+        sources = ["hackernews", "devto", "stackexchange", "rss", "news"]
     result = pipeline.run(["pypi:flask", "psf/requests"], discovery_sources=sources)
     manifest = read(result.manifest_path)
     assert result.processing_status == "complete"
     assert result.status == ("complete" if failure == "no_candidates" else "partial")
+    if failure in {"provider_quota_v2", "provider_network_v2"}:
+        from reposeer.pipelines.external_enrichment import provider_deferrals
+
+        assert sum(request.url.host == "hn.algolia.com" for request in calls) == 1
+        assert "hackernews" in manifest["deferred_external_sources"]
+        discoveries = [stage["details"]["discovery"] for stage in manifest["stages"]
+                       if stage["stage"] == "external_discovery"]
+        assert len(discoveries) == 2
+        assert provider_deferrals([job for saved in discoveries for job in saved["per_job_stats"]]) == {
+            "hackernews": "quota_deferred" if failure == "provider_quota_v2" else "retryable_failure"}
+        assert any(job["missing_reason"] == "preflight_deferred" for job in discoveries[1]["per_job_stats"]
+                   if job["provider"] == "hackernews")
+        assert sum(request.url.host == "newsapi.org" for request in calls) >= 2
     raw_repositories = JsonlStorage().read_contract_records(paths.raw_dir / "github/repositories.jsonl")
     assert raw_repositories
     assert {raw.run_id for raw in raw_repositories}.issubset(set(result.child_run_ids["github_metadata"]))

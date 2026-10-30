@@ -25,6 +25,7 @@ from reposeer.contracts.identity import checked_timestamp, format_utc_timestamp,
 from reposeer.exceptions import CollectionError, StorageError
 from reposeer.pipelines.external import ExternalPipeline
 from reposeer.pipelines.external_crawl import ExternalCrawlPipeline
+from reposeer.pipelines.external_enrichment import provider_deferrals
 from reposeer.pipelines.normalization import NormalizationPipeline
 from reposeer.pipelines.processed import ProcessedDatasetPipeline
 from reposeer.processing.relevance import VerifiedTargetContext
@@ -403,12 +404,18 @@ class CollectionPipeline:
             stack.callback(discovery.close)
             result = discovery.discover(raw, package_id=target["package_id"] if scope else None,
                                         detection_result=detection, sources=sources, max_pages=pages, max_records=records,
-                                        extended_package_queries=set(sources) == {"hackernews", "devto", "stackexchange", "rss", "news"})
+                                        extended_package_queries=set(sources) == {"hackernews", "devto", "stackexchange", "rss", "news"},
+                                        policy_budgeted=set(sources) == {"hackernews", "devto", "stackexchange", "rss", "news"},
+                                        deferred_sources=manifest.get("deferred_external_sources", []))
             self._child(manifest, "external_discovery", result.run_id)
             collection, saved = result.collection_result, result.discovery_manifest
             aliases = {"stackoverflow": "stackexchange", "newsapi": "news"}
             requested = {aliases.get(source, source) for source in sources}
             jobs_requested = [job for job in saved["per_job_stats"] if job["provider"] in requested]
+            if requested == {"hackernews", "devto", "stackexchange", "rss", "news"}:
+                deferred = provider_deferrals(jobs_requested)
+                if deferred:
+                    manifest["deferred_external_sources"] = sorted(set(manifest.get("deferred_external_sources", [])) | deferred.keys())
             jobless = requested - {job["provider"] for job in jobs_requested}
             discovery_status = "partial" if jobless else _discovery_status(jobs_requested)
             target["discovery_status"] = discovery_status
@@ -514,7 +521,8 @@ class CollectionPipeline:
     def run(self, targets: Sequence[str], *, mode: Mode = "live", groups: Sequence[str] = ("all",),
             max_pages: int = 2, max_records: int = 200, discovery_sources: Sequence[str] = ("hackernews",),
             discovery_max_pages: int = 1, discovery_max_records: int = 30,
-            max_candidates: int = 15, cutoff_at: str | None = None) -> CollectionPipelineResult:
+            max_candidates: int = 15, cutoff_at: str | None = None,
+            available_external_sources: Sequence[str] | None = None) -> CollectionPipelineResult:
         parsed = parse_targets(targets)
         validate_configuration(mode=mode, groups=groups, max_pages=max_pages, max_records=max_records,
                                discovery_sources=discovery_sources, discovery_max_pages=discovery_max_pages,
@@ -529,6 +537,9 @@ class CollectionPipeline:
                                      "Processing replays all eligible root raw files; it is not new collection.",
                                      "Resume children with their existing CLI; integration has no resume engine."])
         self._save(manifest)
+        if available_external_sources is not None:
+            manifest["deferred_external_sources"] = [name for name in discovery_sources
+                if name not in available_external_sources]
         scopes, repositories = {}, {}
         with ExitStack() as stack:
             try:

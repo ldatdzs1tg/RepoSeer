@@ -148,6 +148,9 @@ class ExternalPipeline:
         resume: bool = False,
         include_technology_context: bool = False,
         extended_package_queries: bool = False,
+        policy_budgeted: bool = False,
+        enabled_sources: Sequence[str] | None = None,
+        deferred_sources: Sequence[str] = (),
     ) -> ExternalDiscoveryPipelineResult:
         """Run external discovery for a repository or package subject."""
         repo_full_name: str | None = None
@@ -282,6 +285,10 @@ class ExternalPipeline:
         progress = CollectionProgress(context, self.run_manager)
 
         providers = self._resolve_providers(sources, progress)
+        for name in deferred_sources:
+            if name in providers:
+                providers[name].is_available = False
+                providers[name].unavailable_reason = "preflight_deferred"
         collector = ExternalDiscoveryCollector(providers, progress=progress, clock=self.clock)
 
         request = CollectionRequest(
@@ -314,6 +321,8 @@ class ExternalPipeline:
             package_id=package_id,
             historical_mode=historical,
             input_observation=input_observation,
+            policy_budgeted=policy_budgeted,
+            enabled_sources=None if enabled_sources is None else set(enabled_sources),
         )
 
         discovery_manifest["identity_verification"] = {

@@ -14,12 +14,25 @@ setup, `check-providers`, and external-only `enrich-drive --submissions-dir`.
 New D2 READY files publish `collection_policy.policy_id=distributed-v2`; workers
 resolve immutable limits from that verified policy without changing `crawl-drive`.
 READY files without policy retain `legacy-initial`. Published submissions stay
-immutable; enrichment writes to `external-enrichments/external-v2/<worker>/...`.
+immutable; provider supplements write beside their source part under
+`submissions/<worker>/<run>/<repo>/supplements/<part>/external-v2/packages/<package_sha256>/<provider>/`.
 New D2 staging records policy intent before screening; an older unfinished stage
 without intent requires inspection instead of silently changing its policy.
 V2 requires local GitHub/DEV.to/Stack Exchange/NewsAPI credentials and configured
 public HTTPS RSS feeds. Enrichment uses only the external preflight and never
-calls GitHub/PyPI, including for authentication. Dry-run is offline and read-only.
+calls GitHub/PyPI, including for authentication. Static configuration is mandatory;
+external quota/availability failures defer only the affected provider. Independent
+provider READY/checksums prove completion; mutable online state lives under
+`supplements/<part>/external-v2/state/<package_sha256>/<provider>.json`.
+Both worker commands share one planner. `crawl-drive` automatically supplements at
+most one incomplete package of its current assignment; `enrich-drive` handles all
+historical parts and ignores the sibling `supplements` directory. Terminal policy
+budgets are not retried, and the 20-URL package budget includes initial captures.
+`dispatcher.py external-report --drive-root ...` writes a separate derived
+`screening/external_coverage.csv`; C1-C7 never write master mapping or this view.
+`tools.coordination.external.resolve_verified_external_inputs` provides verified
+initial/supplement observations and coverage. Offline `reposeer process` requires
+`--output-dir` when reading a sealed source. Dry-run is offline and read-only.
 
 ## One-time student setup (Windows CMD)
 

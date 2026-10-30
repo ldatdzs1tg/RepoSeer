@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType, SimpleNamespace
 from uuid import UUID
 
+from reposeer.collection.persistence import replace_atomic
 from reposeer.contracts.identity import canonical_github_url, format_utc_timestamp, package_id
 from reposeer.storage import screening_mapping as master_mapping
 from reposeer.storage.screening_mapping import MAPPING_FIELDS as MAPPING_FIELDS
@@ -193,7 +194,7 @@ def atomic_bytes(path, data, *, immutable=True):
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        replace_atomic(temporary, path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -508,7 +509,7 @@ def copy_verified(source: Path, destination: Path, *, replace: bool = False) -> 
         if destination.exists() and not replace:
             require(fingerprint(destination) == expected, "mounted_path_checksum_conflict")
             return
-        os.replace(temporary, destination)
+        replace_atomic(temporary, destination)
         require(fingerprint(destination) == expected, "mounted_readback_checksum_mismatch")
     finally:
         if temporary is not None:

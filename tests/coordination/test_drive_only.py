@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
+import httpx
 import pytest
 from tests.coordination import test_coordination as coordination_tests
 from tools.coordination import _common as c
@@ -26,9 +27,12 @@ tmp_path = coordination_tests.tmp_path
 
 @pytest.fixture(autouse=True)
 def no_legacy_services(monkeypatch):
+    monkeypatch.setattr(w, "schedule_external", lambda *args, **kwargs: dict(
+        status="planned" if kwargs.get("dry_run") else "completed", failed=0, packages_planned=0))
     def forbidden(*args, **kwargs):
         pytest.fail("Drive-only must not instantiate Registry/rclone or an unmocked PyPI client")
 
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", forbidden)
     monkeypatch.delenv("REPOSEER_REGISTRY_DSN", raising=False)
     monkeypatch.delenv("REPOSEER_DRIVE_REMOTE", raising=False)
     monkeypatch.setattr(subprocess, "run", forbidden)
@@ -1078,10 +1082,14 @@ def test_v2_policy_limits_and_preflight_before_any_output(tmp_path, environment,
     assignment = root / f"assignments/C1/{run_id}.csv"
     monkeypatch.setattr(w, "check_providers", lambda **kwargs: dict(ready=False, providers=[]))
     result = w.crawl_drive(assignment, data_root=tmp_path / "worker")
-    assert result["status"] == "provider_setup_incomplete"
+    assert result["status"] == "configuration_incomplete"
     assert not (tmp_path / "worker").exists() and not (root / "submissions").exists()
-    pipeline, paths, _, _, _ = environment
+    pipeline, paths, _, options, _ = environment
+    options["fail_provider"] = True
     pipeline.run(["pypi:flask"], **c.collection_options("initial"))
+    schedules = []
+    monkeypatch.setattr(w, "schedule_external", lambda *args, **kwargs:
+        schedules.append(kwargs) or dict(failed=0, packages_planned=0))
     checks = []
     monkeypatch.setattr(w, "check_providers", lambda **kwargs: checks.append(kwargs) or dict(ready=True))
 
@@ -1093,11 +1101,12 @@ def test_v2_policy_limits_and_preflight_before_any_output(tmp_path, environment,
 
     result = w.crawl_drive(assignment, data_root=tmp_path / "worker", runner=runner)
     assert result["failed"] == 0 and len(checks) == 1
+    assert schedules[-1]["deferred"] == {"hackernews": "configuration_blocked"}
     monkeypatch.setattr(w, "check_providers", lambda **kwargs: pytest.fail("READY replay must not preflight"))
     assert w.crawl_drive(assignment, data_root=tmp_path / "fresh")["skipped_existing"] == 1
 
 
-@pytest.mark.parametrize("scenario", ["documents", "quota", "empty", "republish"])
+@pytest.mark.parametrize("scenario", ["documents", "quota", "empty", "republish", "budget", "auto", "initial", "shared_quota"])
 def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, environment, monkeypatch, scenario):
     import httpx
     from tests.integration.test_external_crawl_pipeline import HTML
@@ -1116,35 +1125,41 @@ def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, en
     d.screen_drive(run, data_root=tmp_path / "screen", client=PyPI())
     marker_path = root / f"screening/runs/{run_id}/READY.json"
     legacy = c.read_json(marker_path)
-    legacy.pop("collection_policy")
+    if scenario != "initial":
+        legacy.pop("collection_policy")
     c.write_json(marker_path, legacy, immutable=False)
     pipeline, paths, _, options, _ = environment
-    options["fail_provider"] = True
-    source_result = pipeline.run(["pypi:flask"], **c.collection_options("initial"))
-    assert source_result.status == "partial"
-
-    def runner(command, **kwargs):
-        shutil.copytree(paths.base_dir, Path(command[command.index("--data-dir") + 1]), dirs_exist_ok=True)
-
-    assert w.crawl_drive(root / f"assignments/C1/{run_id}.csv", data_root=tmp_path / "crawl", runner=runner)["partial"] == 1
-    submissions = root / "submissions/C1"
-    source_inventory = c.files(submissions)
+    options["fail_provider"] = scenario != "initial"
     requests, checks = [], []
+    recovering = False
     monkeypatch.setattr(w, "check_providers", lambda **kwargs: checks.append(kwargs) or dict(ready=True))
+    from tools.coordination import external as ex
+
+    monkeypatch.setattr(w, "schedule_external", ex.schedule)
     policy = URLPolicy(lambda host: ["93.184.216.34"])
 
     def handler(request):
         requests.append(request)
         assert request.url.host not in {"api.github.com", "pypi.org"}
         if request.url.host == "hn.algolia.com":
-            return httpx.Response(200, json={"hits": [] if scenario == "empty" else [{"objectID": "42", "title": "Flask release",
-                "url": "https://blog.example/flask"}], "nbPages": 1})
+            if scenario == "initial":
+                page = int(request.url.params["page"])
+                if page == 1 and not recovering:
+                    return httpx.Response(429, headers={"retry-after": "0"})
+                return httpx.Response(200, json={"hits": [{"objectID": str(42 + page), "title": "Flask release",
+                    "url": f"https://blog.example/flask/{page}"}], "nbPages": 2})
+            hits = [] if scenario == "empty" else ([{"objectID": str(index), "title": "Flask Python release",
+                    "url": f"https://blog.example/flask/{index}"} for index in range(30)] if scenario == "budget" else
+                    [{"objectID": "42", "title": "Flask release", "url": "https://blog.example/flask"}])
+            return httpx.Response(200, json={"hits": hits, "nbPages": 9 if scenario == "budget" else 1})
         if request.url.host == "dev.to":
-            return httpx.Response(200, json=[])
+            return httpx.Response(200, json=[] if scenario in {"empty", "budget"} else [{
+                "id": 8, "title": "Flask Python article", "url": "https://blog.example/flask/0" if scenario == "initial" else "https://blog.example/flask",
+                "published_at": "2024-01-01T00:00:00Z"}])
         if request.url.host == "api.stackexchange.com":
             return httpx.Response(200, json={"items": [], "has_more": False})
         if request.url.host == "newsapi.org":
-            if scenario == "quota":
+            if scenario in {"quota", "shared_quota"} and not recovering:
                 return httpx.Response(200, json={"status": "error", "code": "apiKeyExhausted"})
             return httpx.Response(200, json={"status": "ok", "totalResults": 0, "articles": []})
         if request.url.host == "feeds.example":
@@ -1161,8 +1176,58 @@ def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, en
             return ExternalEnrichmentPipeline(paths, http_client=http, url_policy=policy,
                 discovery_factory=lambda **kwargs: ExternalPipeline(providers=providers, **kwargs))
 
+        if scenario == "initial":
+            from reposeer.pipelines.external_crawl import ExternalCrawlPipeline
+
+            external = factory(paths)
+            pipeline.discovery_factory = lambda **kwargs: external.discovery_factory(http_client=http, **kwargs)
+            pipeline.crawl_factory = lambda **kwargs: ExternalCrawlPipeline(http_client=http, policy=policy, **kwargs)
+        selected_scheduler = w.schedule_external
+        monkeypatch.setattr(w, "schedule_external", lambda *args, **kwargs: dict(failed=0, packages_planned=0))
+        source_result = pipeline.run(["pypi:flask"], **(c.policy_options("distributed-v2") if scenario == "initial" else c.collection_options("initial")))
+        assert source_result.status == "partial"
+
+        def runner(command, **kwargs):
+            shutil.copytree(paths.base_dir, Path(command[command.index("--data-dir") + 1]), dirs_exist_ok=True)
+
+        assert w.crawl_drive(root / f"assignments/C1/{run_id}.csv", data_root=tmp_path / "crawl", runner=runner)["partial"] == 1
+        submissions = root / "submissions/C1"
+        source_part = c.checked_mount_path(next(submissions.glob("*/*/part_*")))
+        source_inventory = c.files(source_part)
+        second_source = None
+        if scenario == "shared_quota":
+            second_source = c.checked_mount_path(c.safe_path(root, f"submissions/C1/{uuid4()}/{source_part.parent.name}/part_001"))
+            shutil.copytree(source_part, second_source)
+            copied_input = c.read_json(second_source / "COLLECTION_INPUT.json")
+            copied_input["sampling_run_id"] = second_source.parent.parent.name
+            c.write_json(second_source / "COLLECTION_INPUT.json", copied_input, immutable=False)
+            copied_ready = c.read_json(second_source / "READY.json")
+            copied_ready["sampling_run_id"] = copied_input["sampling_run_id"]
+            checksum_lines = "".join(f"{sha} {size} {name}\n" for name, (sha, size) in c.files(second_source).items()
+                                     if name not in {"CHECKSUMS.sha256", "READY.json"})
+            c.atomic_bytes(second_source / "CHECKSUMS.sha256", checksum_lines.encode(), immutable=False)
+            copied_ready["checksums_sha256"] = c.digest(checksum_lines.encode())
+            c.write_json(second_source / "READY.json", copied_ready, immutable=False)
+            second_inventory = c.files(second_source)
+        supplement = source_part.parent / "supplements"
+        monkeypatch.setattr(w, "schedule_external", selected_scheduler)
+        if scenario == "initial":
+            initial_query = next(request.url.params["query"] for request in requests if request.url.host == "hn.algolia.com")
+            recovering = True
+        requests.clear()
+        checks.clear()
+        if scenario == "auto":
+            def auto_schedule(*args, **kwargs):
+                return ex.schedule(*args, **kwargs, pipeline_factory=factory)
+            monkeypatch.setattr(w, "schedule_external", auto_schedule)
+            result = w.crawl_drive(root / f"assignments/C1/{run_id}.csv", data_root=tmp_path / "auto")
+            assert result["skipped_existing"] == 1 and result["failed"] == 0, result
+            assert result["enrichment"]["packages_processed"] == 1
+            assert result["enrichment"]["packages_planned"] <= 1
+            assert c.files(source_part) == source_inventory
+            return
         output = tmp_path / "enrichment"
-        assert w.enrich_drive(submissions, data_root=output, dry_run=True)["planned"] == 1
+        assert w.enrich_drive(submissions, data_root=output, dry_run=True)["planned"] == (2 if second_source else 1)
         assert not requests and not output.exists()
         copy = w.copy_verified
         if scenario == "republish":
@@ -1173,7 +1238,11 @@ def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, en
 
             monkeypatch.setattr(w, "copy_verified", interrupted_copy)
         result = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
-        assert c.files(submissions) == source_inventory
+        assert c.files(source_part) == source_inventory
+        if scenario == "initial":
+            assert requests and all(request.url.host in {"hn.algolia.com", "blog.example"} for request in requests)
+            resumed = [request for request in requests if request.url.host == "hn.algolia.com" and request.url.params["query"] == initial_query]
+            assert resumed and all(request.url.params["page"] == "1" for request in resumed)
         if scenario == "republish":
             assert result["failed"] == 1
             monkeypatch.setattr(w, "copy_verified", copy)
@@ -1182,24 +1251,70 @@ def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, en
             result = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
             assert not requests and not checks
 
-        if scenario == "quota":
-            assert result["partial"] == 1 and result["no_candidates"] == 0
-            assert not list((root / "external-enrichments").rglob("READY.json"))
-            assert result["providers"]["news"]["failures"] > 0
+        if scenario in {"quota", "shared_quota"}:
+            assert result["partial"] == (2 if second_source else 1) and result["no_candidates"] == 0
+            assert len(list(supplement.rglob("READY.json"))) == 4
+            coverage = ex.resolve_verified_external_inputs(source_part)["coverage"]["pypi:flask"]
+            assert coverage["news"] == "quota_deferred"
+            assert all(coverage[name] in ex.TERMINAL_PROVIDER_STATES for name in ("hackernews", "devto", "stackexchange", "rss"))
+            assert result["providers"]["news"][0]["failures"] > 0
             assert len([request for request in requests if request.url.host == "newsapi.org"]) == 1
-            scenario = "documents"
+            news_state = ex.supplement_root(source_part) / "state" / c.digest(b"pypi:flask") / "news.json"
+            forged = c.read_json(news_state)
+            forged["status"] = "complete"
+            c.write_json(news_state, forged, immutable=False)
+            # Mutable complete without a receipt must not establish coverage or skip recovery.
+            assert ex.resolve_verified_external_inputs(source_part)["coverage"]["pypi:flask"]["news"] not in ex.TERMINAL_PROVIDER_STATES
+            recovering = True
             requests.clear()
             result = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
-        assert result["no_candidates" if scenario == "empty" else "completed"] == 1 and result["failed"] == 0, result
-        assert result["documents_extracted"] == (0 if scenario == "empty" else 1)
-        assert len([request for request in requests if request.url.host == "blog.example"]) == (0 if scenario in {"empty", "republish"} else 1)
-        before = c.files(root / "external-enrichments")
+            assert all(request.url.host == "newsapi.org" for request in requests)
+        assert result["no_candidates" if scenario == "empty" else "completed"] == (2 if second_source else 1) and result["failed"] == 0, result
+        assert result["documents_extracted"] == (20 if scenario == "budget" else 2 if scenario in {"initial", "shared_quota"} else 0 if scenario == "empty" else 1)
+        assert len([request for request in requests if request.url.host == "blog.example"]) == (20 if scenario == "budget" else 0 if scenario in {"empty", "republish", "quota", "shared_quota"} else 1)
+        hn_state = ex.supplement_root(source_part) / "state" / c.digest(b"pypi:flask") / "hackernews.json"
+        stale = c.read_json(hn_state)
+        stale["status"] = "quota_deferred"
+        c.write_json(hn_state, stale, immutable=False)
+        before = c.files(supplement)
         requests.clear()
         checks.clear()
-        assert w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)["skipped_existing"] == 1
+        assert w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)["skipped_existing"] == (2 if second_source else 1)
         assert not requests and not checks
-        assert c.files(root / "external-enrichments") == before and c.files(submissions) == source_inventory
-        source_ready = next(submissions.rglob("READY.json"))
+        assert c.files(supplement) == before and c.files(source_part) == source_inventory
+        if second_source:
+            assert c.files(second_source) == second_inventory
+        assert not (root / "external-enrichments").exists()
+        reader = ex.resolve_verified_external_inputs(source_part)
+        assert len(reader["records"]) == (20 if scenario == "budget" else 2 if scenario == "initial" else 0 if scenario == "empty" else 1)
+        master_before = c.fingerprint(root / "screening/mapping.csv")
+        meta_before = c.fingerprint(root / "screening/mapping.meta.json")
+        ex.external_report(root)
+        assert c.fingerprint(root / "screening/mapping.csv") == master_before
+        assert c.fingerprint(root / "screening/mapping.meta.json") == meta_before
+        rows = c.read_drive_csv(root / "screening/external_coverage.csv", (
+            "sampling_run_id", "worker_id", "package_id", "repo_full_name", "source_part", "policy_id",
+            "hackernews_status", "devto_status", "stackexchange_status", "rss_status", "news_status",
+            "overall_external_status", "completed_provider_count", "pending_provider_count", "last_attempt_at", "last_success_at"))
+        assert len(rows) == (2 if second_source else 1)
+        assert all(row["completed_provider_count"] == "5" for row in rows)
+        assert rows[0]["hackernews_status"] in ex.TERMINAL_PROVIDER_STATES
+        if scenario == "documents":
+            denied = CliRunner().invoke(app, ["process", "--data-dir", str(source_part)])
+            assert denied.exit_code == 2
+            processed = CliRunner().invoke(app, ["process", "--data-dir", str(source_part), "--output-dir", str(tmp_path / "analysis")])
+            assert processed.exit_code == 0, processed.output
+            assert c.files(source_part) == source_inventory
+            historical = ex.resolve_verified_external_inputs(source_part, cutoff="2000-01-01T00:00:00.000Z")
+            assert historical["records"] == []
+        published = next(c.checked_mount_path(supplement).rglob("CHECKSUMS.sha256"))
+        original_checksums = published.read_bytes()
+        published.write_bytes(original_checksums + b"invalid")
+        corrupt = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
+        assert corrupt["failed"] and not requests
+        assert published.read_bytes() == original_checksums + b"invalid"
+        published.write_bytes(original_checksums)
+        source_ready = source_part / "READY.json"
         source_ready.write_bytes(source_ready.read_bytes() + b" ")
         changed = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
         assert changed["failed"] == 1

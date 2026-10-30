@@ -45,7 +45,12 @@ class StoragePaths:
         """Discover existing normalized-source inputs only; never discovery candidates."""
         inputs = [self.raw_dir / "github" / f"{name}.jsonl" for name in
                   ("repositories", "commits", "issues", "pull_requests", "contributors", "releases")]
-        inputs.append(self.raw_dir / "external" / "documents.jsonl")
+        if (self.base_dir / "COLLECTION_INPUT.json").exists() and (self.base_dir / "READY.json").exists():
+            from tools.coordination.external import resolve_verified_external_inputs
+
+            inputs.extend(resolve_verified_external_inputs(self.base_dir)["document_paths"])
+        else:
+            inputs.append(self.raw_dir / "external" / "documents.jsonl")
         return [path for path in inputs if path.is_file()]
 
 

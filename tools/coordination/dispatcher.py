@@ -1632,6 +1632,8 @@ def main():
     )
     sub.add_argument("--drive-root", type=Path, required=True)
     sub.add_argument("--dry-run", action="store_true")
+    sub = commands.add_parser("external-report", help="Write verified external coverage without changing master mapping")
+    sub.add_argument("--drive-root", type=Path, required=True)
     sub = commands.add_parser("screen-local")
     sub.add_argument("--assignment", type=Path, required=True)
     sub.add_argument("--out-dir", type=Path, required=True)
@@ -1653,7 +1655,7 @@ def main():
     group.add_argument("--dry-run", action="store_true")
     sub.add_argument("--pending-dir", type=Path, default=Path("data/coordination"))
     for name, sub in commands.choices.items():
-        if name not in {"screen-drive", "bootstrap-mapping"}:
+        if name not in {"screen-drive", "bootstrap-mapping", "external-report"}:
             sub.add_argument("--remote", default=argparse.SUPPRESS)
     args = cli.parse_args()
     if args.command == "screen-drive":
@@ -1665,6 +1667,10 @@ def main():
         )
     if args.command == "bootstrap-mapping":
         return bootstrap_mapping(args.drive_root, dry_run=args.dry_run)
+    if args.command == "external-report":
+        from tools.coordination.external import external_report
+
+        return external_report(args.drive_root)
     registry = Registry()
     if args.command in {"import-discovery", "import-screening"}:
         function = import_discovery if args.command == "import-discovery" else import_screening
