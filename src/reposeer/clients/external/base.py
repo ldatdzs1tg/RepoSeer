@@ -7,6 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, Field
 
+from reposeer.exceptions import HTTPClientError
 from reposeer.schemas.external.candidate import ExternalCandidate
 
 
@@ -79,3 +80,11 @@ class DiscoveryProvider(ABC):
         return result.candidates[:limit]
 
 
+
+
+class ProviderError(HTTPClientError):
+    """Safe provider failure category; upstream text and credentials are never retained."""
+
+    def __init__(self, code: str, *, status_code: int | None = None):
+        super().__init__(code, status_code=status_code)
+        self.code = code

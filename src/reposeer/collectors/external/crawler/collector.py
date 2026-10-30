@@ -79,7 +79,9 @@ def discovery_reference(data: dict[str, Any]) -> dict[str, Any]:
         "discovery_source_url": data.get("discovery_source_url"),
     }
     for name in ("query_id", "query_intent", "query_associations", "query_set_hash",
-                 "query_version", "context_level", "raw_record_ids", "window_start", "window_end", "cutoff_at"):
+                 "query_version", "context_level", "raw_record_ids", "window_start", "window_end", "cutoff_at",
+                 "search_target_package_id", "search_target_repo_id", "search_target_repo_full_name",
+                 "subject_match_status", "discovered_at", "published_at"):
         if name in payload:
             values[name] = payload[name]
     return {name: value for name, value in values.items() if value is not None}
@@ -116,6 +118,9 @@ def candidate_data(value: CandidateInput | CandidateGroup) -> dict[str, Any]:
             "discovery_source_item_id": value.source_record_id,
             "discovery_source_url": value.source_url,
             "title": value.payload.get("title"),
+            "search_association": {key: value.payload.get("search_target_" + key)
+                                   for key in ("package_id", "repo_id", "repo_full_name")}
+                                  if value.payload.get("search_target_package_id") else None,
             "repo_id": value.repo_id,
             "package_id": value.package_id,
             "candidate_raw_record_id": value.raw_record_id,
@@ -229,13 +234,21 @@ class ExternalCrawlerCollector:
             data = candidate_data(candidate)
             raw = None
             try:
-                scope = self.repository_scopes.get(data.get("package_id"))
+                association = data.get("search_association")
+                scope = self.repository_scopes.get(
+                    association.get("package_id") if association else data.get("package_id"))
+                if association and scope:
+                    full_name = scope["repository_url"].removeprefix("https://github.com/")
+                    if (association.get("repo_id") != scope["repo_id"]
+                            or str(association.get("repo_full_name", "")).casefold() != full_name.casefold()):
+                        scope = None
                 if scope:
                     if data.get("repo_id") not in {None, scope["repo_id"]}:
                         raise ValueError("candidate_repository_scope_mismatch")
                     if scope["observed_at"] > format_utc_timestamp(self.clock()):
                         raise ValueError("repository_scope_not_yet_observed")
                     data["repo_id"] = scope["repo_id"]
+                    data["package_id"] = scope["package_id"]
                 # Check the candidate too, even when fetching a fixed native endpoint.
                 self.policy.validate(data["url"])
                 endpoint, native, item_id = native_endpoint(data)

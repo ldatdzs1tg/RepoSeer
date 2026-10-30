@@ -99,6 +99,7 @@ class DiscoveryJob(BaseModel):
     execution_identity: dict[str, Any]
     status: Literal["pending", "running", "complete", "partial", "failed", "unavailable", "skipped_budget"] = "pending"
     attempted: bool = False
+    requests_attempted: int = Field(default=0, ge=0)
     pages_fetched: int = Field(default=0, ge=0)
     records_observed: int = Field(default=0, ge=0)
     native_items_observed: int = Field(default=0, ge=0)
@@ -272,7 +273,7 @@ class ExternalDiscoveryCollector:
                 provider = self.providers.get(name)
                 policy = provider.execution_policy() if provider else {}
                 # Include effective provider filters, not credentials or native cursors.
-                policy.update(page_size=50, window_filter="(start,end]", historical_mode=historical, starting_cursor=initial_cursor)
+                policy.update(page_size=min(50, max(1, request.max_records // len(self.providers))) if len(self.providers) > 1 else 50, window_filter="(start,end]", historical_mode=historical, starting_cursor=initial_cursor)
                 identity = {"provider": name, "query_id": term.query_id,
                             "query": " ".join(term.query.split()).casefold(), "query_intent": term.intent,
                             "context_level": term.context_level, "requested_window": window,
@@ -290,7 +291,7 @@ class ExternalDiscoveryCollector:
                 elif historical and not provider.supports_historical_window:
                     job.status, job.missing_reason = "unavailable", "historical_unavailable"
                 elif not provider.is_available:
-                    job.status, job.missing_reason = "unavailable", "provider_not_implemented"
+                    job.status, job.missing_reason = "unavailable", getattr(provider, "unavailable_reason", "provider_not_implemented")
                 jobs.append(job)
         jobs = list({job.job_id: job for job in jobs}.values())
         scope = {"subject": [subject.model_dump() for subject in request.subjects],
@@ -374,6 +375,11 @@ class ExternalDiscoveryCollector:
                 self.progress.run_manager.save_checkpoint(self.progress.context)
 
         persist()
+        provider_record_limit = max(1, request.max_records // max(1, len(self.providers)))
+
+        def provider_count(name):
+            return sum(raw.payload.get("discovery_provider") == name for raw in raw_observations_by_id.values())
+
         pages_this_call = 0
         requests_this_call = 0
         for job in jobs:
@@ -381,6 +387,10 @@ class ExternalDiscoveryCollector:
                 continue
             if len(raw_observations_by_id) >= request.max_records or requests_this_call >= TOTAL_REQUEST_LIMIT:
                 job.status, job.missing_reason = "skipped_budget", "max_records" if len(raw_observations_by_id) >= request.max_records else "total_request_budget"
+                persist()
+                continue
+            if len(self.providers) > 1 and provider_count(job.provider) >= provider_record_limit:
+                job.status, job.missing_reason = "skipped_budget", "provider_record_budget"
                 persist()
                 continue
             provider = self.providers[job.provider]
@@ -392,12 +402,14 @@ class ExternalDiscoveryCollector:
             pages_this_job = 0
             while pages_this_job < request.max_pages and requests_this_call < TOTAL_REQUEST_LIMIT:
                 cursor = job.next_cursor
+                before = getattr(getattr(provider, "http", None), "requests_attempted", None)
                 try:
                     job.attempted = True
                     requests_this_call += 1
                     page = provider.search_page(job.query, window_start=start, window_end=effective_end,
-                                                cursor=cursor, page_size=50)
+                                                cursor=cursor, page_size=min(50, provider_record_limit) if len(self.providers) > 1 else 50)
                 except (HTTPClientError, ValueError) as error:
+                    job.requests_attempted += provider.http.requests_attempted - before if before is not None else 1
                     code = ("rate_limited" if isinstance(error, RateLimitExceededError)
                             or isinstance(error, HTTPClientError) and error.status_code == 429
                             else "http_error" if isinstance(error, HTTPClientError) else "parse_error")
@@ -409,11 +421,12 @@ class ExternalDiscoveryCollector:
                     job.errors.append(entry.model_dump())
                     job.error_history.append(entry.model_dump())
                     job.status = "partial" if job.pages_fetched else "failed"
-                    job.missing_reason = code
+                    job.missing_reason = getattr(error, "code", code)
                     if self.progress:
                         self.progress.record_error()
                     persist()
                     break
+                job.requests_attempted += provider.http.requests_attempted - before if before is not None else 1
                 pages_this_job += 1
                 pages_this_call += 1
                 job.pages_fetched += 1
@@ -439,6 +452,10 @@ class ExternalDiscoveryCollector:
                         candidate.source = job.provider
                         candidate.url = canonical_article_url(candidate.url)
                         observed_at = self.clock()
+                        if job.provider == "rss":
+                            observed_at = candidate.discovered_at
+                            if observed_at.tzinfo is None or observed_at > self.clock():
+                                raise ValueError("invalid_feed_observation_time")
                         candidate.discovered_at = observed_at
                         pub = candidate.publication_date
                         if pub is not None and (pub.tzinfo is None or pub.utcoffset() is None):
@@ -480,7 +497,8 @@ class ExternalDiscoveryCollector:
                                        window_start=window["start_at"], window_end=window["end_at"], cutoff_at=request.cutoff_at)
                         content_key = (candidate_id, _source_observation_key(payload))
                         raw_id = observation_ids_by_content.get(content_key)
-                        if raw_id is None and len(raw_observations_by_id) >= request.max_records:
+                        if raw_id is None and (len(raw_observations_by_id) >= request.max_records
+                                or len(self.providers) > 1 and provider_count(job.provider) >= provider_record_limit):
                             interrupted = True
                             break
                         if raw_id is None:
@@ -540,7 +558,8 @@ class ExternalDiscoveryCollector:
                 persist()
                 if not page.has_more:
                     break
-                if len(raw_observations_by_id) >= request.max_records:
+                if (len(raw_observations_by_id) >= request.max_records
+                        or len(self.providers) > 1 and provider_count(job.provider) >= provider_record_limit):
                     job.status, job.missing_reason = "partial", "max_records"
                     persist()
                     break
@@ -606,6 +625,7 @@ class ExternalDiscoveryCollector:
                     "pagination_complete": pagination_complete, "retrieval_complete": complete, "completeness_status": coverage_status,
                     "records_observed": len(raw_observations_by_id), "records_rejected": rejected,
                     "errors": [error.model_dump() for error in errors],
+                    "provider_record_limit": provider_record_limit,
                     "max_pages_scope": "per_provider_query_per_invocation", "max_records_scope": "logical_run_raw_observations",
                     "max_pages_per_job": request.max_pages, "max_records": request.max_records,
                     "total_request_limit": TOTAL_REQUEST_LIMIT, "requests_this_invocation": requests_this_call, "historical_content_verified": False,

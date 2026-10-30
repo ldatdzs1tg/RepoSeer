@@ -199,7 +199,8 @@ def test_stackexchange_client_search_page(tmp_path):
     assert req.url.params["order"] == "desc"
     assert req.url.params["fromdate"] == str(int(w_start.timestamp()))
     assert req.url.params["todate"] == str(int(w_end.timestamp()))
-    assert req.url.params["key"] == "synthetic_se_key"
+    assert "key" not in req.url.params
+    assert req.headers["Authorization"] == "Bearer synthetic_se_key"
 
     assert len(result.candidates) == 1
     assert result.page_number == 2
@@ -329,21 +330,137 @@ def test_devto_client_search_page_with_window_cutoff(tmp_path):
     assert progress.context.get_checkpoint("external.devto.query") == "flask python"
 
 
-def test_rss_and_newsapi_providers():
-    rss = RSSProvider()
-    assert rss.provider_name == "rss"
-    assert rss.supports_historical_window is False
-    res_rss = rss.search_page("query")
-    assert res_rss.candidates == []
-    assert res_rss.has_more is False
-    assert rss.search("query") == []
+def test_newsapi_pagination_errors_and_zero_results():
+    requests = []
+    payload = {"status": "ok", "totalResults": 3, "articles": [{
+        "title": "Flask release", "url": "https://example.com/flask", "description": "Python package",
+        "source": {"name": "Example"}, "author": "Author", "publishedAt": "2025-01-01T00:00:00Z"}]}
 
-    news = NewsAPIProvider(api_key="test_key")
-    assert news.provider_name == "news"
-    res_news = news.search_page("query")
-    assert res_news.candidates == []
-    assert res_news.has_more is False
-    assert news.search("query") == []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=payload)
+
+    with HTTPClient(transport=httpx.MockTransport(handler)) as http:
+        news = NewsAPIProvider("synthetic-news", http_client=http)
+        result = news.search_page("flask", page_size=1)
+        assert result.has_more and result.next_cursor == "2"
+        candidate = result.candidates[0]
+        assert candidate.source == "news" and candidate.source_item_id.startswith("news:")
+        assert candidate.publication_date == datetime(2025, 1, 1, tzinfo=UTC)
+        assert candidate.snippet == "Python package"
+        assert requests[0].headers["X-Api-Key"] == "synthetic-news"
+        assert "synthetic-news" not in str(requests[0].url)
+        assert requests[0].url.params["q"] == "flask"
+        payload.update(totalResults=0, articles=[])
+        assert news.search_page("flask").candidates == []
+        payload.update(status="error", code="apiKeyExhausted", message="synthetic-news")
+        with pytest.raises(HTTPClientError, match="quota_exhausted") as error:
+            news.search_page("flask")
+        assert "synthetic-news" not in str(error.value)
+        before = len(requests)
+        with pytest.raises(HTTPClientError, match="missing_configuration"):
+            NewsAPIProvider(http_client=http).search_page("flask")
+        assert len(requests) == before
+
+
+@pytest.mark.parametrize("body", [
+    b'<rss version="2.0"><channel><item><title>Flask Python release</title><link>https://example.com/flask</link><guid>one</guid><pubDate>Wed, 01 Jan 2025 00:00:00 GMT</pubDate><description>Flask package</description></item></channel></rss>',
+    b'<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Flask Python release</title><link href="https://example.com/flask"/><id>one</id><published>2025-01-01T00:00:00Z</published><summary>Flask package</summary></entry></feed>',
+])
+def test_rss_real_feeds_cached_per_invocation(body):
+    from reposeer.collectors.external.crawler.safety import URLPolicy
+
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        assert "authorization" not in request.headers
+        return httpx.Response(200, content=body)
+
+    with HTTPClient(transport=httpx.MockTransport(handler)) as http:
+        rss = RSSProvider(["https://feeds.example/python"], http_client=http,
+                          policy=URLPolicy(lambda host: ["93.184.216.34"]))
+        first = rss.search_page("flask python")
+        assert first.candidates[0].publication_date == datetime(2025, 1, 1, tzinfo=UTC)
+        assert first.candidates[0].native_payload["summary_only"] is True
+        assert not first.has_more
+        assert rss.search_page("unrelated").candidates == []
+        assert rss.search_page("flask").candidates[0].discovered_at == first.candidates[0].discovered_at
+        assert len(requests) == 1
+        assert rss.supports_historical_window is False
+
+
+def test_rss_rejects_private_feeds_entities_and_oversized_responses():
+    from reposeer.clients.external.rss import parse_feed
+    from reposeer.collectors.external.crawler.safety import URLPolicy
+
+    for url in ("http://example.com/rss", "https://127.0.0.1/rss", "https://169.254.169.254/rss"):
+        with pytest.raises(ValueError):
+            RSSProvider([url])
+    with pytest.raises(ValueError, match="unsafe_feed_xml"):
+        parse_feed(b'<!DOCTYPE rss [<!ENTITY x "boom">]><rss>&x;</rss>')
+    with HTTPClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"x" * 2_000_001))) as http:
+        rss = RSSProvider(["https://feeds.example/python"], http_client=http,
+                          policy=URLPolicy(lambda host: ["93.184.216.34"]))
+        with pytest.raises(HTTPClientError, match="byte limit"):
+            rss.search_page("flask")
+
+
+def test_preflight_blocks_all_network_and_keeps_secrets_private(capsys):
+    from reposeer.collection.provider_preflight import check_providers
+    from reposeer.config import Settings
+
+    config = Settings(_env_file=None, GITHUB_TOKEN="synthetic-github-secret", DEVTO_API_KEY=" ",
+                      STACKEXCHANGE_API_KEY="changeme", NEWS_API_KEY="synthetic-news-secret",
+                      REPOSEER_RSS_FEEDS="https://127.0.0.1/feed")
+
+    def forbidden(request):
+        pytest.fail("static validation must precede every request")
+
+    with HTTPClient(transport=httpx.MockTransport(forbidden)) as http:
+        result = check_providers(configuration=config, http_client=http)
+    assert not result["ready"]
+    serialized = str(result) + capsys.readouterr().out
+    assert "synthetic-github-secret" not in serialized and "synthetic-news-secret" not in serialized
+    assert {item["provider"]: item["status"] for item in result["providers"]}["rss"] == "invalid_feed"
+
+
+def test_live_preflight_requires_authenticated_stackexchange_quota(monkeypatch):
+    import reposeer.collection.provider_preflight as preflight
+    from reposeer.collectors.external.crawler.safety import URLPolicy
+    from reposeer.config import Settings
+
+    config = Settings(_env_file=None, GITHUB_TOKEN="unit-gh", DEVTO_API_KEY="unit-dev",
+                      STACKEXCHANGE_API_KEY="unit-stack", NEWS_API_KEY="unit-news",
+                      REPOSEER_RSS_FEEDS="https://feeds.example/rss")
+    quota = [300]
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.url.host == "api.github.com":
+            return httpx.Response(200, json={"id": 1, "login": "user"})
+        if request.url.host == "dev.to":
+            return httpx.Response(200, json={"id": 1, "username": "user"})
+        if request.url.host == "api.stackexchange.com":
+            assert request.headers["Authorization"] == "Bearer unit-stack"
+            assert "key" not in request.url.params
+            return httpx.Response(200, json={"items": [{}], "quota_max": quota[0], "quota_remaining": 10})
+        if request.url.host == "newsapi.org":
+            return httpx.Response(200, json={"status": "ok", "articles": [], "totalResults": 0})
+        if request.url.host == "feeds.example":
+            return httpx.Response(200, content=b'<rss version="2.0"><channel/></rss>')
+        return httpx.Response(200, json={"hits": [], "nbPages": 0})
+
+    monkeypatch.setattr(preflight, "RSSProvider", lambda feeds, http_client:
+                        RSSProvider(feeds, http_client=http_client, policy=URLPolicy(lambda host: ["93.184.216.34"])))
+    with HTTPClient(transport=httpx.MockTransport(handler)) as http:
+        assert not preflight.check_providers(configuration=config, http_client=http)["ready"]
+        quota[0] = 10000
+        assert preflight.check_providers(configuration=config, http_client=http)["ready"]
+        requests.clear()
+        assert preflight.check_providers(configuration=config, http_client=http, include_github=False)["ready"]
+        assert all(request.url.host != "api.github.com" for request in requests)
 
 
 def test_providers_backward_compatible_search():
@@ -419,3 +536,34 @@ def test_devto_old_relevance_hit_does_not_end_pagination():
     assert requests[0].url.path == "/api/articles/search"
     assert requests[1].url.params["q"] == "flask" and requests[1].url.params["page"] == "2"
     assert not client.supports_historical_window
+
+
+@pytest.mark.parametrize("provider", ["news", "devto", "stackexchange"])
+def test_authenticated_provider_rejects_redirect_before_forwarding_key(provider):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(302, headers={"location": "https://other.example/steal"})
+
+    classes = {"news": NewsAPIProvider, "devto": DevToClient, "stackexchange": StackExchangeClient}
+    with HTTPClient(transport=httpx.MockTransport(handler)) as http:
+        client = classes[provider](api_key="synthetic-private-key", http_client=http)
+        with pytest.raises(HTTPClientError):
+            client.search_page("flask")
+    assert len(calls) == 1 and calls[0].url.host != "other.example"
+
+
+def test_stackexchange_json_backoff_paces_subsequent_requests():
+    now, waits = [1000.0], []
+
+    def sleep(seconds):
+        waits.append(seconds)
+        now[0] += seconds
+
+    with HTTPClient(clock=lambda: now[0], sleep=sleep, transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"items": [], "has_more": False, "backoff": 2}))) as http:
+        provider = StackExchangeClient(http_client=http)
+        provider.search_page("flask")
+        provider.search_page("flask release")
+        assert waits == [2.0] and http.requests_attempted == 2

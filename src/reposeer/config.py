@@ -58,14 +58,21 @@ class Settings(BaseSettings):
     devto_api_key: str | None = Field(default=None, alias="DEVTO_API_KEY")
     stackexchange_api_key: str | None = Field(default=None, alias="STACKEXCHANGE_API_KEY")
 
+    rss_feeds: str = Field(default="", alias="REPOSEER_RSS_FEEDS")
+
     # Sub-configurations
     storage: StorageConfig = Field(default_factory=StorageConfig)
     collection: CollectionConfig = Field(default_factory=CollectionConfig)
 
     @classmethod
+    def local(cls) -> "Settings":
+        """Resolve the project .env independently of the caller working directory."""
+        return cls(_env_file=Path(__file__).resolve().parents[2] / ".env")
+
+    @classmethod
     def load(cls, config_path: str | Path | None = None) -> "Settings":
         """Load settings, optionally overriding defaults from a YAML file."""
-        settings = cls()
+        settings = cls.local()
         yaml_path = Path(config_path) if config_path else Path("configs/default.yaml")
         if yaml_path.exists():
             with open(yaml_path, encoding="utf-8") as f:

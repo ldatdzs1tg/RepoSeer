@@ -47,6 +47,31 @@ COLLECTION = dict(
     discovery_max_records=1,
     max_candidates=1,
 )
+# Immutable definitions; callers receive fresh option dictionaries.
+COLLECTION_POLICIES = MappingProxyType({
+    "legacy-initial": MappingProxyType({**COLLECTION, "discovery_sources": ("hackernews",)}),
+    "distributed-v2": MappingProxyType(dict(
+        max_pages=4, max_records=300,
+        discovery_sources=("hackernews", "devto", "stackexchange", "rss", "news"),
+        discovery_max_pages=3, discovery_max_records=150, max_candidates=20)),
+})
+
+
+def policy_options(policy_id):
+    require(isinstance(policy_id, str) and policy_id in COLLECTION_POLICIES, "invalid_collection_policy")
+    return {key: list(value) if isinstance(value, tuple) else value
+            for key, value in COLLECTION_POLICIES[policy_id].items()}
+
+
+def screening_policy(marker):
+    if "collection_policy" not in marker:
+        return "legacy-initial"
+    policy = marker["collection_policy"]
+    require(isinstance(policy, dict) and set(policy) == {"policy_id"}, "invalid_collection_policy")
+    policy_options(policy["policy_id"])
+    return policy["policy_id"]
+
+
 MAX_FILE = 2 * 1024**3
 MAX_BUNDLE = 20 * 1024**3
 MAX_FILES = 10000
@@ -358,6 +383,13 @@ def no_worker_dsn():
 
 
 def redact(text):
+    from reposeer.config import Settings
+
+    configuration = Settings.local()
+    for name in ("github_token", "devto_api_key", "stackexchange_api_key", "news_api_key"):
+        value = getattr(configuration, name)
+        if value:
+            text = text.replace(value, "[REDACTED]")
     for key, value in os.environ.items():
         if (
             key != "REPOSEER_REGISTRY_DSN"
@@ -553,6 +585,7 @@ def verify_drive_screening(
         and marker.get("sampling_run_id") == run_id,
         "drive_screening_ready_mismatch",
     )
+    screening_policy(marker)
     timestamp(marker["generated_at_utc"])
     require(
         set(files(base)) <= {"mapping.csv", "pypi_evidence.jsonl", "READY.json"},

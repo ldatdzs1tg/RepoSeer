@@ -114,13 +114,14 @@ class ExternalPipeline:
         api_keys = {"devto": settings.devto_api_key, "stackexchange": settings.stackexchange_api_key}
         requested = {"hackernews"} if requested is None else requested
         if requested - (factories.keys() | {"rss", "news"}):
-            raise ValueError("Unsupported discovery provider; supported: hackernews, devto, stackexchange")
+            raise ValueError("Unsupported discovery provider; supported: hackernews, devto, stackexchange, rss, news")
         resolved: dict[str, DiscoveryProvider] = {}
         for name in sorted(requested):
             if name == "rss":
-                resolved[name] = RSSProvider()
+                resolved[name] = RSSProvider([url.strip() for url in settings.rss_feeds.split(",") if url.strip()],
+                                             http_client=self.http, clock=self.clock)
             elif name == "news":
-                resolved[name] = NewsAPIProvider()
+                resolved[name] = NewsAPIProvider(settings.news_api_key, http_client=self.http, clock=self.clock)
             else:
                 # Provider fetch checkpoints are not durable discovery job checkpoints.
                 credentials = {"api_key": api_keys[name] or None} if name in api_keys else {}
@@ -146,6 +147,7 @@ class ExternalPipeline:
         historical_mode: bool = False,
         resume: bool = False,
         include_technology_context: bool = False,
+        extended_package_queries: bool = False,
     ) -> ExternalDiscoveryPipelineResult:
         """Run external discovery for a repository or package subject."""
         repo_full_name: str | None = None
@@ -272,7 +274,9 @@ class ExternalPipeline:
             specs=specs, primary_spec=primary_spec, repo_full_name=repo_full_name,
             package_id=package_id, repo_id=repo_id, functional_profile=functional_profile,
             entities=entities, cutoff_at=cutoff_at_str, historical_mode=historical,
-            include_technology_context=include_technology_context)
+            include_technology_context=include_technology_context,
+            extended_package_queries=extended_package_queries,
+            query_version="2.0.0" if extended_package_queries else "1.0.0")
         if context is None:
             context = self.run_manager.start_run(run_id_val)
         progress = CollectionProgress(context, self.run_manager)

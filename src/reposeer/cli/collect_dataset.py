@@ -23,8 +23,23 @@ def main(
     discovery_max_pages: int = typer.Option(1, "--discovery-max-pages"),
     discovery_max_records: int = typer.Option(30, "--discovery-max-records"),
     max_candidates: int = typer.Option(15, "--max-candidates"),
+    policy: str | None = typer.Option(None, "--policy", help="Explicit distributed-v2 setup gate"),
     cutoff_at: str | None = typer.Option(None, "--cutoff-at", help="Stored diagnostics only"),
 ) -> None:
+    if policy is not None:
+        if policy != "distributed-v2" or mode != "live":
+            raise typer.BadParameter("distributed-v2 requires live mode")
+        from reposeer.collection.provider_preflight import check_providers
+
+        preflight = check_providers()
+        if not preflight["ready"]:
+            import json
+
+            typer.echo(json.dumps(preflight), err=True)
+            raise typer.Exit(1)
+        max_pages, max_records = 4, 300
+        discovery_sources = "hackernews,devto,stackexchange,rss,news"
+        discovery_max_pages, discovery_max_records, max_candidates = 3, 150, 20
     options = dict(mode=mode, groups=[value.strip() for value in groups.split(",")],
                    max_pages=max_pages, max_records=max_records,
                    discovery_sources=[value.strip() for value in discovery_sources.split(",")],

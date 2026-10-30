@@ -3,9 +3,23 @@
 The recommended student workflow uses Google Drive for desktop as a mounted folder.
 **It does not use Supabase, SQL, rclone, claims, leases, or Central Ingestion.**
 D1 sampling remains deterministic; Drive exclusions prevent resampling screened packages.
-The existing PyPI/GitHub/external collectors remain unchanged.
+PyPI/GitHub contracts remain unchanged; external V2 adds five configured providers.
 The older Registry workflow is retained separately under **Legacy** below; do not
 mix its JSON assignments or ingestion commands with the new CSV workflow.
+
+## C1-C7 external V2
+
+Follow [the Vietnamese C1-C7 guide](C1-C7_EXTERNAL_COLLECTION.md) for personal API
+setup, `check-providers`, and external-only `enrich-drive --submissions-dir`.
+New D2 READY files publish `collection_policy.policy_id=distributed-v2`; workers
+resolve immutable limits from that verified policy without changing `crawl-drive`.
+READY files without policy retain `legacy-initial`. Published submissions stay
+immutable; enrichment writes to `external-enrichments/external-v2/<worker>/...`.
+New D2 staging records policy intent before screening; an older unfinished stage
+without intent requires inspection instead of silently changing its policy.
+V2 requires local GitHub/DEV.to/Stack Exchange/NewsAPI credentials and configured
+public HTTPS RSS feeds. Enrichment uses only the external preflight and never
+calls GitHub/PyPI, including for authentication. Dry-run is offline and read-only.
 
 ## One-time student setup (Windows CMD)
 
@@ -21,8 +35,8 @@ uv sync --frozen
 notepad .env
 ```
 
-Crawlers put their own `GITHUB_TOKEN=...` in this private local `.env`; never copy it
-to shared storage. No database credential or rclone configuration is needed.
+Crawlers configure their personal credentials and RSS feeds in the private local
+`.env` as described in the V2 guide; never copy it to shared storage. No database credential or rclone configuration is needed.
 Crawlers need read access to the D1 inputs, screening run and all seven assignment
 CSVs for cross-worker checks, plus write access to their own submissions folder.
 Allow Drive Desktop to download input files before running the commands below.

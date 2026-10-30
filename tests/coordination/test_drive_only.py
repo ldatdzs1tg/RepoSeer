@@ -217,6 +217,10 @@ def test_crawl_drive_uses_real_evidence_and_preserves_retry_state(
     root, run, run_id = discovery(tmp_path, ["flask"])
     client = PyPI({"flask": "other/repository"} if mode == "mapping_mismatch" else None)
     d.screen_drive(run, data_root=tmp_path / "s", client=client)
+    marker_path = root / f"screening/runs/{run_id}/READY.json"
+    legacy_marker = c.read_json(marker_path)
+    legacy_marker.pop("collection_policy")
+    c.write_json(marker_path, legacy_marker, immutable=False)
     assignment = root / f"assignments/C1/{run_id}.csv"
     pipeline, paths, _, options, _ = environment
     if mode != "interrupted":
@@ -1060,3 +1064,143 @@ def test_invalid_master_blocks_d1_before_sampling(tmp_path, monkeypatch, damage)
     )
     assert result.exit_code == 1 and "master_" in result.output
     assert c.files(root) == before and not output.exists()
+
+
+def test_v2_policy_limits_and_preflight_before_any_output(tmp_path, environment, monkeypatch):
+    root, run, run_id = discovery(tmp_path, ["flask"])
+    d.screen_drive(run, data_root=tmp_path / "screen", client=PyPI())
+    marker, _, _ = c.verify_drive_screening(root, run_id)
+    assert c.screening_policy(marker) == "distributed-v2"
+    assert c.collection_options("initial") == c.policy_options("legacy-initial")
+    marker["collection_policy"] = {"policy_id": "unknown"}
+    with pytest.raises(c.CoordinationError, match="invalid_collection_policy"):
+        c.verify_drive_screening(root, run_id, marker=marker)
+    assignment = root / f"assignments/C1/{run_id}.csv"
+    monkeypatch.setattr(w, "check_providers", lambda **kwargs: dict(ready=False, providers=[]))
+    result = w.crawl_drive(assignment, data_root=tmp_path / "worker")
+    assert result["status"] == "provider_setup_incomplete"
+    assert not (tmp_path / "worker").exists() and not (root / "submissions").exists()
+    pipeline, paths, _, _, _ = environment
+    pipeline.run(["pypi:flask"], **c.collection_options("initial"))
+    checks = []
+    monkeypatch.setattr(w, "check_providers", lambda **kwargs: checks.append(kwargs) or dict(ready=True))
+
+    def runner(command, **kwargs):
+        for name, value in c.policy_options("distributed-v2").items():
+            assert command[command.index("--" + name.replace("_", "-")) + 1] == (
+                ",".join(value) if isinstance(value, list) else str(value))
+        shutil.copytree(paths.base_dir, Path(command[command.index("--data-dir") + 1]), dirs_exist_ok=True)
+
+    result = w.crawl_drive(assignment, data_root=tmp_path / "worker", runner=runner)
+    assert result["failed"] == 0 and len(checks) == 1
+    monkeypatch.setattr(w, "check_providers", lambda **kwargs: pytest.fail("READY replay must not preflight"))
+    assert w.crawl_drive(assignment, data_root=tmp_path / "fresh")["skipped_existing"] == 1
+
+
+@pytest.mark.parametrize("scenario", ["documents", "quota", "empty", "republish"])
+def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, environment, monkeypatch, scenario):
+    import httpx
+    from tests.integration.test_external_crawl_pipeline import HTML
+
+    from reposeer.clients.external.devto import DevToClient
+    from reposeer.clients.external.hackernews import HackerNewsClient
+    from reposeer.clients.external.news import NewsAPIProvider
+    from reposeer.clients.external.rss import RSSProvider
+    from reposeer.clients.external.stackexchange import StackExchangeClient
+    from reposeer.collection.http.client import HTTPClient
+    from reposeer.collectors.external.crawler.safety import URLPolicy
+    from reposeer.pipelines.external import ExternalPipeline
+    from reposeer.pipelines.external_enrichment import ExternalEnrichmentPipeline
+
+    root, run, run_id = discovery(tmp_path, ["flask"])
+    d.screen_drive(run, data_root=tmp_path / "screen", client=PyPI())
+    marker_path = root / f"screening/runs/{run_id}/READY.json"
+    legacy = c.read_json(marker_path)
+    legacy.pop("collection_policy")
+    c.write_json(marker_path, legacy, immutable=False)
+    pipeline, paths, _, options, _ = environment
+    options["fail_provider"] = True
+    source_result = pipeline.run(["pypi:flask"], **c.collection_options("initial"))
+    assert source_result.status == "partial"
+
+    def runner(command, **kwargs):
+        shutil.copytree(paths.base_dir, Path(command[command.index("--data-dir") + 1]), dirs_exist_ok=True)
+
+    assert w.crawl_drive(root / f"assignments/C1/{run_id}.csv", data_root=tmp_path / "crawl", runner=runner)["partial"] == 1
+    submissions = root / "submissions/C1"
+    source_inventory = c.files(submissions)
+    requests, checks = [], []
+    monkeypatch.setattr(w, "check_providers", lambda **kwargs: checks.append(kwargs) or dict(ready=True))
+    policy = URLPolicy(lambda host: ["93.184.216.34"])
+
+    def handler(request):
+        requests.append(request)
+        assert request.url.host not in {"api.github.com", "pypi.org"}
+        if request.url.host == "hn.algolia.com":
+            return httpx.Response(200, json={"hits": [] if scenario == "empty" else [{"objectID": "42", "title": "Flask release",
+                "url": "https://blog.example/flask"}], "nbPages": 1})
+        if request.url.host == "dev.to":
+            return httpx.Response(200, json=[])
+        if request.url.host == "api.stackexchange.com":
+            return httpx.Response(200, json={"items": [], "has_more": False})
+        if request.url.host == "newsapi.org":
+            if scenario == "quota":
+                return httpx.Response(200, json={"status": "error", "code": "apiKeyExhausted"})
+            return httpx.Response(200, json={"status": "ok", "totalResults": 0, "articles": []})
+        if request.url.host == "feeds.example":
+            return httpx.Response(200, content=b'<rss version="2.0"><channel/></rss>')
+        assert request.url.host == "blog.example"
+        return httpx.Response(200, text=HTML.replace("synthetic package", "Flask Python package"),
+                              headers={"content-type": "text/html"})
+
+    with HTTPClient(transport=httpx.MockTransport(handler), max_retries=1) as http:
+        def factory(paths):
+            providers = dict(hackernews=HackerNewsClient(http_client=http), devto=DevToClient(http_client=http),
+                stackexchange=StackExchangeClient(http_client=http), news=NewsAPIProvider("unit-news", http_client=http),
+                rss=RSSProvider(["https://feeds.example/rss"], http_client=http, policy=policy))
+            return ExternalEnrichmentPipeline(paths, http_client=http, url_policy=policy,
+                discovery_factory=lambda **kwargs: ExternalPipeline(providers=providers, **kwargs))
+
+        output = tmp_path / "enrichment"
+        assert w.enrich_drive(submissions, data_root=output, dry_run=True)["planned"] == 1
+        assert not requests and not output.exists()
+        copy = w.copy_verified
+        if scenario == "republish":
+            def interrupted_copy(source, target, **kwargs):
+                if target.name == "READY.json":
+                    raise OSError("simulated publication interruption")
+                return copy(source, target, **kwargs)
+
+            monkeypatch.setattr(w, "copy_verified", interrupted_copy)
+        result = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
+        assert c.files(submissions) == source_inventory
+        if scenario == "republish":
+            assert result["failed"] == 1
+            monkeypatch.setattr(w, "copy_verified", copy)
+            requests.clear()
+            checks.clear()
+            result = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
+            assert not requests and not checks
+
+        if scenario == "quota":
+            assert result["partial"] == 1 and result["no_candidates"] == 0
+            assert not list((root / "external-enrichments").rglob("READY.json"))
+            assert result["providers"]["news"]["failures"] > 0
+            assert len([request for request in requests if request.url.host == "newsapi.org"]) == 1
+            scenario = "documents"
+            requests.clear()
+            result = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
+        assert result["no_candidates" if scenario == "empty" else "completed"] == 1 and result["failed"] == 0, result
+        assert result["documents_extracted"] == (0 if scenario == "empty" else 1)
+        assert len([request for request in requests if request.url.host == "blog.example"]) == (0 if scenario in {"empty", "republish"} else 1)
+        before = c.files(root / "external-enrichments")
+        requests.clear()
+        checks.clear()
+        assert w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)["skipped_existing"] == 1
+        assert not requests and not checks
+        assert c.files(root / "external-enrichments") == before and c.files(submissions) == source_inventory
+        source_ready = next(submissions.rglob("READY.json"))
+        source_ready.write_bytes(source_ready.read_bytes() + b" ")
+        changed = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
+        assert changed["failed"] == 1
+        assert changed["failures"][0]["error_code"] == "source_fingerprint_mismatch"

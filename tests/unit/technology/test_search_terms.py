@@ -86,3 +86,14 @@ def test_curated_name_alone_cannot_generate_verified_exact_repository_queries():
     verified = generator.generate(entities=[spec], primary_slug="flask", repo_full_name="pallets/flask", verified_subject=True)
     assert any(term.priority == 1 and "pallets/flask" in term.query for term in verified)
     assert all(term.intent != "same_function" for term in verified)
+
+
+def test_v2_direct_topics_preserve_package_context_without_functional_inference():
+    plan = SearchTermGenerator().build_search_plan(
+        package_id="pypi:flask", repo_id="github:repository:596892", repo_full_name="pallets/flask",
+        extended_package_queries=True, query_version="2.0.0")
+    assert {"direct_package", "announcement", "maintenance", "deprecation", "security",
+            "migration", "alternatives"} <= {term.intent for term in plan.terms}
+    assert all(term.context_level == "package_specific" for term in plan.terms)
+    assert all("flask" in term.query.casefold() for term in plan.terms)
+    assert "profile_not_provided" in plan.diagnostics

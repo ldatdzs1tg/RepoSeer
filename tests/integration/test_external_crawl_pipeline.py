@@ -867,3 +867,48 @@ def test_foreign_discovery_id_is_not_native_capture_identity(tmp_path, url, nati
     assert raw.payload["discovery_provider"] == "devto"
     assert raw.payload["discovery_source_item_id"] == "devto:9"
     validate_external_document_record(raw)
+
+
+@pytest.mark.parametrize("mapping", ["verified", "mismatch", "missing"])
+def test_search_target_handoff_requires_verified_mapping(tmp_path, mapping):
+    evidence = mapping_evidence()
+
+    def handler(request):
+        if request.url.host == "hn.algolia.com":
+            return httpx.Response(200, json={"hits": [{"objectID": "44", "title": "Flask release",
+                "url": "https://blog.example/flask"}], "nbPages": 1})
+        return httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+
+    with HTTPClient(transport=httpx.MockTransport(handler)) as http:
+        with ExternalPipeline(http_client=http, storage_paths=StoragePaths(tmp_path)) as discovery:
+            found = discovery.discover(evidence.github, package_id="pypi:flask", sources=["hackernews"])
+        candidate = found.collection_result.records[0]
+        assert candidate.package_id is candidate.repo_id is None
+        if mapping == "mismatch":
+            candidate = candidate.model_copy(deep=True)
+            candidate.payload["search_target_repo_id"] = "github:repository:999"
+        before = candidate.model_dump(mode="json")
+        result = pipeline(tmp_path, http, repository_evidence=[] if mapping == "missing" else [evidence]).crawl([candidate])
+        document = result.collection_result.records[0]
+        assert candidate.model_dump(mode="json") == before
+        assert document.payload["discovery"] == before
+        if mapping == "verified":
+            assert document.package_id == "pypi:flask" and document.repo_id == evidence.github.repo_id
+            assert document.payload["repository_scope"]["article_relevance"] == "unverified"
+        else:
+            assert document.package_id is document.repo_id is None
+
+
+def test_candidate_budget_round_robins_and_retains_duplicate_provider_lineage(tmp_path):
+    from reposeer.pipelines.external_crawl import _group_candidates, _select_candidate_groups
+
+    candidates = [ExternalCandidate(title="Flask", url=f"https://blog.example/{provider}/{index}",
+                  source=provider, subject_match_status="high_confidence_metadata")
+                  for provider in ("hackernews", "news", "rss") for index in range(4)]
+    duplicate = candidates[0].model_copy(update={"source": "rss"})
+    groups, count, _ = _group_candidates([*candidates, duplicate])
+    selected = _select_candidate_groups(groups)[:3]
+    assert count == 13 and len(groups) == 12
+    assert {group.primary.source for group in selected} == {"hackernews", "news", "rss"}
+    shared = next(group for group in groups if group.primary.url == candidates[0].url)
+    assert {ref["discovery_provider"] for ref in shared.references.values()} == {"hackernews", "rss"}

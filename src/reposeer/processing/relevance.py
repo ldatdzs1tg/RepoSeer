@@ -40,6 +40,18 @@ class VerifiedTargetContext(RelevanceModel):
     mapping_evidence_refs: list[NonEmpty] = Field(default_factory=list)
     optional_functional_profile: FunctionalProfileResult | None = None
 
+    @classmethod
+    def from_scope(cls, scope):
+        """Use only the names attested by verified PyPI metadata and its canonical ID."""
+        evidence = scope.resolve()
+        name = scope.pypi.payload["info"]["name"]
+        aliases = {name.casefold(): name, scope.pypi.package_id[5:].casefold(): scope.pypi.package_id[5:]}
+        return cls(package_id=evidence["package_id"], repo_id=evidence["repo_id"],
+                   verified_repository_url=evidence["repository_url"],
+                   verified_package_url=f"https://pypi.org/project/{evidence['package_id'][5:]}/",
+                   verified_aliases=list(aliases.values()),
+                   mapping_evidence_refs=[entry["raw_record_id"] for entry in evidence["evidence"]])
+
     @model_validator(mode="after")
     def verified_identity(self):
         if self.repo_id is not None or self.verified_repository_url is not None:

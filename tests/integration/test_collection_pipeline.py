@@ -51,6 +51,7 @@ def read(path):
 @pytest.fixture
 def environment(tmp_path, monkeypatch):
     monkeypatch.setattr(settings.collection, "cache_enabled", False)
+    monkeypatch.setattr(settings, "rss_feeds", "")
     calls, options = [], {"mapping": "verified_current", "failed_repo": None, "empty": False, "fail_provider": False, "fail_crawler": False, "excluded_repo": None, "issues_prs": False, "crawl_outcomes": None}
     paths = StoragePaths(tmp_path / "root with spaces")
 

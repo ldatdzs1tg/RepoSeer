@@ -402,7 +402,8 @@ class CollectionPipeline:
             discovery = self.discovery_factory(**options)
             stack.callback(discovery.close)
             result = discovery.discover(raw, package_id=target["package_id"] if scope else None,
-                                        detection_result=detection, sources=sources, max_pages=pages, max_records=records)
+                                        detection_result=detection, sources=sources, max_pages=pages, max_records=records,
+                                        extended_package_queries=set(sources) == {"hackernews", "devto", "stackexchange", "rss", "news"})
             self._child(manifest, "external_discovery", result.run_id)
             collection, saved = result.collection_result, result.discovery_manifest
             aliases = {"stackoverflow": "stackexchange", "newsapi": "news"}
@@ -571,12 +572,7 @@ class CollectionPipeline:
                     target["discovery_status" if stage == "external_discovery" else "crawler_status"] = "skipped"
                     self._stage(manifest, target["normalized_target"], stage, "skipped",
                                 reason_codes=[reason])
-        contexts = [VerifiedTargetContext(
-            package_id=scope.pypi.package_id, repo_id=scope.github.repo_id,
-            verified_repository_url=scope.resolve()["repository_url"],
-            verified_package_url=f"https://pypi.org/project/{scope.pypi.package_id[5:]}/",
-            mapping_evidence_refs=[scope.pypi.raw_record_id, scope.github.raw_record_id])
-            for scope in scopes.values()]
+        contexts = [VerifiedTargetContext.from_scope(scope) for scope in scopes.values()]
         processing = None
         before = set((self.paths.metadata_dir / "collection_runs").glob("processing_*.json"))
         try:
