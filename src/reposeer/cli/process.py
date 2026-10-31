@@ -32,7 +32,7 @@ def main(
             if output_dir is None or output_dir.resolve().is_relative_to(paths.base_dir.resolve().parent):
                 raise ValueError("sealed_storage_requires_separate_output_dir")
             if (paths.base_dir / "COLLECTION_INPUT.json").exists():
-                from tools.coordination.external import resolve_verified_external_inputs
+                from reposeer.storage.external_inputs import resolve_verified_external_inputs
 
                 source_data = resolve_verified_external_inputs(paths.base_dir, cutoff=cutoff_at)
         inputs = raw if raw is not None else paths.processing_inputs()

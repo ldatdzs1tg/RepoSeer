@@ -151,6 +151,7 @@ class ExternalPipeline:
         policy_budgeted: bool = False,
         enabled_sources: Sequence[str] | None = None,
         deferred_sources: Sequence[str] = (),
+        reactivate_sources: Sequence[str] = (),
     ) -> ExternalDiscoveryPipelineResult:
         """Run external discovery for a repository or package subject."""
         repo_full_name: str | None = None
@@ -285,6 +286,7 @@ class ExternalPipeline:
         progress = CollectionProgress(context, self.run_manager)
 
         providers = self._resolve_providers(sources, progress)
+        runtime_available = {name for name, provider in providers.items() if provider.is_available}
         for name in deferred_sources:
             if name in providers:
                 providers[name].is_available = False
@@ -323,6 +325,7 @@ class ExternalPipeline:
             input_observation=input_observation,
             policy_budgeted=policy_budgeted,
             enabled_sources=None if enabled_sources is None else set(enabled_sources),
+            reactivate_sources=set(reactivate_sources) & runtime_available,
         )
 
         discovery_manifest["identity_verification"] = {

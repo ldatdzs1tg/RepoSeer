@@ -1106,7 +1106,7 @@ def test_v2_policy_limits_and_preflight_before_any_output(tmp_path, environment,
     assert w.crawl_drive(assignment, data_root=tmp_path / "fresh")["skipped_existing"] == 1
 
 
-@pytest.mark.parametrize("scenario", ["documents", "quota", "empty", "republish", "budget", "auto", "initial", "shared_quota"])
+@pytest.mark.parametrize("scenario", ["documents", "quota", "empty", "republish", "budget", "auto", "initial", "shared_quota", "initial_news", "preflight_news", "global_budget", "retry_url", "metrics"])
 def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, environment, monkeypatch, scenario):
     import httpx
     from tests.integration.test_external_crawl_pipeline import HTML
@@ -1125,11 +1125,12 @@ def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, en
     d.screen_drive(run, data_root=tmp_path / "screen", client=PyPI())
     marker_path = root / f"screening/runs/{run_id}/READY.json"
     legacy = c.read_json(marker_path)
-    if scenario != "initial":
+    initial_v2 = scenario in {"initial", "initial_news", "preflight_news", "global_budget", "retry_url"}
+    if not initial_v2:
         legacy.pop("collection_policy")
     c.write_json(marker_path, legacy, immutable=False)
     pipeline, paths, _, options, _ = environment
-    options["fail_provider"] = scenario != "initial"
+    options["fail_provider"] = not initial_v2
     requests, checks = [], []
     recovering = False
     monkeypatch.setattr(w, "check_providers", lambda **kwargs: checks.append(kwargs) or dict(ready=True))
@@ -1148,23 +1149,36 @@ def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, en
                     return httpx.Response(429, headers={"retry-after": "0"})
                 return httpx.Response(200, json={"hits": [{"objectID": str(42 + page), "title": "Flask release",
                     "url": f"https://blog.example/flask/{page}"}], "nbPages": 2})
+            if scenario in {"global_budget", "retry_url", "metrics"}:
+                count = 5 if scenario == "metrics" else 12
+                return httpx.Response(200, json={"hits": [{"objectID": str(index), "title": "Flask Python release",
+                    "url": f"https://blog.example/flask/{index}"} for index in range(count)], "nbPages": 1})
             hits = [] if scenario == "empty" else ([{"objectID": str(index), "title": "Flask Python release",
                     "url": f"https://blog.example/flask/{index}"} for index in range(30)] if scenario == "budget" else
                     [{"objectID": "42", "title": "Flask release", "url": "https://blog.example/flask"}])
             return httpx.Response(200, json={"hits": hits, "nbPages": 9 if scenario == "budget" else 1})
         if request.url.host == "dev.to":
-            return httpx.Response(200, json=[] if scenario in {"empty", "budget"} else [{
+            if scenario in {"global_budget", "retry_url"}:
+                return httpx.Response(200, json=[{"id": 100 + index, "title": "Flask Python release",
+                    "url": f"https://blog.example/dev/{index}"} for index in range(8)])
+            return httpx.Response(200, json=[] if scenario in {"empty", "budget", "metrics"} else [{
                 "id": 8, "title": "Flask Python article", "url": "https://blog.example/flask/0" if scenario == "initial" else "https://blog.example/flask",
                 "published_at": "2024-01-01T00:00:00Z"}])
         if request.url.host == "api.stackexchange.com":
             return httpx.Response(200, json={"items": [], "has_more": False})
         if request.url.host == "newsapi.org":
-            if scenario in {"quota", "shared_quota"} and not recovering:
+            if scenario in {"quota", "shared_quota", "initial_news", "metrics"} and not recovering:
                 return httpx.Response(200, json={"status": "error", "code": "apiKeyExhausted"})
+            if scenario == "metrics":
+                return httpx.Response(200, json={"status": "ok", "totalResults": 2, "articles": [
+                    {"title": "Flask Python news", "url": f"https://blog.example/news/{index}",
+                     "publishedAt": "2024-01-01T00:00:00Z"} for index in range(2)]})
             return httpx.Response(200, json={"status": "ok", "totalResults": 0, "articles": []})
         if request.url.host == "feeds.example":
             return httpx.Response(200, content=b'<rss version="2.0"><channel/></rss>')
         assert request.url.host == "blog.example"
+        if scenario == "retry_url" and request.url.path == "/flask/0" and not recovering:
+            raise httpx.ReadTimeout("mock-network-error", request=request)
         return httpx.Response(200, text=HTML.replace("synthetic package", "Flask Python package"),
                               headers={"content-type": "text/html"})
 
@@ -1176,7 +1190,7 @@ def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, en
             return ExternalEnrichmentPipeline(paths, http_client=http, url_policy=policy,
                 discovery_factory=lambda **kwargs: ExternalPipeline(providers=providers, **kwargs))
 
-        if scenario == "initial":
+        if initial_v2:
             from reposeer.pipelines.external_crawl import ExternalCrawlPipeline
 
             external = factory(paths)
@@ -1184,7 +1198,10 @@ def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, en
             pipeline.crawl_factory = lambda **kwargs: ExternalCrawlPipeline(http_client=http, policy=policy, **kwargs)
         selected_scheduler = w.schedule_external
         monkeypatch.setattr(w, "schedule_external", lambda *args, **kwargs: dict(failed=0, packages_planned=0))
-        source_result = pipeline.run(["pypi:flask"], **(c.policy_options("distributed-v2") if scenario == "initial" else c.collection_options("initial")))
+        source_options = c.policy_options("distributed-v2") if initial_v2 else c.collection_options("initial")
+        if scenario in {"global_budget", "retry_url", "preflight_news"}:
+            source_options["available_external_sources"] = ["hackernews", "devto"] if scenario != "preflight_news" else ["hackernews", "devto", "rss", "stackexchange"]
+        source_result = pipeline.run(["pypi:flask"], **source_options)
         assert source_result.status == "partial"
 
         def runner(command, **kwargs):
@@ -1214,8 +1231,35 @@ def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, en
         if scenario == "initial":
             initial_query = next(request.url.params["query"] for request in requests if request.url.host == "hn.algolia.com")
             recovering = True
+        if scenario in {"initial_news", "preflight_news", "retry_url"}:
+            recovering = True
         requests.clear()
         checks.clear()
+        if scenario in {"global_budget", "retry_url"}:
+            before = ex.resolve_verified_external_inputs(source_part)
+            assert before["candidate_budget_exhausted"]["pypi:flask"]
+            assert all(before["coverage"]["pypi:flask"][name] == "pending" for name in ("news", "rss", "stackexchange"))
+            output = tmp_path / "budget-retry"
+            preview = w.enrich_drive(submissions, data_root=output, dry_run=True)
+            assert preview["packages_budget_blocked"] == (1 if scenario == "global_budget" else 0)
+            assert not output.exists() and not requests
+            result = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
+            assert result["candidate_budget_exhausted"] and result["overall_external_status"] == "candidate_budget_exhausted", result
+            assert result["packages_processed"] == (1 if scenario == "retry_url" else 0), result
+            assert all(request.url.host == "blog.example" and request.url.path == "/flask/0" for request in requests)
+            assert len(requests) == (1 if scenario == "retry_url" else 0)
+            requests.clear()
+            previous_checks = len(checks)
+            rerun = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
+            assert rerun["packages_planned"] == 0 and not requests and len(checks) == previous_checks
+            final = ex.resolve_verified_external_inputs(source_part)
+            assert len(final["records"]) == 20
+            assert all(final["coverage"]["pypi:flask"][name] == "pending" for name in ("news", "rss", "stackexchange"))
+            assert c.files(source_part) == source_inventory
+            ex.external_report(root)
+            report = (root / "screening/external_coverage.csv").read_text(encoding="utf-8")
+            assert "candidate_budget_exhausted" in report
+            return
         if scenario == "auto":
             def auto_schedule(*args, **kwargs):
                 return ex.schedule(*args, **kwargs, pipeline_factory=factory)
@@ -1239,6 +1283,25 @@ def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, en
             monkeypatch.setattr(w, "copy_verified", interrupted_copy)
         result = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
         assert c.files(source_part) == source_inventory
+        if scenario in {"initial_news", "preflight_news"}:
+            assert requests and all(request.url.host == "newsapi.org" for request in requests)
+            original = ex.initial_evidence(source_part, "pypi:flask")["seeds"]["news"]
+            local_state = next(c.checked_mount_path(output).rglob("enrichment_state.json"))
+            assert c.read_json(local_state)["discovery_run_id"] == original.stem.removeprefix("discovery_state_")
+        if scenario == "metrics":
+            assert result["documents_newly_extracted"] == result["documents_extracted"] == 5
+            assert result["documents_reused"] == 0 and result["documents_total_available"] == 5
+            recovering = True
+            requests.clear()
+            result = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
+            assert result["documents_newly_extracted"] == result["documents_extracted"] == 2, result
+            assert result["documents_reused"] == 5 and result["documents_total_available"] == 7
+            before = c.files(supplement)
+            requests.clear()
+            result = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
+            assert result["documents_newly_extracted"] == 0 and result["documents_total_available"] == 7
+            assert not requests and c.files(supplement) == before and c.files(source_part) == source_inventory
+            return
         if scenario == "initial":
             assert requests and all(request.url.host in {"hn.algolia.com", "blog.example"} for request in requests)
             resumed = [request for request in requests if request.url.host == "hn.algolia.com" and request.url.params["query"] == initial_query]
@@ -1270,8 +1333,9 @@ def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, en
             result = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
             assert all(request.url.host == "newsapi.org" for request in requests)
         assert result["no_candidates" if scenario == "empty" else "completed"] == (2 if second_source else 1) and result["failed"] == 0, result
-        assert result["documents_extracted"] == (20 if scenario == "budget" else 2 if scenario in {"initial", "shared_quota"} else 0 if scenario == "empty" else 1)
-        assert len([request for request in requests if request.url.host == "blog.example"]) == (20 if scenario == "budget" else 0 if scenario in {"empty", "republish", "quota", "shared_quota"} else 1)
+        assert result["documents_extracted"] == result["documents_newly_extracted"] == (20 if scenario == "budget" else 0 if scenario in {"empty", "quota", "shared_quota", "republish", "initial_news", "preflight_news"} else 1)
+        assert result["documents_total_extracted"] == (20 if scenario == "budget" else 2 if scenario in {"initial", "shared_quota"} else 0 if scenario == "empty" else 1)
+        assert len([request for request in requests if request.url.host == "blog.example"]) == (20 if scenario == "budget" else 0 if scenario in {"empty", "republish", "quota", "shared_quota", "initial_news", "preflight_news"} else 1)
         hn_state = ex.supplement_root(source_part) / "state" / c.digest(b"pypi:flask") / "hackernews.json"
         stale = c.read_json(hn_state)
         stale["status"] = "quota_deferred"
@@ -1315,7 +1379,74 @@ def test_external_enrichment_immutable_external_only_and_idempotent(tmp_path, en
         assert published.read_bytes() == original_checksums + b"invalid"
         published.write_bytes(original_checksums)
         source_ready = source_part / "READY.json"
-        source_ready.write_bytes(source_ready.read_bytes() + b" ")
+        source_ready_original = source_ready.read_bytes()
+        source_ready.write_bytes(source_ready_original + b" ")
         changed = w.enrich_drive(submissions, data_root=output, pipeline_factory=factory)
         assert changed["failed"] == 1
         assert changed["failures"][0]["error_code"] == "source_fingerprint_mismatch"
+        source_ready.write_bytes(source_ready_original)
+        assert c.files(source_part) == source_inventory
+
+
+def test_auto_external_scheduler_skips_inspection_and_unavailable_work(tmp_path, monkeypatch):
+    from copy import deepcopy
+
+    from tools.coordination import external as ex
+
+    root = tmp_path / "drive"
+    sources, plans = [], {}
+    for key in ("a", "b", "c"):
+        source = root / key
+        source.mkdir(parents=True)
+        (source / "READY.json").write_bytes(b"immutable-source")
+        sources.append(source)
+        providers = {name: dict(status=ex.ProviderState.COMPLETE, work=None, receipt=True)
+                     for name in ex.EXTERNAL_SOURCES}
+        if key == "a":
+            providers = {name: dict(status=ex.ProviderState.INSPECT, work=None, receipt=None)
+                         for name in ex.EXTERNAL_SOURCES}
+        else:
+            name = "devto" if key == "b" else "news"
+            providers[name] = dict(status=ex.ProviderState.PENDING if key == "b" else ex.ProviderState.QUOTA,
+                work="network", receipt=None, expected={}, state_path=source / "state.json", online=None)
+        plans[source] = dict(source=source, root=source, facts=dict(sampling_run_id=key),
+            package_id="pypi:"+key, providers=providers, candidate_budget_exhausted=False,
+            initial=dict(documents=[]))
+    original = {source: c.files(source) for source in sources}
+    calls, processed = [], []
+    monkeypatch.setattr(w, "_enrichment_source", lambda source, *args: ({}, [source]))
+    monkeypatch.setattr(ex, "package_plan", lambda source, *args: deepcopy(plans[source]))
+    monkeypatch.setattr(ex, "_package_documents", lambda plan: {})
+    monkeypatch.setattr(ex, "write_state", lambda *args, **kwargs: None)
+    news_ready = False
+
+    def checker(**kwargs):
+        calls.append(kwargs["sources"])
+        return dict(configuration_valid=True, ready=False,
+            available_external_sources=["devto", "news"] if news_ready else ["devto"],
+            provider_status={"news": dict(status="quota_exhausted")})
+
+    def execute(plan, summary, *args):
+        processed.append(plan["package_id"])
+        for name in plan["runnable"]:
+            plans[plan["source"]]["providers"][name].update(status=ex.ProviderState.COMPLETE, work=None, receipt=True)
+            plan["providers"][name].update(status=ex.ProviderState.COMPLETE, work=None, receipt=True)
+        summary["packages_processed"] += 1
+
+    monkeypatch.setattr(ex, "_execute_package", execute)
+    preview = ex.schedule(sources, root, "C1", data_root=tmp_path / "local", dry_run=True, limit=1, checker=checker)
+    assert preview["packages_requiring_inspection"] == 1
+    assert preview["packages_availability_unverified"] == 2 and preview["packages_actionable"] == 0
+    assert not calls and not (tmp_path / "local").exists()
+    result = ex.schedule(sources, root, "C1", data_root=tmp_path / "local", limit=1, checker=checker)
+    assert processed == ["pypi:b"] and calls == [["devto", "news"]]
+    assert result["packages_actionable"] == 1 and result["packages_temporarily_deferred"] == 1
+    assert result["pending_packages"] == 2
+    result = ex.schedule(sources, root, "C1", data_root=tmp_path / "local", limit=1, checker=checker)
+    assert processed == ["pypi:b"] and result["packages_planned"] == 0
+    # A mixed package still runs its healthy provider while retaining inspection status elsewhere.
+    plans[sources[0]]["providers"]["news"] = dict(status=ex.ProviderState.PENDING, work="network", receipt=None)
+    news_ready = True
+    result = ex.schedule(sources, root, "C1", data_root=tmp_path / "local", limit=1, checker=checker)
+    assert processed == ["pypi:b", "pypi:a"]
+    assert {source: c.files(source) for source in sources} == original

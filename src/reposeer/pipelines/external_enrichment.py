@@ -143,11 +143,16 @@ class ExternalEnrichmentPipeline:
         if state.get("discovery_status") not in TERMINAL_PROVIDER_STATES:
             with (HTTPClient() if self.http is None else nullcontext(self.http)) as http:
                 with self.discovery_factory(http_client=http, storage_paths=self.paths) as discovery:
-                    result = discovery.discover(scope.github, package_id=scope.pypi.package_id,
-                        run_id=run_id, resume=checkpoint.exists(), extended_package_queries=True,
-                        policy_budgeted=True, enabled_sources=[provider], sources=list(EXTERNAL_SOURCES),
-                        deferred_sources=state.get("deferred_sources", []),
-                        max_pages=options["discovery_max_pages"], max_records=options["discovery_max_records"])
+                    try:
+                        result = discovery.discover(scope.github, package_id=scope.pypi.package_id,
+                            run_id=run_id, resume=checkpoint.exists(), extended_package_queries=True,
+                            policy_budgeted=True, enabled_sources=[provider], sources=list(EXTERNAL_SOURCES),
+                            deferred_sources=state.get("deferred_sources", []), reactivate_sources=[provider],
+                            max_pages=options["discovery_max_pages"], max_records=options["discovery_max_records"])
+                    except ValueError as error:
+                        if checkpoint.exists():
+                            raise ValueError("discovery_checkpoint_scope_mismatch") from error
+                        raise
             jobs = [job for job in result.discovery_manifest["per_job_stats"] if job["provider"] == provider]
             state.update(jobs=jobs, discovery_status=discovery_status(jobs), projection_path=str(checkpoint))
             # The checkpoint retains complete lineage; the provider artifact exposes only its own observations.
@@ -206,8 +211,8 @@ class ExternalEnrichmentPipeline:
                       else ProviderState.RETRY if all(error.get("retryable") for error in state["capture_errors"]) else ProviderState.INSPECT)
         if status == ProviderState.EMPTY and self.storage.read_contract_records(self.paths.raw_dir / "external/discovery.jsonl"):
             status = ProviderState.COMPLETE
-        if status in TERMINAL_PROVIDER_STATES and selection_limited:
-            status = ProviderState.BUDGET
+        if status in {ProviderState.COMPLETE, ProviderState.EMPTY} and selection_limited:
+            status = ProviderState.PENDING
         records = self.storage.read_contract_records(self.paths.raw_dir / "external/discovery.jsonl")
         report = dict(enrichment_run_id=state["enrichment_run_id"], status=status, provider=provider,
             candidates_discovered=len({raw.payload["candidate_id"] for raw in records}),

@@ -168,8 +168,12 @@ Ví dụ NewsAPI hết quota: HN/DEV.to vẫn tải và xử lý bài, Stack Exc
 `quota_deferred`. Những package còn lại trong cùng invocation không tiếp tục gọi
 NewsAPI. Khi chạy lại, chỉ phần chưa hoàn thành được xử lý.
 
-Budget V2 là tối đa 30 raw observations/provider/package, tối đa ba trang/query,
-và tổng 20 candidate URL/package tính cả initial cùng supplements. `max_pages`
+Provider discovery budget V2 là tối đa 30 raw observations/provider/package và ba
+trang/query. `budget_completed` chỉ dựa trên jobs/observations của chính provider.
+Package candidate fetch budget là tổng 20 canonical URLs đã attempted, tính cả initial,
+supplements và local checkpoint hợp lệ. `candidate_budget_exhausted` không chứng minh
+đã crawl đủ năm nguồn; provider chưa chạy vẫn pending/deferred. Không fetch URL mới
+khi hết slots. URL đã attempted bị lỗi mạng vẫn được retry mà không tiêu thêm slot. `max_pages`
 không có nghĩa pagination upstream đã complete. Candidate priority và round-robin
 provider được giữ; URL/native identity đã có valid observation được reuse, không
 fake record hay thay timestamp. Những provider khác phát hiện cùng bài giữ liên kết
@@ -178,12 +182,22 @@ query qua `document_associations` và discovery raw records trong receipt.
 Summary có `packages_planned`, `packages_processed`, `pending_packages`,
 `providers_completed`, `providers_budget_completed`, `providers_deferred`,
 `providers_failed`, document/relevance counts và `failures`. Counts documents của
-package loại trùng raw ID giữa initial/supplements. `partial` khác source crawl
+package loại trùng raw ID giữa initial/supplements/checkpoints. `documents_extracted`
+là alias của `documents_newly_extracted`: chỉ full observations mới fetch trong
+invocation. `documents_reused` đếm observations cũ; `documents_total_available`
+gồm full và unavailable; `documents_total_extracted` chỉ đếm full. Các trường
+`relevant_documents`, `irrelevant_documents`, `unresolved_documents` là decisions
+trên current evidence; `new_*_documents` là decisions riêng observations mới.
+Ví dụ lần đầu fetch 5 bài báo new=5/reused=0; retry thêm 2 bài báo new=2/reused=5/
+total_available=7; rerun không fetch báo new=0. `partial` khác source crawl
 failed. Quota đơn thuần không rollback provider khỏe và không làm CLI exit lỗi;
 configuration/integrity hoặc trạng thái cần operator xử lý trả exit nonzero.
 
 Nếu publish Drive bị ngắt nhưng local READY còn hợp lệ, lần sau verify và copy tiếp
-mà không gọi API lại. Discovery resume từ durable jobs cùng execution scope. Content
+mà không gọi API lại. Discovery resume từ durable jobs cùng execution scope, kể cả
+checkpoint initial chưa fetch trang nào. Sau khi preflight xác nhận provider phục
+hồi, jobs `preflight_deferred` được kích hoạt lại mà giữ discovery run ID, query plan,
+raw IDs và execution identity gốc; không bỏ checkpoint để tìm lại từ trang đầu. Content
 fetch đã lưu được reuse; URL lỗi mạng có thể retry mà không chiếm slot mới. Nếu ghi
 content/processing bị ngắt và không chứng minh resume an toàn được, báo
 `requires_inspection`. Không tự ghi đè raw/READY/checksum đã seal.
@@ -200,7 +214,7 @@ Lệnh tạo `screening/external_coverage.csv` từ source/receipt verified và 
 biệt sampling run/worker/package/source part. Đây là derived view, không phải source
 of truth. Không thêm cột vào `screening/mapping.csv`, không đổi mapping metadata.
 
-Trong repo, dùng `tools.coordination.external.resolve_verified_external_inputs`
+Dùng core API `reposeer.storage.external_inputs.resolve_verified_external_inputs`
 để nhận document paths, observations đã loại trùng raw ID, canonical/native indexes,
 provenance, targets và coverage. Helper chỉ nhận receipt có READY/checksum hợp lệ;
 không đọc raw chưa seal làm evidence. Có thể lọc package hoặc cutoff theo thời điểm
@@ -234,7 +248,14 @@ không crawl lại PyPI/GitHub. Sau khi hoàn thành hoặc verify các source p
 assignment, `crawl-drive` dùng cùng planner với `enrich-drive` và tự enrich tối đa
 **một package còn thiếu trong batch hiện tại mỗi invocation**. Ưu tiên package chưa
 có supplement và thiếu nhiều nguồn, rồi canonical package ID để tie-break. Lần sau
-chọn package còn thiếu tiếp theo hoặc provider deferred đã phục hồi. Không quét
+chọn package có công việc thực thi được. Preflight một lần cho nhóm provider cần
+thiết trước khi áp dụng limit; package chỉ có `requires_inspection`, provider còn
+hết quota hoặc budget đã cạn mà không còn retry URL không chiếm lượt. Package có
+một provider cần inspection vẫn chạy provider khác nếu ready. Summary phân biệt
+`packages_incomplete`, `packages_actionable`, `packages_requiring_inspection`,
+`packages_budget_blocked`, `packages_temporarily_deferred`; dry-run báo
+`availability_unverified` và `packages_availability_unverified`, không giả định API
+ready từ cấu hình tĩnh. Không quét
 hàng trăm package lịch sử ngoài assignment; dùng `enrich-drive` để xử lý toàn bộ.
 Assignment V2 tự preflight: thiếu cấu hình tĩnh phải dừng, quota một nguồn không
 chặn các nguồn khỏe. Explicit sources của CLI cũ vẫn dùng được. Người gọi trực tiếp

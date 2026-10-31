@@ -225,6 +225,7 @@ class ExternalDiscoveryCollector:
         input_observation: RawRecord | None = None,
         policy_budgeted: bool = False,
         enabled_sources: set[str] | None = None,
+        reactivate_sources: set[str] | None = None,
     ) -> tuple[CollectionResult, dict[str, Any]]:
         """Execute planned search queries across configured discovery providers.
 
@@ -394,6 +395,10 @@ class ExternalDiscoveryCollector:
                 continue
             if policy_budgeted and job.pages_fetched >= request.max_pages:
                 continue
+            # Runtime recovery does not rewrite the original provider/job execution identity.
+            if (job.provider in (reactivate_sources or set()) and job.status == "unavailable"
+                    and job.missing_reason == "preflight_deferred"):
+                job.status, job.missing_reason = "pending", None
             if job.status == "unavailable" or not job.has_more:
                 continue
             if len(raw_observations_by_id) >= request.max_records or requests_this_call >= TOTAL_REQUEST_LIMIT:

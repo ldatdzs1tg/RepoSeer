@@ -46,7 +46,7 @@ class StoragePaths:
         inputs = [self.raw_dir / "github" / f"{name}.jsonl" for name in
                   ("repositories", "commits", "issues", "pull_requests", "contributors", "releases")]
         if (self.base_dir / "COLLECTION_INPUT.json").exists() and (self.base_dir / "READY.json").exists():
-            from tools.coordination.external import resolve_verified_external_inputs
+            from reposeer.storage.external_inputs import resolve_verified_external_inputs
 
             inputs.extend(resolve_verified_external_inputs(self.base_dir)["document_paths"])
         else:

@@ -14,20 +14,28 @@ from reposeer.collection.provider_preflight import (
     ProviderState,
     availability_state,
 )
-from reposeer.contracts import RawRecord, validate_record
+from reposeer.collectors.external.crawler.validation import validate_external_document_record
 from reposeer.contracts.identity import canonical_article_url
 from reposeer.exceptions import CollectionError, StorageError
 from reposeer.pipelines.external_crawl import _group_candidates, _select_candidate_groups
 from reposeer.pipelines.external_enrichment import ExternalEnrichmentPipeline, discovery_status
 from reposeer.pipelines.normalization import NormalizationPipeline
 from reposeer.processing.relevance import VerifiedTargetContext
+from reposeer.storage.external_inputs import (  # noqa: F401 - compatibility re-exports
+    OPTIONS,
+    POLICY,
+    _online,
+    initial_evidence,
+    package_evidence,
+    provider_input,
+    resolve_verified_external_inputs,
+    supplement_root,
+    verify_receipt,
+)
 from reposeer.storage.paths import StoragePaths
 from reposeer.storage.raw.jsonl import JsonlStorage
 
-POLICY = "external-v2"
 AUTO_ENRICH_MAX_PACKAGES = 1
-OPTIONS = {key: value for key, value in c.policy_options("distributed-v2").items()
-           if key not in {"max_pages", "max_records"}}
 
 
 def _worker():
@@ -56,55 +64,6 @@ def scan_parts(submissions: Path) -> tuple[list[Path], list[dict]]:
         except (OSError, ValueError, TypeError, KeyError, CollectionError, StorageError) as error:
             errors.append(dict(source=run.name, error_code=str(error) if isinstance(error, c.CoordinationError) else type(error).__name__))
     return parts, errors
-
-
-def supplement_root(source: Path) -> Path:
-    return c.safe_path(source.parent, f"supplements/{source.name}/{POLICY}")
-
-
-def provider_input(source_facts: dict, scope, provider: str, options: dict) -> dict:
-    key = scope.pypi.package_id
-    return {**source_facts, "package_ids": [key], "package_id": key, "provider": provider,
-            "verified_mapping_evidence_refs": sorted(entry["raw_record_id"] for entry in scope.resolve()["evidence"]),
-            "external_collection_options": options}
-
-
-def verify_receipt(root: Path, expected: dict, *, marker: dict | None = None) -> dict:
-    root = c.checked_mount_path(root)
-    marker = c.read_json(c.safe_path(root, "READY.json")) if marker is None else marker
-    saved = c.read_json(c.safe_path(root, "ENRICHMENT_INPUT.json"))
-    c.require(type(marker.get("schema_version")) is int and type(saved.get("schema_version")) is int, "invalid_enrichment_schema")
-    for value in (marker, saved):
-        c.require(all(value.get(key) == item for key, item in expected.items()), "source_fingerprint_mismatch")
-    c.timestamp(saved["created_at_utc"])
-    c.timestamp(marker["completed_at_utc"])
-    c.uid(marker["enrichment_run_id"])
-    c.require(marker["collection_status"] in TERMINAL_PROVIDER_STATES, "enrichment_not_successful")
-    checksums = c.safe_path(root, "CHECKSUMS.sha256")
-    declared = c.read_checksums(checksums)
-    c.require(c.fingerprint(checksums)[0] == marker["checksums_sha256"], "checksum_list_mismatch")
-    c.require(declared == {name: value for name, value in c.files(root, declared=declared).items()
-                           if name not in {"CHECKSUMS.sha256", "READY.json"}}, "bundle_checksum_mismatch")
-    report = c.read_json(c.safe_path(root, "reports/external_enrichment.json"))
-    c.require(marker["report"] == report and report["status"] == marker["collection_status"]
-              and report["provider"] == expected["provider"]
-              and report["enrichment_run_id"] == marker["enrichment_run_id"], "enrichment_report_mismatch")
-    from reposeer.collectors.external.crawler.validation import validate_external_document_record
-    records = JsonlStorage().read_contract_records(c.safe_path(root, "raw/external/documents.jsonl"))
-    candidates = JsonlStorage().read_contract_records(c.safe_path(root, "raw/external/discovery.jsonl"))
-    candidate_ids = {raw.raw_record_id for raw in candidates}
-    c.require(report["candidates_discovered"] == len({raw.payload["candidate_id"] for raw in candidates})
-              and all(raw.payload.get("discovery_provider") == expected["provider"]
-                      and raw.payload.get("search_target_package_id") == expected["package_id"] for raw in candidates),
-              "enrichment_candidate_mismatch")
-    c.require(set(report["document_associations"]) == set(report["document_raw_ids"])
-              and all(set(ids) <= candidate_ids for ids in report["document_associations"].values()), "enrichment_lineage_mismatch")
-    c.require(len(report["attempted_urls"]) <= 20, "enrichment_budget_exceeded")
-    for raw in records:
-        validate_external_document_record(raw)
-    c.require(report["document_raw_ids"] == sorted(raw.raw_record_id for raw in records), "enrichment_counts_mismatch")
-    c.require(report["documents_extracted"] == sum(raw.payload["content_status"] == "full" for raw in records), "enrichment_counts_mismatch")
-    return marker
 
 
 def seal(root: Path, expected: dict, report: dict) -> dict:
@@ -138,88 +97,6 @@ def writer_lock(path: Path):
         path.unlink()
 
 
-def _raw_records(path: Path):
-    if not path.exists():
-        return
-    with path.open("rb") as stream:
-        while line := stream.readline(32 * 1024**2 + 1):
-            c.require(len(line) <= 32 * 1024**2, "external_raw_line_size_limit")
-            raw = validate_record(line)
-            c.require(isinstance(raw, RawRecord), "noncanonical_external_raw")
-            yield raw
-
-
-def initial_evidence(source: Path, package: str, *, keep_documents: bool = True) -> dict:
-    """Published source manifests establish only the scope actually attempted."""
-    marker = c.read_json(source / "READY.json")
-    manifest = c.read_json(source / f"metadata/collection_runs/integration_{marker['integration_run_id']}.json")
-    discoveries = [entry for entry in manifest["stages"] if entry["stage"] == "external_discovery"
-                   and entry.get("target") == package and "discovery" in entry.get("details", {})]
-    jobs = [job for entry in discoveries for job in entry["details"]["discovery"]["per_job_stats"]]
-    candidates = [raw for raw in _raw_records(c.safe_path(source, "raw/external/discovery.jsonl"))
-                  if raw.payload.get("search_target_package_id") == package]
-    raw_ids = {raw.raw_record_id for raw in candidates}
-    documents = [raw for raw in _raw_records(c.safe_path(source, "raw/external/documents.jsonl"))
-                 if raw.package_id == package or raw.payload.get("candidate_raw_record_id") in raw_ids
-                 or raw.source_url in {candidate.payload["candidate_url"] for candidate in candidates}]
-    from reposeer.collectors.external.crawler.validation import validate_external_document_record
-    for raw in documents:
-        validate_external_document_record(raw)
-    urls = {canonical_article_url(raw.source_url) for raw in documents}
-    retry_urls = set()
-    for entry in manifest["stages"]:
-        if entry["stage"] == "external_crawl" and entry.get("target") == package:
-            urls.update(canonical_article_url(group["url"]) for group in entry.get("details", {}).get("candidate_groups", []))
-            retry_urls.update(canonical_article_url(group["url"]) for group in entry.get("details", {}).get("candidate_groups", [])
-                              if group.get("errors") and all(error.get("retryable") for error in group["errors"]))
-    v2 = c.read_json(source / "COLLECTION_INPUT.json")["collection"] == c.policy_options("distributed-v2") and any(
-        entry["details"]["discovery"].get("max_records") == 150 and
-        entry["details"]["discovery"].get("max_pages_per_job") == 3 and
-        set(entry["details"].get("requested_sources", [])) == set(EXTERNAL_SOURCES) for entry in discoveries)
-    status = {}
-    seeds = {}
-    for name in EXTERNAL_SOURCES:
-        provider_jobs = [job for job in jobs if job["provider"] == name]
-        value = discovery_status(provider_jobs) if v2 and provider_jobs else ProviderState.PENDING
-        if len(urls) >= 20 or v2 and len({raw.raw_record_id for raw in candidates if raw.payload["discovery_provider"] == name}) >= 30:
-            value = ProviderState.BUDGET
-        elif value in TERMINAL_PROVIDER_STATES and any(job["candidate_ids"] for job in provider_jobs):
-            own_urls = {raw.payload["candidate_url"] for raw in candidates if raw.payload["discovery_provider"] == name}
-            failed_urls = {group["url"] for entry in manifest["stages"]
-                           if entry["stage"] == "external_crawl" and entry.get("target") == package
-                           for group in entry.get("details", {}).get("candidate_groups", []) if group.get("errors")}
-            if own_urls & failed_urls:
-                value = ProviderState.PENDING
-        status[name] = value if value in TERMINAL_PROVIDER_STATES else ProviderState.PENDING
-        if v2 and any(job["pages_fetched"] for job in provider_jobs) and value not in TERMINAL_PROVIDER_STATES:
-            run_ids = {entry["run_ids"][0] for entry in discoveries}
-            if len(run_ids) == 1:
-                path = c.safe_path(source, f"metadata/collection_runs/discovery_state_{next(iter(run_ids))}.json")
-                if path.exists():
-                    seeds[name] = path
-    projection_paths = [c.safe_path(source, f"metadata/collection_runs/discovery_state_{run_id}.json")
-                        for run_id in {entry["run_ids"][0] for entry in discoveries}]
-    return dict(status=status, candidates=candidates, documents=documents if keep_documents else [], document_urls={canonical_article_url(raw.source_url) for raw in documents}, attempted_urls=urls,
-                seeds=seeds, retry_urls=retry_urls, projection_paths=[path for path in projection_paths if path.exists()])
-
-
-def _online(path: Path, expected: dict) -> dict | None:
-    if not path.exists():
-        return None
-    state = c.read_json(path)
-    c.require(all(state.get(key) == expected[key] for key in (
-        "schema_version", "policy_id", "worker_id", "sampling_run_id", "source_repository_id",
-        "source_part_index", "package_id", "provider", "source_ready_sha256", "source_checksums_sha256")),
-        "source_fingerprint_mismatch")
-    c.require(type(state.get("schema_version")) is int, "invalid_provider_state")
-    c.require(state.get("status") in set(ProviderState), "invalid_provider_state")
-    c.require(type(state.get("attempt_count")) is int and state["attempt_count"] >= 0, "invalid_provider_state")
-    for key in ("last_attempt_at", "last_success_at", "retry_after"):
-        if state.get(key) is not None:
-            c.timestamp(state[key])
-    return state
-
-
 def write_state(path: Path, expected: dict, status: str, previous: dict | None, *, receipt=None, retry_after=None, success_at=None) -> dict:
     c.require((c.read_json(path) if path.exists() else None) == previous, "concurrent_provider_state_change")
     state = dict(**expected, status=status, attempt_count=(previous or {}).get("attempt_count", 0) + int(status == ProviderState.RUNNING),
@@ -231,94 +108,100 @@ def write_state(path: Path, expected: dict, status: str, previous: dict | None, 
 
 
 def package_plan(source: Path, facts: dict, scope, local_base: Path | None) -> dict:
-    key = scope.pypi.package_id
-    package_sha = c.digest(key.encode())
-    root = supplement_root(source)
-    initial = initial_evidence(source, key, keep_documents=local_base is None)
-    providers = {}
-    for name in EXTERNAL_SOURCES:
-        options = dict(OPTIONS)
-        count = len({raw.raw_record_id for raw in initial["candidates"] if raw.payload.get("discovery_provider") == name})
-        if name not in initial["seeds"] and 0 < count < 30:
-            options["discovery_max_records"] = (30 - count) * 5
-        expected = provider_input(facts, scope, name, options)
-        destination = c.safe_path(root, f"packages/{package_sha}/{name}")
-        local = c.safe_path(local_base, f"{facts['worker_id']}/{facts['sampling_run_id']}/{facts['source_repository_id']}/{source.name}/{package_sha}/{name}") if local_base is not None else None
-        state_path = c.safe_path(root, f"state/{package_sha}/{name}.json")
-        state = _online(state_path, expected)
-        if local is not None:
-            c.require((local / "ENRICHMENT_INPUT.json").exists() or not c.files(destination) or (destination / "READY.json").exists(),
-                      "mounted_partial_enrichment_requires_local_workspace")
-        local_receipt = verify_receipt(local, expected) if local is not None and (local / "READY.json").exists() else None
-        receipt = verify_receipt(destination, expected) if (destination / "READY.json").exists() else None
-        status = receipt["collection_status"] if receipt else initial["status"][name]
-        if not receipt and status not in TERMINAL_PROVIDER_STATES and state and state["status"] not in TERMINAL_PROVIDER_STATES:
-            status = state["status"]
-        providers[name] = dict(status=status, expected=expected, destination=destination, local=local,
-                               state_path=state_path, online=state, receipt=receipt, local_receipt=local_receipt)
-    used = set(initial["attempted_urls"])
-    for unit in providers.values():
-        receipt = unit["receipt"] or unit["local_receipt"]
-        if receipt:
-            used.update(receipt["report"]["attempted_urls"])
+    plan = package_evidence(source, facts, scope)
+    used = plan["budget_used"]
+    for name, unit in plan["providers"].items():
+        local = c.safe_path(local_base, f"{facts['worker_id']}/{facts['sampling_run_id']}/{facts['source_repository_id']}/{source.name}/{c.digest(plan['package_id'].encode())}/{name}")
+        unit.update(local=local, local_receipt=None, checkpoint=None)
+        c.require((local / "ENRICHMENT_INPUT.json").exists() or not c.files(unit["destination"]) or unit["receipt"],
+                  "mounted_partial_enrichment_requires_local_workspace")
+        if (local / "ENRICHMENT_INPUT.json").exists():
+            saved = c.read_json(local / "ENRICHMENT_INPUT.json")
+            c.require(all(saved.get(key) == value for key, value in unit["expected"].items()), "source_fingerprint_mismatch")
+        if (local / "READY.json").exists():
+            unit["local_receipt"] = verify_receipt(local, unit["expected"])
+            used.update(canonical_article_url(url) for url in unit["local_receipt"]["report"]["attempted_urls"])
+        checkpoint = local / "metadata/enrichment_state.json"
+        if checkpoint.exists():
+            state = c.read_json(checkpoint)
+            c.require(state.get("identity") == VerifiedTargetContext.from_scope(scope).model_dump(mode="json")
+                      and state.get("options") == unit["expected"]["external_collection_options"], "enrichment_checkpoint_conflict")
+            unit["checkpoint"] = state
+            attempted = set()
+            for manifest_name in state.get("crawl_runs", []):
+                manifest = c.read_json(c.safe_path(local, "metadata/collection_runs/" + Path(manifest_name).name))
+                attempted.update(canonical_article_url(group["url"]) for group in manifest["candidate_groups"])
+            c.require(attempted == {canonical_article_url(url) for url in state.get("attempted_urls", [])}, "capture_checkpoint_mismatch")
+            used.update(attempted)
+            if state.get("phase") in {"crawling", "processing", "requires_inspection"} and not unit["receipt"]:
+                unit["status"] = ProviderState.INSPECT
     c.require(len(used) <= 20, "package_candidate_budget_exceeded")
-    return dict(source=source, facts=facts, scope=scope, package_id=key, root=root,
-                initial=initial, providers=providers, budget_used=used)
+    plan["candidate_budget_exhausted"] = len(used) == 20
+    documents = _package_documents(plan)
+    known = {canonical_article_url(url) for raw in documents.values()
+             for url in (raw.source_url, raw.payload.get("canonical_url"), raw.payload.get("fetched_url")) if url}
+    for name, unit in plan["providers"].items():
+        own = [raw for raw in plan["initial"]["candidates"] if raw.payload["discovery_provider"] == name]
+        own += JsonlStorage().read_contract_records(unit["local"] / "raw/external/discovery.jsonl")
+        own_urls = {canonical_article_url(raw.payload["candidate_url"]) for raw in own}
+        retries = set(plan["initial"]["retry_urls"]) | set((unit["checkpoint"] or {}).get("retry_urls", []))
+        unit["retry_urls"] = {canonical_article_url(url) for url in retries} & own_urls & used - known
+        phase = (unit["checkpoint"] or {}).get("phase")
+        discovery = (unit["checkpoint"] or {}).get("discovery_status")
+        unit["work"] = (None if unit["receipt"] else "publish" if unit["local_receipt"] or phase == "complete"
+            else None if unit["status"] in TERMINAL_PROVIDER_STATES | {ProviderState.INSPECT}
+            else "retry" if plan["candidate_budget_exhausted"] and unit["retry_urls"]
+            else "finalize" if discovery in TERMINAL_PROVIDER_STATES and (not own_urls - known or discovery == ProviderState.BUDGET)
+            else None if plan["candidate_budget_exhausted"] else "network")
+    return plan
 
 
-def resolve_verified_external_inputs(source: Path, policy_id: str = POLICY,
-                                     package_id: str | None = None, cutoff: str | None = None) -> dict:
-    """Read sealed observations and coverage without rewriting or collapsing provenance."""
-    c.require(policy_id == POLICY, "invalid_external_policy")
-    source = c.checked_mount_path(source.absolute())
-    worker = c.worker_id(source.parents[2].name, "crawler")
-    drive_root = source.parents[4]
-    facts, scopes = _worker()._enrichment_source(source, drive_root, worker)
-    if package_id is not None:
-        c.subject(package_id)
-        c.require(any(scope.pypi.package_id == package_id for scope in scopes), "package_not_in_source")
-    paths, records, references, coverage = set(), {}, [], {}
-    cutoff_at = c.timestamp(cutoff) if cutoff is not None else None
-    for scope in scopes:
-        if package_id is not None and scope.pypi.package_id != package_id:
-            continue
-        plan = package_plan(source, facts, scope, None)
-        key = scope.pypi.package_id
-        coverage[key] = {name: unit["status"] for name, unit in plan["providers"].items()}
-        inputs = [(source / "raw/external/documents.jsonl", plan["initial"]["documents"], None)]
-        for name, unit in plan["providers"].items():
-            if unit["receipt"]:
-                path = unit["destination"] / "raw/external/documents.jsonl"
-                inputs.append((path, JsonlStorage().read_contract_records(path), unit["receipt"]))
-                references.append(dict(package_id=key, provider=name, receipt=str(unit["destination"] / "READY.json"),
-                    source_ready_sha256=facts["source_ready_sha256"],
-                    document_associations=unit["receipt"]["report"].get("document_associations", {})))
-        for path, observations, _ in inputs:
-            if path.exists():
-                paths.add(path)
-            for raw in observations:
-                if cutoff_at is not None and (c.timestamp(raw.retrieved_at) > cutoff_at or
-                        raw.available_at is not None and c.timestamp(raw.available_at) > cutoff_at):
-                    continue
-                previous = records.get(raw.raw_record_id)
-                c.require(previous is None or previous == raw, "conflicting_raw_record_id")
-                records[raw.raw_record_id] = raw
-    canonical_index, native_index = {}, {}
-    for raw in records.values():
-        canonical_index.setdefault(canonical_article_url(raw.payload.get("canonical_url") or raw.source_url), []).append(raw.raw_record_id)
-        for ref in raw.payload.get("discovery_references", []):
-            if ref.get("discovery_source_item_id"):
-                key = ref["discovery_provider"] + ":" + ref["discovery_source_item_id"]
-                native_index.setdefault(key, set()).add(raw.raw_record_id)
-    return dict(document_paths=sorted(paths), records=list(records.values()), provenance=references,
-                canonical_url_index=canonical_index, native_identity_index={key: sorted(ids) for key, ids in native_index.items()},
-                coverage=coverage, targets=[VerifiedTargetContext.from_scope(scope) for scope in scopes if package_id is None or scope.pypi.package_id == package_id],
-                historical_validity="observation_only", source_fingerprints=facts)
+def _package_documents(plan) -> dict:
+    documents = {}
+    inputs = [initial_evidence(plan["source"], plan["package_id"])["documents"]]
+    for unit in plan["providers"].values():
+        roots = [unit["destination"]] if unit["receipt"] else []
+        if unit.get("local") and (unit.get("local_receipt") or unit.get("checkpoint") and
+                unit["checkpoint"].get("phase") not in {"crawling", "processing", "requires_inspection"}):
+            roots.append(unit["local"])
+        inputs.extend(JsonlStorage().read_contract_records(root / "raw/external/documents.jsonl") for root in roots)
+    for records in inputs:
+        for raw in records:
+            validate_external_document_record(raw)
+            previous = documents.get(raw.raw_record_id)
+            c.require(previous is None or previous == raw, "conflicting_raw_record_id")
+            documents[raw.raw_record_id] = raw
+    return documents
+
+
+def _document_metrics(summary, plans, existing_ids):
+    records, full, relevance_seen = {}, set(), set()
+    for plan in plans:
+        documents = _package_documents(plan)
+        for raw in documents.values():
+            fingerprint = c.digest(c.canonical(raw.model_dump(mode="json")))
+            previous = records.get(raw.raw_record_id)
+            c.require(previous is None or previous == fingerprint, "conflicting_raw_record_id")
+            records[raw.raw_record_id] = fingerprint
+            if raw.payload["content_status"] == "full":
+                full.add(raw.raw_record_id)
+        fresh = [raw for key, raw in documents.items() if (key, plan["package_id"]) not in relevance_seen]
+        relevance_seen.update((raw.raw_record_id, plan["package_id"]) for raw in fresh)
+        if fresh:
+            contexts = [VerifiedTargetContext.from_scope(plan["scope"])]
+            for prefix, rows in (("", fresh), ("new_", [raw for raw in fresh if raw.raw_record_id not in existing_ids])):
+                if rows:
+                    normalized = NormalizationPipeline().process(rows, targets=contexts)
+                    for decision, count in normalized.processing_summary.relevance_decisions.items():
+                        key = prefix + decision + "_documents"
+                        summary[key] = summary.get(key, 0) + count
+    summary.update(documents_newly_extracted=len(full - existing_ids), documents_extracted=len(full - existing_ids),
+        documents_reused=len(set(records) & existing_ids), documents_total_available=len(records), documents_total_extracted=len(full))
 
 
 def schedule(parts: list[Path], drive_root: Path, worker: str, *, data_root=None, dry_run=False,
              limit: int | None = None, preflight=None, checker=None, pipeline_factory=None, deferred=None) -> dict:
-    """The sole planner for manual and automatic enrichment. Provider quota is invocation-scoped."""
+    """Filter executable provider work before applying the automatic package limit."""
     from reposeer.collection.provider_preflight import check_providers
     w = _worker()
     base = c.local_drive_workspace("supplements", data_root, drive_root)
@@ -330,70 +213,95 @@ def schedule(parts: list[Path], drive_root: Path, worker: str, *, data_root=None
         except (OSError, ValueError, TypeError, KeyError, CollectionError, StorageError) as error:
             errors.append(dict(source=source.name, error_code=str(error) if isinstance(error, c.CoordinationError) else type(error).__name__))
     pending = [plan for plan in plans if any(unit["status"] not in TERMINAL_PROVIDER_STATES for unit in plan["providers"].values())]
-    pending.sort(key=lambda plan: (any(unit["receipt"] for unit in plan["providers"].values()),
-        -sum(unit["status"] not in TERMINAL_PROVIDER_STATES for unit in plan["providers"].values()), plan["package_id"]))
-    selected = pending if limit is None else pending[:limit]
     summary = dict(status="planned" if dry_run else "completed", worker_id=worker, policy_id=POLICY,
-        packages_planned=len(selected), packages_processed=0, pending_packages=len(pending),
+        packages_planned=0, packages_processed=0, pending_packages=len(pending), packages_incomplete=len(pending),
+        packages_actionable=0, packages_requiring_inspection=0, packages_budget_blocked=0,
+        packages_temporarily_deferred=0, packages_availability_unverified=0,
         providers_completed=0, providers_budget_completed=0, providers_deferred=0, providers_failed=0,
-        plan=[dict(package_id=plan["package_id"], sampling_run_id=plan["facts"]["sampling_run_id"],
-                   source_part=plan["source"].name, providers={name: unit["status"] for name, unit in plan["providers"].items()}) for plan in selected],
-        documents_extracted=0, relevant_documents=0, irrelevant_documents=0, unresolved_documents=0,
-        source_parts=len(parts), completed=0, no_candidates=0, skipped_existing=len(plans) - len(pending),
+        documents_extracted=0, documents_newly_extracted=0, documents_reused=0, documents_total_available=0,
+        documents_total_extracted=0, relevant_documents=0, irrelevant_documents=0, unresolved_documents=0,
+        new_relevant_documents=0, new_irrelevant_documents=0, new_unresolved_documents=0,
+        source_parts=len(parts), completed=0, no_candidates=0, skipped_existing=len(plans)-len(pending),
         partial=0, failed=len(errors), failures=errors, providers={})
-    if dry_run or not selected:
-        summary["providers_planned"] = sum(unit["status"] not in TERMINAL_PROVIDER_STATES for plan in selected for unit in plan["providers"].values())
-        if errors:
-            summary["status"] = "failed"
-        return summary
-    def needs_network(unit, plan):
-        if len(plan["budget_used"]) >= 20:
-            return False
-        if (unit["local"] / "READY.json").exists():
-            return False
-        checkpoint = unit["local"] / "metadata/enrichment_state.json"
-        if checkpoint.exists():
-            state = c.read_json(checkpoint)
-            if state.get("phase") == "complete":
-                return False
-            if state.get("discovery_status") in TERMINAL_PROVIDER_STATES:
-                known = set(plan["initial"]["document_urls"])
-                for other in plan["providers"].values():
-                    receipt_root = other["destination"] if other["receipt"] else other["local"] if other["local_receipt"] else None
-                    if receipt_root is not None:
-                        known.update(canonical_article_url(raw.source_url) for raw in JsonlStorage().read_contract_records(receipt_root / "raw/external/documents.jsonl"))
-                return any(canonical_article_url(raw.payload["candidate_url"]) not in known
-                           for raw in JsonlStorage().read_contract_records(unit["local"] / "raw/external/discovery.jsonl"))
-        return True
-
-    needed = sorted({name for plan in selected for name, unit in plan["providers"].items()
-                     if unit["status"] not in TERMINAL_PROVIDER_STATES | {ProviderState.INSPECT}
-                     and name not in (deferred or {}) and needs_network(unit, plan)})
-    if needed:
+    potential = [plan for plan in plans if any(unit["work"] for unit in plan["providers"].values())]
+    needed = sorted({name for plan in potential for name, unit in plan["providers"].items()
+                     if unit["work"] in {"network", "retry"} and name not in (deferred or {})})
+    blocked = dict(deferred or {})
+    available, availability = set(), {}
+    if needed and not dry_run:
         preflight = preflight or (checker or check_providers)(include_github=False, sources=needed)
         summary["preflight"] = preflight
         if not preflight.get("configuration_valid", preflight.get("ready", False)):
-            summary.update(status="configuration_incomplete", failed=summary["failed"] + 1)
+            summary.update(status="configuration_incomplete", failed=summary["failed"]+1, plan=[], providers_planned=0)
             return summary
-    available = set(EXTERNAL_SOURCES) if not needed else set((preflight or {}).get("available_external_sources", EXTERNAL_SOURCES if (preflight or {}).get("ready") else []))
-    availability = (preflight or {}).get("provider_status", {})
-    blocked = {**(deferred or {}), **{name: availability_state(availability.get(name, {}).get("status", "provider_unreachable")) for name in needed if name not in available}}
-    with ExitStack() as locks:
-        for root in sorted({plan["root"] for plan in selected}):
-            locks.enter_context(writer_lock(c.safe_path(root, "state/writer.lock")))
-        for plan in selected:
-            try:
-                _execute_package(plan, summary, available, blocked, availability, pipeline_factory)
-            except (OSError, ValueError, TypeError, KeyError, CollectionError, StorageError) as error:
-                summary["failed"] += 1
-                summary["failures"].append(dict(package_id=plan["package_id"], error_code=str(error) if isinstance(error, c.CoordinationError) else type(error).__name__))
-            finally:
-                plan["initial"]["documents"] = []
-    summary["pending_packages"] = len(pending) - summary["completed"] - summary["no_candidates"]
-    all_states = [unit["status"] for plan in plans for unit in plan["providers"].values()]
-    summary["overall_external_status"] = ("partial" if any(value not in TERMINAL_PROVIDER_STATES for value in all_states)
-        else "budget_completed" if ProviderState.BUDGET in all_states else "complete")
-    summary["status"] = "failed" if summary["failed"] else "partial" if summary["partial"] else "completed"
+        available = set(preflight.get("available_external_sources", EXTERNAL_SOURCES if preflight.get("ready") else []))
+        availability = preflight.get("provider_status", {})
+        blocked.update({name: availability_state(availability.get(name, {}).get("status", "provider_unreachable"))
+                        for name in needed if name not in available})
+    actionable = []
+    for plan in pending:
+        units = plan["providers"]
+        plan["runnable"] = {name for name, unit in units.items() if unit["work"] in {"publish", "finalize"}
+            or unit["work"] in {"network", "retry"} and name in available and name not in blocked}
+        unverified = dry_run and any(unit["work"] in {"network", "retry"} for unit in units.values())
+        if plan["runnable"]:
+            actionable.append(plan)
+        elif unverified:
+            summary["packages_availability_unverified"] += 1
+        elif any(unit["work"] for unit in units.values()):
+            summary["packages_temporarily_deferred"] += 1
+        elif all(unit["status"] in TERMINAL_PROVIDER_STATES | {ProviderState.INSPECT} for unit in units.values()):
+            summary["packages_requiring_inspection"] += 1
+        elif plan["candidate_budget_exhausted"]:
+            summary["packages_budget_blocked"] += 1
+    summary["packages_actionable"] = len(actionable)
+    preview = potential if dry_run else actionable
+    def priority(plan):
+        runnable = [unit for name, unit in plan["providers"].items() if unit["work"] and (dry_run or name in plan["runnable"])]
+        return (not any(unit["status"] == ProviderState.PENDING for unit in runnable),
+            any(unit["receipt"] for unit in plan["providers"].values()), -len(runnable), plan["package_id"], str(plan["source"]))
+
+    preview.sort(key=priority)
+    selected = preview if limit is None else preview[:limit]
+    summary.update(packages_planned=len(selected), providers_planned=sum(
+        len(plan["runnable"]) if not dry_run else sum(bool(unit["work"]) for unit in plan["providers"].values()) for plan in selected),
+        availability="availability_unverified" if dry_run and needed else "verified" if needed else "not_required",
+        plan=[dict(package_id=plan["package_id"], sampling_run_id=plan["facts"]["sampling_run_id"], source_part=plan["source"].name,
+            candidate_budget_exhausted=plan["candidate_budget_exhausted"],
+            providers={name: unit["status"] for name, unit in plan["providers"].items()}) for plan in selected])
+    if not dry_run:
+        existing_ids = {key for plan in plans for key in _package_documents(plan)}
+        affected = [plan for plan in pending if plan in selected or any(name in blocked and unit["work"] in {"network", "retry"}
+                    for name, unit in plan["providers"].items())]
+        with ExitStack() as locks:
+            for root in sorted({plan["root"] for plan in affected}):
+                locks.enter_context(writer_lock(c.safe_path(root, "state/writer.lock")))
+            for plan in affected:
+                for name, unit in plan["providers"].items():
+                    if name in blocked and unit["work"] in {"network", "retry"}:
+                        unit["status"] = blocked[name]
+                        unit["online"] = write_state(unit["state_path"], unit["expected"], unit["status"], unit["online"],
+                            retry_after=availability.get(name, {}).get("retry_after"))
+            for plan in selected:
+                try:
+                    _execute_package(plan, summary, available, blocked, availability, pipeline_factory)
+                except (OSError, ValueError, TypeError, KeyError, CollectionError, StorageError) as error:
+                    summary["failed"] += 1
+                    summary["failures"].append(dict(package_id=plan["package_id"], error_code=str(error) if isinstance(error, c.CoordinationError) else type(error).__name__))
+                finally:
+                    plan["initial"]["documents"] = []
+        _document_metrics(summary, plans, existing_ids)
+        summary["failed"] += sum(plan not in selected and any(unit["status"] in {ProviderState.INSPECT, ProviderState.BLOCKED}
+            for unit in plan["providers"].values()) for plan in pending)
+    summary["pending_packages"] = sum(any(unit["status"] not in TERMINAL_PROVIDER_STATES for unit in plan["providers"].values()) for plan in plans)
+    summary["candidate_budget_exhausted"] = any(plan["candidate_budget_exhausted"] for plan in plans)
+    summary["overall_external_status"] = ("candidate_budget_exhausted" if summary["pending_packages"] and summary["candidate_budget_exhausted"]
+        else "partial" if summary["pending_packages"] else "budget_completed" if any(unit["status"] == ProviderState.BUDGET
+            for plan in plans for unit in plan["providers"].values()) else "complete")
+    if errors or summary["failed"]:
+        summary["status"] = "failed"
+    elif not dry_run:
+        summary["status"] = "partial" if summary["pending_packages"] else "completed"
     return summary
 
 
@@ -401,45 +309,26 @@ def _execute_package(plan, summary, available, blocked, availability, pipeline_f
     w, storage = _worker(), JsonlStorage()
     scope = plan["scope"]
     plan["initial"] = initial_evidence(plan["source"], plan["package_id"])
-    documents = {raw.raw_record_id: raw for raw in plan["initial"]["documents"]}
-    used = set(plan["initial"]["attempted_urls"])
+    documents = _package_documents(plan)
+    used = set(plan["budget_used"])
     candidates = list(plan["initial"]["candidates"])
     pipelines, states, projection_paths = {}, {}, list(plan["initial"]["projection_paths"])
     for unit in plan["providers"].values():
         if unit["receipt"]:
-            report = unit["receipt"]["report"]
-            used.update(report["attempted_urls"])
-            for raw in storage.read_contract_records(unit["destination"] / "raw/external/documents.jsonl"):
-                previous = documents.get(raw.raw_record_id)
-                c.require(previous is None or previous == raw, "conflicting_raw_record_id")
-                documents[raw.raw_record_id] = raw
             candidates.extend(storage.read_contract_records(unit["destination"] / "raw/external/discovery.jsonl"))
-        if (unit["local"] / "metadata/enrichment_state.json").exists():
-            saved = c.read_json(unit["local"] / "metadata/enrichment_state.json")
-            attempted = set()
-            for manifest_name in saved.get("crawl_runs", []):
-                manifest_path = c.safe_path(unit["local"], "metadata/collection_runs/" + Path(manifest_name).name)
-                manifest = c.read_json(manifest_path)
-                attempted.update(group["url"] for group in manifest["candidate_groups"])
-            c.require(attempted == set(saved.get("attempted_urls", [])), "capture_checkpoint_mismatch")
-            used.update(attempted)
-            for raw in storage.read_contract_records(unit["local"] / "raw/external/documents.jsonl"):
-                previous = documents.get(raw.raw_record_id)
-                c.require(previous is None or previous == raw, "conflicting_raw_record_id")
-                documents[raw.raw_record_id] = raw
     c.require(len(used) <= 20, "package_candidate_budget_exceeded")
     for name, unit in plan["providers"].items():
-        if unit["status"] in TERMINAL_PROVIDER_STATES or unit["status"] == ProviderState.INSPECT:
+        if not unit["work"] or unit["work"] in {"network", "retry"} and name not in plan["runnable"]:
             continue
         if (unit["local"] / "READY.json").exists():
             verify_receipt(unit["local"], unit["expected"])
             continue
-        if name in blocked and len(used) < 20:
+        if name in blocked and unit["work"] in {"network", "retry"}:
             unit["status"] = blocked[name]
             unit["online"] = write_state(unit["state_path"], unit["expected"], unit["status"], unit["online"],
                                          retry_after=availability.get(name, {}).get("retry_after"))
             continue
-        c.require(name in available or len(used) >= 20, "provider_not_available")
+        c.require(name in available or unit["work"] in {"publish", "finalize"}, "provider_not_available")
         input_path = c.safe_path(unit["local"], "ENRICHMENT_INPUT.json")
         c.require(input_path.exists() or not c.files(unit["local"]), "untracked_enrichment_requires_inspection")
         if input_path.exists():
@@ -451,9 +340,10 @@ def _execute_package(plan, summary, available, blocked, availability, pipeline_f
         pipeline = (pipeline_factory or ExternalEnrichmentPipeline)(StoragePaths(unit["local"]))
         pipelines[name] = pipeline
         try:
-            if len(used) >= 20:
+            if len(used) >= 20 or unit["work"] in {"publish", "finalize"}:
                 state = pipeline.prepare(scope, unit["expected"]["external_collection_options"])
-                state.update(jobs=state.get("jobs", []), discovery_status=ProviderState.BUDGET)
+                jobs = state.get("jobs", [job for job in plan["initial"]["jobs"] if job["provider"] == name])
+                state.update(jobs=jobs, discovery_status=state.get("discovery_status", discovery_status(jobs)))
                 storage.append_contract_records_durable(pipeline.paths.raw_path("external", "discovery"), [])
                 pipeline.save(state)
                 records = storage.read_contract_records(pipeline.paths.raw_dir / "external/discovery.jsonl")
@@ -471,7 +361,8 @@ def _execute_package(plan, summary, available, blocked, availability, pipeline_f
             pipelines.pop(name, None)
             unit["online"] = write_state(unit["state_path"], unit["expected"], unit["status"], unit["online"])
             summary["failures"].append(dict(package_id=plan["package_id"], provider=name,
-                                            error_code="requires_inspection", error_type=type(error).__name__))
+                                            error_code=str(error) if str(error) in {"discovery_checkpoint_scope_mismatch", "enrichment_checkpoint_conflict"}
+                                            else "requires_inspection", error_type=type(error).__name__))
     groups, _, _ = _group_candidates(candidates)
     known_by_url, native_records = {}, {}
     for raw in documents.values():
@@ -485,7 +376,10 @@ def _execute_package(plan, summary, available, blocked, availability, pipeline_f
         if key in native_records:
             known_by_url.setdefault(canonical_article_url(candidate.payload["candidate_url"]), []).extend(native_records[key])
     remaining = max(0, 20 - len(used))
-    selected = _select_candidate_groups([group for group in groups if canonical_article_url(group.primary.payload["candidate_url"]) not in used and canonical_article_url(group.primary.payload["candidate_url"]) not in known_by_url])[:remaining]
+    active_urls = {canonical_article_url(raw.payload["candidate_url"]) for raw in candidates if raw.payload["discovery_provider"] in pipelines}
+    selected = _select_candidate_groups([group for group in groups if canonical_article_url(group.primary.payload["candidate_url"]) in active_urls
+        and canonical_article_url(group.primary.payload["candidate_url"]) not in used
+        and canonical_article_url(group.primary.payload["candidate_url"]) not in known_by_url])[:remaining]
     retry_urls = {url for state in states.values() for url in state.get("retry_urls", [])} | plan["initial"]["retry_urls"]
     selected_urls = {canonical_article_url(group.primary.payload["candidate_url"]) for group in selected}
     selected_urls.update(canonical_article_url(url) for url in retry_urls
@@ -534,6 +428,7 @@ def _execute_package(plan, summary, available, blocked, availability, pipeline_f
                     documents[raw.raw_record_id] = raw
                     known_by_url.setdefault(canonical_article_url(raw.source_url), []).append(raw)
                 unit["status"] = report["status"]
+                unit["checkpoint"] = c.read_json(unit["local"] / "metadata/enrichment_state.json")
                 if unit["status"] in {ProviderState.QUOTA, ProviderState.RETRY, ProviderState.BLOCKED}:
                     blocked[name] = unit["status"]
                 summary["providers"].setdefault(name, []).append(report["providers"].get(name, {}))
@@ -544,7 +439,8 @@ def _execute_package(plan, summary, available, blocked, availability, pipeline_f
             except (OSError, ValueError, TypeError, KeyError, CollectionError, StorageError) as error:
                 unit["status"] = ProviderState.INSPECT
                 summary["failures"].append(dict(package_id=plan["package_id"], provider=name,
-                    error_code="requires_inspection", error_type=type(error).__name__))
+                    error_code=str(error) if str(error) in {"discovery_checkpoint_scope_mismatch", "enrichment_checkpoint_conflict"}
+                                            else "requires_inspection", error_type=type(error).__name__))
         if (unit["local"] / "READY.json").exists():
             receipt = w.publish_drive_part(unit["local"], unit["destination"], unit["expected"], verifier=verify_receipt)
             unit["status"] = receipt["collection_status"]
@@ -555,11 +451,11 @@ def _execute_package(plan, summary, available, blocked, availability, pipeline_f
             receipt=str((unit["destination"] / "READY.json").relative_to(plan["source"].parents[4]).as_posix()) if unit["receipt"] else None,
             retry_after=availability.get(name, {}).get("retry_after"),
             success_at=unit["receipt"]["completed_at_utc"] if unit["receipt"] else None)
-    summary["documents_extracted"] += sum(raw.payload["content_status"] == "full" for raw in documents.values())
-    if documents:
-        normalized = NormalizationPipeline().process(list(documents.values()), targets=[VerifiedTargetContext.from_scope(scope)])
-        for decision, count in normalized.processing_summary.relevance_decisions.items():
-            summary[decision + "_documents"] += count
+    for unit in plan["providers"].values():
+        report = unit["receipt"]["report"] if unit["receipt"] else unit.get("checkpoint") or {}
+        used.update(canonical_article_url(url) for url in report.get("attempted_urls", []))
+    c.require(len(used) <= 20, "package_candidate_budget_exceeded")
+    plan.update(budget_used=used, candidate_budget_exhausted=len(used) == 20)
     statuses = [unit["status"] for unit in plan["providers"].values()]
     summary["packages_processed"] += 1
     summary["providers_completed"] += sum(value in {ProviderState.COMPLETE, ProviderState.EMPTY} for value in statuses)
@@ -605,7 +501,8 @@ def external_report(drive_root: Path) -> dict:
                     rows.append(dict(sampling_run_id=facts["sampling_run_id"], worker_id=worker, package_id=key,
                         repo_full_name=c.read_json(source / "COLLECTION_INPUT.json")["repo_full_name"],
                         source_part=source.name, policy_id=POLICY, **{name + "_status": statuses[name] for name in EXTERNAL_SOURCES},
-                        overall_external_status=("budget_completed" if ProviderState.BUDGET in statuses.values() else "complete") if complete == 5 else "partial", completed_provider_count=complete,
+                        overall_external_status=(("budget_completed" if ProviderState.BUDGET in statuses.values() else "complete") if complete == 5
+                            else "candidate_budget_exhausted" if data["candidate_budget_exhausted"][key] else "partial"), completed_provider_count=complete,
                         pending_provider_count=5-complete, last_attempt_at=max(attempts, default=""), last_success_at=max(successes, default="")))
         stream = io.StringIO(newline="")
         writer = csv.DictWriter(stream, fieldnames=fields, lineterminator="\n")

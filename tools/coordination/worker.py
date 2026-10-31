@@ -54,6 +54,8 @@ from tools.coordination.external import AUTO_ENRICH_MAX_PACKAGES
 from tools.coordination.external import schedule as schedule_external
 
 from reposeer.collection.provider_preflight import check_providers
+from reposeer.storage.artifact_integrity import drive_part_facts as drive_part_facts
+from reposeer.storage.artifact_integrity import verify_drive_part as verify_drive_part
 
 
 def run(worker, assignment_path, data_root, *, remote="reposeer:", dry_run=False, runner=None):
@@ -358,62 +360,6 @@ def work(
     )
 
 
-def drive_part_facts(root: Path, expected: dict, run_id: str) -> dict:
-    """Reuse raw/provider verification, without constructing a legacy claim assignment."""
-    facts = integration_evidence(
-        root,
-        dict(
-            targets=expected["package_ids"],
-            expected_repo_full_name=expected["repo_full_name"],
-        ),
-        run_id,
-    )
-    require(facts["overall_status"] in {"complete", "partial"}, "drive_collection_not_successful")
-    require(
-        facts["collected_repository"] and facts["verified_package_ids"] == expected["package_ids"],
-        "drive_mapping_verification_failed",
-    )
-    require(
-        safe_path(root, "targets.txt").read_bytes()
-        == ("\n".join(expected["package_ids"]) + "\n").encode("utf-8"),
-        "drive_targets_mismatch",
-    )
-    return facts
-
-
-def verify_drive_part(root: Path, expected: dict, *, marker: dict | None = None) -> dict:
-    root = checked_mount_path(root)
-    marker = read_json(safe_path(root, "READY.json")) if marker is None else marker
-    require(
-        type(marker.get("schema_version")) is int
-        and all(marker.get(key) == value for key, value in expected.items()),
-        "drive_part_identity_mismatch",
-    )
-    require(
-        read_json(safe_path(root, "COLLECTION_INPUT.json")) == expected, "drive_part_input_mismatch"
-    )
-    checksums = safe_path(root, "CHECKSUMS.sha256")
-    declared = read_checksums(checksums)
-    require(fingerprint(checksums)[0] == marker["checksums_sha256"], "checksum_list_mismatch")
-    inventory = files(root, declared=declared)
-    require(
-        declared
-        == {
-            name: value
-            for name, value in inventory.items()
-            if name not in {"CHECKSUMS.sha256", "READY.json"}
-        },
-        "bundle_checksum_mismatch",
-    )
-    facts = drive_part_facts(root, expected, uid(marker["integration_run_id"]))
-    require(
-        marker["collection_status"] == facts["overall_status"]
-        and marker["completed_at_utc"] == facts["finished_at"],
-        "drive_part_status_mismatch",
-    )
-    return marker
-
-
 def collect_drive_part(root: Path, expected: dict, log: Path, *, runner=None, available_sources=None) -> dict:
     root = checked_mount_path(root)
     if (root / "READY.json").exists():
@@ -650,24 +596,11 @@ EXTERNAL_OPTIONS = {key: value for key, value in policy_options("distributed-v2"
 
 
 def _enrichment_source(source: Path, drive_root: Path, worker: str):
-    from reposeer.pipelines.external_enrichment import source_scopes
+    from reposeer.storage.external_inputs import source_facts
 
+    facts, scopes = source_facts(source)
     expected = read_json(safe_path(source, "COLLECTION_INPUT.json"))
-    run_id = uid(source.parent.parent.name)
-    repository_id = source.parent.name
-    require(re.fullmatch(r"[a-f0-9]{64}", repository_id), "invalid_source_repository_id")
-    require(re.fullmatch(r"part_[0-9]{3,}", source.name), "invalid_source_part")
-    index = int(source.name[5:])
-    require(type(expected.get("schema_version")) is int and expected["schema_version"] == 1
-            and expected["worker_id"] == worker and expected["sampling_run_id"] == run_id
-            and expected["repository_id"] == repository_id and type(expected["part_index"]) is int
-            and expected["part_index"] == index and index > 0
-            and digest(expected["repo_full_name"].encode("utf-8")) == repository_id,
-            "source_directory_identity_mismatch")
-    require(expected["package_ids"] == sorted(set(expected["package_ids"]))
-            and 1 <= len(expected["package_ids"]) <= 100, "invalid_source_package_ids")
-    require(expected["collection"] in [policy_options(name) for name in ("legacy-initial", "distributed-v2")],
-            "invalid_collection_policy")
+    run_id, index = expected["sampling_run_id"], expected["part_index"]
     screening = safe_path(drive_root, f"screening/runs/{run_id}/READY.json")
     if screening.exists():
         ready, _, assignments = verify_drive_screening(drive_root, run_id)
@@ -677,24 +610,8 @@ def _enrichment_source(source: Path, drive_root: Path, worker: str):
                 and expected["package_ids"] == packages[(index - 1) * 100:index * 100]
                 and expected["collection"] == policy_options(screening_policy(ready)),
                 "source_assignment_mismatch")
-    marker = verify_drive_part(source, expected)
-    manifest = read_json(safe_path(source, f"metadata/collection_runs/integration_{marker['integration_run_id']}.json"))
-    scopes = source_scopes(source, manifest)
-    identities = [scope.resolve() for scope in scopes]
-    require(sorted(item["package_id"] for item in identities) == expected["package_ids"],
-            "source_identity_mismatch")
-    enrichment = dict(schema_version=1, policy_id="external-v2", worker_id=worker,
-        sampling_run_id=run_id, source_repository_id=repository_id, source_part_index=index,
-        source_submission_relative_path=source.relative_to(drive_root).as_posix(),
-        source_integration_run_id=marker["integration_run_id"],
-        source_ready_sha256=fingerprint(source / "READY.json")[0],
-        source_checksums_sha256=fingerprint(source / "CHECKSUMS.sha256")[0],
-        package_ids=expected["package_ids"], verified_repo_id=identities[0]["repo_id"],
-        verified_mapping_evidence_refs=sorted({entry["raw_record_id"] for item in identities
-                                              for entry in item["evidence"]}),
-        external_collection_options=EXTERNAL_OPTIONS)
-    return enrichment, scopes
-
+    require(facts["worker_id"] == worker and source.parents[4] == drive_root, "source_directory_identity_mismatch")
+    return facts, scopes
 
 def enrich_drive(submissions_dir: Path, *, data_root: Path | None = None,
                  dry_run: bool = False, pipeline_factory=None) -> dict:
