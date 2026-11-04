@@ -1,8 +1,10 @@
 """Unit tests for D09 historical label pipeline and deterministic detectors."""
+
 from __future__ import annotations
 
 import polars as pl
 import pytest
+from scripts.build_d09_reviewed import build_reviewed
 
 from reposeer.contracts.analysis import OfficialStatus
 from reposeer.contracts.identity import add_calendar_months
@@ -14,9 +16,7 @@ from reposeer.contracts.models import (
 from reposeer.maintenance.detector import MaintenanceDetector
 from reposeer.maintenance.labels import (
     HISTORICAL_LABEL_SCHEMA,
-    HistoricalLabelRecord,
-    labels_to_polars,
-    polars_to_labels,
+    HistoricalOfficialStatus,
 )
 from reposeer.maintenance.replacement_detector import ReplacementDetector
 from reposeer.maintenance.resumed_detector import ResumedDetector
@@ -275,6 +275,39 @@ class TestD09HorizonLabels:
         assert record.label_available_at == HORIZON_END
         assert record.censor_reason is None
 
+    def test_negative_waits_for_maintenance_and_coverage_evidence(self) -> None:
+        coverage_at = "2025-04-04T00:00:00.000Z"
+        maintenance_at = "2025-04-08T00:00:00.000Z"
+        record = MaintenancePipeline().evaluate_horizon_label(
+            package_id=PACKAGE_ID,
+            repo_id=REPO_ID,
+            cutoff_at=CUTOFF,
+            observation_end_at=OBSERVATION_END,
+            horizon_releases=[make_release("1.1.0", "2024-06-01T00:00:00.000Z", maintenance_at)],
+            horizon_coverage_available_at=coverage_at,
+        )
+        assert record.label == 0
+        assert record.label_available_at == maintenance_at
+
+    def test_cessation_waits_for_source_availability(self) -> None:
+        event = make_official_status(
+            announced_at="2024-05-01T00:00:00.000Z",
+            effective_at="2024-06-01T00:00:00.000Z",
+            verified_at="2024-06-15T00:00:00.000Z",
+        )
+        source_at = "2025-04-20T00:00:00.000Z"
+        revised = HistoricalOfficialStatus(**event.model_dump(), available_at=source_at)
+        kwargs = dict(
+            package_id=PACKAGE_ID, repo_id=REPO_ID, cutoff_at=CUTOFF, official_events=[revised]
+        )
+        early = MaintenancePipeline().evaluate_horizon_label(
+            observation_end_at=OBSERVATION_END, **kwargs
+        )
+        late = MaintenancePipeline().evaluate_horizon_label(observation_end_at=source_at, **kwargs)
+        assert early.label is None
+        assert late.label == 1
+        assert late.label_available_at == source_at
+
     def test_silent_unverified_zero_activity(self) -> None:
         pipeline = MaintenancePipeline()
         record = pipeline.evaluate_horizon_label(
@@ -293,9 +326,7 @@ class TestD09HorizonLabels:
 
     def test_bot_activity_does_not_confer_negative_label(self) -> None:
         pipeline = MaintenancePipeline()
-        bot_act = make_activity(
-            "b1", "commit", "2024-06-01T00:00:00.000Z", actor_is_bot=True
-        )
+        bot_act = make_activity("b1", "commit", "2024-06-01T00:00:00.000Z", actor_is_bot=True)
         record = pipeline.evaluate_horizon_label(
             package_id=PACKAGE_ID,
             repo_id=REPO_ID,
@@ -392,6 +423,88 @@ class TestD09PolarsConversion:
         assert isinstance(empty_df, pl.DataFrame)
         assert empty_df.is_empty()
         assert pipeline.polars_to_labels(empty_df) == []
+
+
+def test_reviewed_build_requires_scoped_coverage_and_followup() -> None:
+    earliest = "2022-02-01T00:00:00.000Z"
+    source = make_provenance(valid_at=earliest, available_at=earliest).model_dump()
+    source.update(
+        source_id="pypi-release-history",
+        source_record_id=None,
+        revision=None,
+        content_sha256="1" * 64,
+        query_set_hash=None,
+    )
+    coverage_at = "2025-04-04T00:00:00.000Z"
+    review = {
+        "snapshot": {
+            "schema_version": "0.1.0",
+            "record_type": "snapshot_build_request",
+            "request_id": "00000000-0000-4000-8000-000000000001",
+            "run_id": "00000000-0000-4000-8000-000000000002",
+            "package_id": PACKAGE_ID,
+            "repository": {
+                "repo_id": REPO_ID,
+                "github_repo_id": "900000001",
+                "github_node_id": None,
+                "repo_full_name": "org/demo",
+                "repo_url": "https://github.com/org/demo",
+                "known_urls": [],
+            },
+            "cutoff_at": CUTOFF,
+            "horizon_months": 12,
+            "releases": [make_release("1.0.0", earliest).model_dump()],
+            "activities": [],
+            "coverage": [
+                {
+                    "data_group": "releases",
+                    "status": "complete",
+                    "records_observed": 1,
+                    "missing_reason": None,
+                    "time_range": {"start_at": "2022-01-01T00:00:00.000Z", "end_at": CUTOFF},
+                }
+            ],
+        },
+        "mapping": {
+            "repo_id": REPO_ID,
+            "repo_group_id": REPO_ID,
+            "mapping_revision": "r1",
+            "scope": "demo-pkg",
+            "scope_quality": "repository_only",
+            "valid_from": earliest,
+            "valid_to": None,
+            "available_at": earliest,
+            "source_ids": ["pypi-release-history"],
+        },
+        "verifier": "fixture",
+        "reviewed_at": "2025-05-01T00:00:00.000Z",
+        "sources": [source],
+        "core_coverage_sources": {"releases": ["pypi-release-history"]},
+        "official_search_sources": ["pypi-release-history"],
+        "followup": {
+            "window": {"start_at": CUTOFF, "end_at": HORIZON_END},
+            "verified_at": coverage_at,
+            "source_ids": ["pypi-release-history"],
+        },
+        "horizon_releases": [make_release("1.1.0", "2024-09-01T00:00:00.000Z").model_dump()],
+    }
+    universe = {(PACKAGE_ID, CUTOFF): earliest, ("pypi:other", CUTOFF): earliest}
+    _, _, strict, audit = build_reviewed(universe, [review], OBSERVATION_END)
+    assert strict.select("label", "label_available_at", "repo_group_id").row(0) == (
+        0,
+        coverage_at,
+        REPO_ID,
+    )
+    assert [row["disposition"] for row in audit] == ["negative", "review_missing"]
+
+    review["followup"] = None
+    _, labels, strict, _ = build_reviewed(universe, [review], OBSERVATION_END)
+    assert strict.is_empty()
+    assert labels["censor_reason"][0] == "incomplete_coverage"
+
+    review["core_coverage_sources"] = {}
+    with pytest.raises(ValueError, match="explicit coverage sources"):
+        build_reviewed(universe, [review], OBSERVATION_END)
 
 
 class TestDeterministicDetectors:

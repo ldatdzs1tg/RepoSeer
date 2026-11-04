@@ -256,6 +256,8 @@ class FeaturesPipeline:
         valid_snapshots: list[PackageSnapshot] = [
             r.snapshot for r in results if r.snapshot is not None
         ]
+        if official_events and len({(s.package_id, s.repo_id) for s in valid_snapshots}) > 1:
+            raise ValueError("official events require a single package and repository scope")
         snapshots_df = self.feature_service.feature_builder.snapshots_to_polars(valid_snapshots)
 
         if persist and not snapshots_df.is_empty():

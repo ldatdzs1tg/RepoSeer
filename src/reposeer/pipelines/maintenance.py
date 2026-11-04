@@ -1,12 +1,12 @@
 """Deterministic D09 label and official status evaluation pipeline."""
+
 from __future__ import annotations
 
-from typing import Literal, Sequence
-
-import polars as pl
+from collections.abc import Sequence
+from typing import Literal
 
 from reposeer.contracts.analysis import OfficialStatus
-from reposeer.contracts.identity import add_calendar_months
+from reposeer.contracts.identity import add_calendar_months, checked_timestamp
 from reposeer.contracts.models import (
     PackageId,
     PackageRelease,
@@ -15,7 +15,6 @@ from reposeer.contracts.models import (
     UtcTimestamp,
 )
 from reposeer.maintenance.labels import (
-    HISTORICAL_LABEL_SCHEMA,
     HistoricalLabelRecord,
     labels_to_polars,
     polars_to_labels,
@@ -25,7 +24,7 @@ from reposeer.maintenance.labels import (
 class MaintenancePipeline:
     """Canonical D09 label pipeline for historical ground truth and official status."""
 
-    LABEL_POLICY_VERSION: str = "0.1.0"
+    LABEL_POLICY_VERSION: str = "0.2.0"
 
     def __init__(self, policy_version: str = "0.1.0") -> None:
         self.policy_version = policy_version
@@ -78,9 +77,21 @@ class MaintenancePipeline:
         horizon_releases: Sequence[PackageRelease] = (),
         horizon_activities: Sequence[RepositoryActivity] = (),
         horizon_coverage_complete: bool = True,
+        horizon_coverage_available_at: UtcTimestamp | None = None,
     ) -> HistoricalLabelRecord:
         """Evaluate 12-month horizon label and risk-set eligibility."""
         horizon_end_at = add_calendar_months(cutoff_at, 12)
+        if horizon_coverage_available_at is not None:
+            checked_timestamp(horizon_coverage_available_at)
+            if not horizon_coverage_complete or horizon_coverage_available_at < horizon_end_at:
+                raise ValueError("coverage availability requires a complete and mature horizon")
+
+        def verified_at(event: OfficialStatus) -> UtcTimestamp:
+            return max(event.verified_at, getattr(event, "available_at", event.verified_at))
+
+        official_events = tuple(
+            ev for ev in official_events if verified_at(ev) <= observation_end_at
+        )
 
         as_of_status, as_of_event, within_horizon = self.evaluate_as_of_status(
             cutoff_at=cutoff_at, official_events=official_events
@@ -145,16 +156,13 @@ class MaintenancePipeline:
                 continue
             if not (cutoff_at < ev.effective_at <= horizon_end_at):
                 continue
-            ver_time = getattr(ev, "available_at", None) or ev.verified_at
-            if ver_time > observation_end_at:
-                continue
             if ev.revoked_at is not None and ev.revoked_at <= observation_end_at:
                 continue
-            positive_event = ev
-            break
+            if positive_event is None or verified_at(ev) < verified_at(positive_event):
+                positive_event = ev
 
         if positive_event is not None:
-            label_avail = max(positive_event.effective_at, positive_event.verified_at)
+            label_avail = max(positive_event.effective_at, verified_at(positive_event))
             return HistoricalLabelRecord(
                 package_id=package_id,
                 repo_id=repo_id,
@@ -195,7 +203,10 @@ class MaintenancePipeline:
                 label_policy_version=self.LABEL_POLICY_VERSION,
             )
 
-        if not horizon_coverage_complete:
+        if not horizon_coverage_complete or (
+            horizon_coverage_available_at is not None
+            and horizon_coverage_available_at > observation_end_at
+        ):
             return HistoricalLabelRecord(
                 package_id=package_id,
                 repo_id=repo_id,
@@ -216,36 +227,32 @@ class MaintenancePipeline:
             )
 
         # Negative (label = 0): verified maintenance during horizon
-        has_verified_maintenance = False
-
+        maintenance_times: list[UtcTimestamp] = []
         for rel in horizon_releases:
-            rel_time = getattr(rel, "published_at", None) or getattr(rel, "uploaded_at", None)
-            if rel_time is None or not (cutoff_at < rel_time <= horizon_end_at):
+            if rel.package_id != package_id or rel.repo_id not in (None, repo_id):
                 continue
-            prov = getattr(rel, "provenance", None)
-            rel_avail = (
-                getattr(prov, "available_at", None) if prov else getattr(rel, "available_at", None)
-            )
-            if rel_avail is not None and rel_avail <= observation_end_at:
-                has_verified_maintenance = True
-                break
-
-        if not has_verified_maintenance:
-            for act in horizon_activities:
-                if not (cutoff_at < act.event_at <= horizon_end_at):
-                    continue
-                prov = getattr(act, "provenance", None)
-                act_avail = (
-                    getattr(prov, "available_at", None) if prov else getattr(act, "available_at", None)
+            if (
+                cutoff_at < rel.uploaded_at <= horizon_end_at
+                and rel.provenance.available_at is not None
+            ):
+                maintenance_times.append(
+                    max(rel.uploaded_at, rel.provenance.valid_at, rel.provenance.available_at)
                 )
-                if act_avail is None or act_avail > observation_end_at:
-                    continue
-                if act.activity_kind in ("commit", "pr_merged", "issue_closed", "release"):
-                    if act.actor_is_bot is not True:
-                        has_verified_maintenance = True
-                        break
 
-        if has_verified_maintenance:
+        for act in horizon_activities:
+            if (
+                act.repo_id == repo_id
+                and cutoff_at < act.event_at <= horizon_end_at
+                and act.provenance.available_at is not None
+                and act.actor_is_bot is False
+                and act.activity_kind in ("commit", "pr_merged", "issue_closed", "release")
+            ):
+                maintenance_times.append(
+                    max(act.event_at, act.provenance.valid_at, act.provenance.available_at)
+                )
+
+        earliest_maintenance = min(maintenance_times, default=None)
+        if earliest_maintenance is not None and earliest_maintenance <= observation_end_at:
             return HistoricalLabelRecord(
                 package_id=package_id,
                 repo_id=repo_id,
@@ -259,7 +266,11 @@ class MaintenancePipeline:
                 label=0,
                 label_status="negative",
                 censor_reason=None,
-                label_available_at=horizon_end_at,
+                label_available_at=max(
+                    horizon_end_at,
+                    horizon_coverage_available_at or horizon_end_at,
+                    earliest_maintenance,
+                ),
                 event_effective_at=None,
                 evidence_ids=[],
                 label_policy_version=self.LABEL_POLICY_VERSION,

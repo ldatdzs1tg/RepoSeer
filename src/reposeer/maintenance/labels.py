@@ -1,8 +1,10 @@
 """Historical label records and schema for D09 evaluation."""
+
 from __future__ import annotations
 
 import json
-from typing import Literal, Sequence
+from collections.abc import Sequence
+from typing import Literal
 
 import polars as pl
 from pydantic import Field, model_validator
@@ -33,6 +35,19 @@ HISTORICAL_LABEL_SCHEMA: dict[str, pl.DataType] = {
     "official_status_json": pl.String,
     "label_policy_version": pl.String,
 }
+
+
+class HistoricalOfficialStatus(OfficialStatus):
+    """An official ledger revision with separately established source availability."""
+
+    available_at: UtcTimestamp
+
+    @model_validator(mode="after")
+    def check_availability(self) -> HistoricalOfficialStatus:
+        earliest = self.effective_at if self.cessation_confirmed else self.announced_at
+        if self.available_at < max(earliest, self.announced_at):
+            raise ValueError("official evidence cannot be available before the event it proves")
+        return self
 
 
 class HistoricalLabelRecord(ContractModel):
