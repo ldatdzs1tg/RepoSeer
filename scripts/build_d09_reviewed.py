@@ -119,6 +119,47 @@ def build_reviewed(
     return snapshot_df, label_df, strict, list(audit.values())
 
 
+def write_reviewed_run(
+    batch_dir: Path,
+    output_dir: Path,
+    body: bytes | None,
+    observation_end_at: str,
+    *,
+    resume: bool = False,
+) -> dict:
+    observation_end_at = checked_timestamp(observation_end_at)
+    if observation_end_at > format_utc_timestamp(datetime.now(UTC)):
+        raise ValueError("observation end cannot be in the future")
+    snapshots, labels, strict, audit = build_reviewed(
+        load_universe(batch_dir), parse_rows(body or b""), observation_end_at
+    )
+    output_dir.mkdir(parents=True, exist_ok=resume)
+    storage = FeatureStorage()
+    if not snapshots.is_empty():
+        storage.save_features(output_dir / "repository_package_snapshots.parquet", snapshots)
+        storage.save_features(output_dir / "package_labels.parquet", labels)
+    if not strict.is_empty():
+        storage.save_features(output_dir / "strict_e0_rows.parquet", strict)
+    write_json_atomic(output_dir / "eligibility.json", audit)
+    class_counts = {str(value): strict.filter(pl.col("label") == value).height for value in (0, 1)}
+    summary = {
+        "observation_end_at": observation_end_at,
+        "cohort_sha256": hashlib.sha256((batch_dir / "cohort.json").read_bytes()).hexdigest(),
+        "reviews_sha256": hashlib.sha256(body).hexdigest() if body is not None else None,
+        "universe_rows": len(audit),
+        "reviewed_rows": labels.height,
+        "strict_rows": strict.height,
+        "strict_class_counts": class_counts,
+        "strict_repo_groups": strict["repo_group_id"].n_unique(),
+        "dispositions": dict(Counter(row["disposition"] for row in audit)),
+        "status": "ready_for_split_audit"
+        if all(class_counts.values())
+        else "insufficient_strict_labels",
+    }
+    write_json_atomic(output_dir / "summary.json", summary)
+    return summary
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--batch-dir", required=True, type=Path)
@@ -127,45 +168,8 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args()
     try:
-        observation_end_at = checked_timestamp(args.observation_end_at)
-        if observation_end_at > format_utc_timestamp(datetime.now(UTC)):
-            raise ValueError("observation end cannot be in the future")
-        body = args.reviews.read_bytes() if args.reviews else b""
-        snapshots, labels, strict, audit = build_reviewed(
-            load_universe(args.batch_dir), parse_rows(body), observation_end_at
-        )
-        args.output_dir.mkdir(parents=True, exist_ok=False)
-        storage = FeatureStorage()
-        if not snapshots.is_empty():
-            storage.save_features(
-                args.output_dir / "repository_package_snapshots.parquet", snapshots
-            )
-            storage.save_features(args.output_dir / "package_labels.parquet", labels)
-        if not strict.is_empty():
-            storage.save_features(args.output_dir / "strict_e0_rows.parquet", strict)
-        write_json_atomic(args.output_dir / "eligibility.json", audit)
-        class_counts = {
-            str(value): strict.filter(pl.col("label") == value).height for value in (0, 1)
-        }
-        write_json_atomic(
-            args.output_dir / "summary.json",
-            {
-                "observation_end_at": observation_end_at,
-                "cohort_sha256": hashlib.sha256(
-                    (args.batch_dir / "cohort.json").read_bytes()
-                ).hexdigest(),
-                "reviews_sha256": hashlib.sha256(body).hexdigest() if args.reviews else None,
-                "universe_rows": len(audit),
-                "reviewed_rows": labels.height,
-                "strict_rows": strict.height,
-                "strict_class_counts": class_counts,
-                "strict_repo_groups": strict["repo_group_id"].n_unique(),
-                "dispositions": dict(Counter(row["disposition"] for row in audit)),
-                "status": "ready_for_split_audit"
-                if all(class_counts.values())
-                else "insufficient_strict_labels",
-            },
-        )
+        body = args.reviews.read_bytes() if args.reviews else None
+        write_reviewed_run(args.batch_dir, args.output_dir, body, args.observation_end_at)
     except (OSError, ValueError) as error:
         parser.exit(1, f"D09 reviewed build stopped: {error}\n")
     print(f"D09 eligibility audit: {args.output_dir.resolve()}", flush=True)
