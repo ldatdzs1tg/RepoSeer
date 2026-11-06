@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 from scripts.collect_d09_batch import parse_rows
@@ -27,7 +28,7 @@ def capture(http, directory, key, url, *, text=False):
     return (body.decode("utf-8") if text else json.loads(body)), source
 
 
-def run(args):
+def run(args, *, sleep=None):
     root = args.output_dir
     candidates = {}
     for path in args.cohort.glob("batches/*/shard-*/review.jsonl"):
@@ -40,7 +41,7 @@ def run(args):
         candidates = {
             subject: identity for subject, identity in candidates.items() if subject in wanted
         }
-    with HTTPClient(timeout=30, max_retries=1) as http:
+    with HTTPClient(timeout=30, max_retries=1, sleep=sleep) as http:
         for subject, identity in sorted(candidates.items()):
             folder = root / subject.removeprefix("pypi:")
             folder.mkdir(parents=True, exist_ok=True)
@@ -109,14 +110,28 @@ def main():
         "--output-dir", type=Path, default=Path("data/d09/model-a-outcome-reviews-v1")
     )
     parser.add_argument("--max-pages", type=int, default=10)
+    parser.add_argument(
+        "--max-rate-wait-seconds",
+        type=int,
+        help="Stop and preserve captured pages if the upstream wait exceeds this limit",
+    )
     parser.add_argument("--package", action="append", default=[])
     args = parser.parse_args()
     if not 1 <= args.max_pages <= 100:
         parser.error("expected 1–100 pages per history")
+    limit = args.max_rate_wait_seconds
+    if limit is not None and limit < 0:
+        parser.error("expected a non-negative rate wait limit")
+
+    def wait_for_quota(seconds):
+        if seconds > limit:
+            raise ValueError(f"upstream quota requires a {seconds:.0f}s wait")
+        time.sleep(seconds)
+
     try:
         args.output_dir.mkdir(parents=True, exist_ok=True)
         with run_lock(args.output_dir):
-            run(args)
+            run(args, sleep=wait_for_quota if limit is not None else None)
     except (OSError, ValueError, HTTPClientError) as error:
         parser.exit(
             1, f"Outcome source capture stopped; rerun to resume checked responses: {error}\n"

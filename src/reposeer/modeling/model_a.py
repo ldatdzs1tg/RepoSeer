@@ -18,7 +18,7 @@ def sigmoid(value: float) -> float:
 
 class ModelA:
     def __init__(self, artifact: dict):
-        if artifact.get("format") != "reposeer.model-a.logistic.v1":
+        if not isinstance(artifact, dict) or artifact.get("format") != "reposeer.model-a.logistic.v1":
             raise ValueError("unsupported Model A artifact")
         if artifact["features"] != list(FEATURE_COLUMNS):
             raise ValueError("model feature order differs from the CORE schema")
@@ -53,7 +53,11 @@ class ModelA:
 
     @classmethod
     def load(cls, path: str | Path):
-        return cls(json.loads(Path(path).read_bytes()))
+        return cls.from_bytes(Path(path).read_bytes())
+
+    @classmethod
+    def from_bytes(cls, artifact: bytes):
+        return cls(json.loads(artifact))
 
     def margin(self, features: dict) -> float:
         unknown = set(features) - set(FEATURE_COLUMNS)

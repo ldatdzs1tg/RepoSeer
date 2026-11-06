@@ -3,6 +3,7 @@
 import typer
 
 from reposeer import __version__
+from reposeer.cli.analyze import analyze
 from reposeer.cli.build_features import build_features_app
 from reposeer.cli.collect import collect_app
 from reposeer.cli.collect_activity import collect_activity_app
@@ -52,6 +53,7 @@ app.add_typer(detect_tech_app, name="detect-tech")
 app.add_typer(process_app, name="process")
 app.add_typer(profile_app, name="profile")
 app.add_typer(build_features_app, name="build-features")
+app.command("analyze")(analyze)
 
 
 if __name__ == "__main__":

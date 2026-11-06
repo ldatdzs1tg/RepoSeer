@@ -117,3 +117,25 @@ On success, the timestamped run folder contains the frozen `model-a.json`, split
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.infer_model_a --model <run-folder>/model-a.json --snapshot <run-folder>/sample-snapshot.json
 ```
+
+## Analyze a cutoff feature package
+
+Export the cutoff package from one reviewed D09 record. The export carries the snapshot, mapping and coverage sources used at the cutoff. Only official status available at the cutoff can accompany the export.
+
+```python
+from pathlib import Path
+
+from reposeer.analysis.core import CoreFeaturePackage
+from reposeer.pipelines.d09 import ReviewedD09Target
+
+review = ReviewedD09Target.model_validate_json(review_line)
+package = CoreFeaturePackage.from_review(review)
+Path("core-feature-package.json").write_text(package.model_dump_json(indent=2), encoding="utf-8")
+```
+
+```powershell
+.\.venv\Scripts\python.exe -m reposeer.cli.app analyze `
+  --model <run-folder>/model-a.json --feature-package core-feature-package.json
+```
+
+Analyze reads the frozen artifact and emits a validated `FinalReport` as JSON. The retrospective baseline returns `insufficient_evidence` with cutoff provenance, coverage and a reason. Released artifacts need a frozen `analysis_policy` with calibration and threshold versions, ordered thresholds and the calibrated CORE feature ranges. An ENHANCED request uses CORE with a fallback reason when a CORE score is eligible. Otherwise the report records `enhanced_status="not_run"`.

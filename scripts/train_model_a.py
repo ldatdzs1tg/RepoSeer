@@ -94,7 +94,7 @@ def metrics(y, probabilities):
     }
 
 
-def run(args):
+def run(args, *, model_version: str = "0.1.0"):
     summary_path = args.data_dir / "summary.json"
     summary = json.loads(summary_path.read_bytes())
     if not summary.get("reviewed_directories"):
@@ -223,7 +223,7 @@ def run(args):
     release_eligible = False
     artifact = {
         "format": "reposeer.model-a.logistic.v1",
-        "model_version": "0.1.0",
+        "model_version": model_version,
         "feature_set": "E0",
         "feature_schema_version": "0.1.0",
         "features": list(FEATURE_COLUMNS),
@@ -280,6 +280,7 @@ def run(args):
     )
     result = {
         "status": "trained",
+        "model_version": model_version,
         "release_eligible": release_eligible,
         "purpose": "retrospective_analysis",
         "prospective_accuracy_claim_supported": False,
@@ -307,16 +308,20 @@ def main():
     parser.add_argument(
         "--output-dir", type=Path, help="New output folder (defaults to a timestamped run)"
     )
+    parser.add_argument("--model-version", default="0.1.0", help="Version recorded in the frozen model")
     parser.add_argument("--validation-start-at", default="2022-01-01T00:00:00.000Z")
     parser.add_argument("--test-start-at", default="2024-01-01T00:00:00.000Z")
     parser.add_argument("--test-end-at", default="2025-01-01T00:00:00.000Z")
     args = parser.parse_args()
+    model_version = args.model_version.strip()
+    if not model_version:
+        parser.error("expected a non-empty model version")
     if args.output_dir is None:
         args.output_dir = Path("data/d09/model-a-runs") / datetime.now(UTC).strftime(
             "%Y%m%dT%H%M%S%fZ"
         )
     try:
-        result = run(args)
+        result = run(args, model_version=model_version)
     except (OSError, ValueError, KeyError, ImportError, pl.exceptions.PolarsError) as error:
         parser.exit(1, f"Model A training stopped: {error}\n")
     print(json.dumps({"output_dir": str(args.output_dir.resolve()), **result}))

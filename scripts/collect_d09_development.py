@@ -106,6 +106,24 @@ def run(args):
     subjects = sorted({package_id(name.removeprefix("pypi:")) for name in args.package})
     if any(subject not in registry["packages"] for subject in subjects):
         raise ValueError("development subjects must belong to the frozen historical Drive cohort")
+    wanted_cutoffs = set(args.verification_cutoff)
+    wanted_targets = getattr(args, "target_keys", set())
+    scope_path = output / "verification-scope.json"
+    scope = {
+        "cutoffs": sorted(wanted_cutoffs),
+        "other_rows": "audit_only_unless_previously_verified",
+    }
+    if wanted_targets:
+        scope["package_cutoffs"] = sorted([subject, cutoff] for subject, cutoff in wanted_targets)
+    if scope_path.exists() and json.loads(scope_path.read_bytes()) != scope:
+        raise ValueError("development verification scope changed; use another output directory")
+    write_json_atomic(scope_path, scope)
+
+    def in_scope(row):
+        if wanted_targets:
+            return (row["package_id"], row["cutoff_at"]) in wanted_targets
+        return row["cutoff_at"] in wanted_cutoffs
+
     config = {
         "subjects": subjects,
         "drive_targets_sha256": frozen["targets_sha256"],
@@ -160,7 +178,7 @@ FORMAT JSONEachRow"""
             review_rows(packages, history, cutoffs=EXTENDED_CUTOFFS, allow_github_homepage=True)
         )
         for row in rows:
-            if not row["archive_names"] and row["cutoff_at"] in args.verification_cutoff:
+            if not row["archive_names"] and in_scope(row):
                 try:
                     repair_mapping_metadata(http, shard, row)
                 except (ValueError, HTTPClientError, KeyError) as error:
@@ -210,16 +228,7 @@ FORMAT JSONEachRow"""
     destination = directory / "verification"
     destination.mkdir(exist_ok=True)
     inventory = json.loads((args.inventory_dir / "inventory.json").read_bytes())
-    wanted_cutoffs = set(args.verification_cutoff)
-    scope_path = output / "verification-scope.json"
-    scope = {
-        "cutoffs": sorted(wanted_cutoffs),
-        "other_rows": "audit_only_unless_previously_verified",
-    }
-    if scope_path.exists() and json.loads(scope_path.read_bytes()) != scope:
-        raise ValueError("development verification scope changed; use another output directory")
-    write_json_atomic(scope_path, scope)
-    selected = [row for row in candidates if row["cutoff_at"] in wanted_cutoffs]
+    selected = [row for row in candidates if in_scope(row)]
     results, downloads = verify_batch(
         SimpleNamespace(
             output_dir=destination,
@@ -289,6 +298,12 @@ def main():
     parser.add_argument("--max-downloads", type=int, default=12)
     parser.add_argument("--verification-cutoff", action="append")
     parser.add_argument(
+        "--target",
+        action="append",
+        metavar="PACKAGE@CUTOFF",
+        help="Verify only the specified package-cutoff pair; repeat for other pairs",
+    )
+    parser.add_argument(
         "--proof-dir",
         action="append",
         type=Path,
@@ -296,6 +311,20 @@ def main():
         help="Read and reuse another collection's original archive receipts",
     )
     args = parser.parse_args()
+    args.target_keys = set()
+    if args.target:
+        if args.package or args.verification_cutoff:
+            parser.error("use --target or --package/--verification-cutoff")
+        try:
+            for value in args.target:
+                name, cutoff = value.rsplit("@", 1)
+                if cutoff not in EXTENDED_CUTOFFS:
+                    raise ValueError("target cutoff is outside the frozen quarterly policy")
+                args.target_keys.add((package_id(name.removeprefix("pypi:")), cutoff))
+        except ValueError as error:
+            parser.error(str(error))
+        args.package = sorted({subject for subject, _ in args.target_keys})
+        args.verification_cutoff = sorted({cutoff for _, cutoff in args.target_keys})
     args.package = args.package or DEFAULT_PACKAGES
     args.verification_cutoff = args.verification_cutoff or [
         "2019-12-31T23:59:59.999Z",
