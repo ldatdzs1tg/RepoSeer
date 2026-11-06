@@ -23,6 +23,7 @@ from scripts.collect_d09_batch import (
     SEED,
     WINDOW_END,
     collect_shard,
+    parse_rows,
     query_rows,
     roster_rows,
     sql_list,
@@ -30,13 +31,19 @@ from scripts.collect_d09_batch import (
     sql_time,
 )
 from scripts.collect_d09_pilot import run_lock, stored_source_matches
-from scripts.verify_d09_evidence import load_candidates, verify_batch
+from scripts.d09_archive_pool import ArchivePool
+from scripts.verify_d09_evidence import (
+    DEFAULT_ARCHIVE_WORKERS,
+    MAX_ARCHIVE_WORKERS,
+    load_candidates,
+    verify_batch,
+)
 from tools.coordination._common import atomic_bytes
 
 from reposeer.collection.http.client import HTTPClient
 from reposeer.collection.persistence import write_json_atomic
-from reposeer.contracts.identity import checked_timestamp, format_utc_timestamp
-from reposeer.exceptions import HTTPClientError
+from reposeer.contracts.identity import checked_timestamp, format_utc_timestamp, normalize_pypi_name
+from reposeer.exceptions import HTTPClientError, RateLimitExceededError
 from reposeer.storage.screening_mapping import (
     checked_mount_path,
     read_mapping_csv,
@@ -47,6 +54,10 @@ DEFAULT_SCREENING = Path(
     "G:/.shortcut-targets-by-id/1fkcK7UsBtiq7-7_4_aH3FihdjYfIku0f/RepoSeer-Data/screening (1)"
 )
 DEFAULT_INVENTORY = Path("data/d09/archive-inventory-2019-2025")
+REGISTRY_PAGE_SIZE = 5000
+REGISTRY_FILTER_SQL_LIMIT = 2500
+REGISTRY_TARGET_BATCH_SIZE = 2000
+REGISTRY_TARGET_SQL_BYTES = 64_000
 SPLIT_TIMES = {
     "fold_fit_at": "2022-12-31T23:59:59.999Z",
     "validation_start_at": "2023-01-01T00:00:00.000Z",
@@ -130,27 +141,112 @@ def freeze_targets(screening: Path, output: Path, config: dict) -> dict:
     return frozen
 
 
-def registry_query(prefix: str, projects: set[str]) -> str:
+def registry_query(
+    prefix: str,
+    projects: set[str],
+    *,
+    after: str | None = None,
+    limit: int | None = None,
+    filter_targets: bool = False,
+) -> str:
     prefixes = sorted({prefix, prefix.upper()})
     ranges = " OR ".join(
         f"(name >= {sql_string(letter)} AND name < {sql_string(chr(ord(letter) + 1))})"
         for letter in prefixes
     )
     names = sql_list(projects)
-    selected = f"AND project IN ({names})" if len(names) <= 2500 else ""
+    selected = (
+        f"AND project IN ({names})"
+        if filter_targets or len(names) <= REGISTRY_FILTER_SQL_LIMIT
+        else ""
+    )
+    cursor = f" AND project > {sql_string(after)}" if after is not None else ""
+    page = f"\nLIMIT {limit}" if limit is not None else ""
     return f"""WITH replaceRegexpAll(lower(name), '[-_.]+', '-') AS project
 SELECT project, arraySort(groupUniqArray(name)) AS names,
        toString(min(upload_time), 'UTC') AS first_upload_at
 FROM pypi.projects
 WHERE ({ranges}) AND upload_time < {sql_time(WINDOW_END)}
-  AND match(name, '^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$') {selected}
+  AND match(name, '^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$') {selected}{cursor}
 GROUP BY project
 HAVING min(upload_time) < {sql_time(CUTOFFS[-1])}
-ORDER BY project
+ORDER BY project{page}
 FORMAT JSONEachRow"""
 
 
-def historical_registry(http: HTTPClient, output: Path, frozen: dict) -> dict:
+def validate_registry_page(
+    rows: list[dict], name: str, prefix: str, *, after: str = "", targets: set[str] | None = None
+) -> str:
+    previous = after
+    for row in rows:
+        project = row["project"]
+        if (
+            not project.startswith(prefix)
+            or normalize_pypi_name(project) != project
+            or project <= previous
+            or (targets is not None and project not in targets)
+        ):
+            raise ValueError(
+                f"registry returned an out-of-order or out-of-scope project for {name}"
+            )
+        previous = project
+    return previous
+
+
+def registry_target_batches(projects: set[str], after: str):
+    batch, size = set(), 0
+    for project in sorted(projects):
+        if project <= after:
+            continue
+        size_of_name = len(project) + 4
+        if batch and (
+            len(batch) == REGISTRY_TARGET_BATCH_SIZE
+            or size + size_of_name > REGISTRY_TARGET_SQL_BYTES
+        ):
+            yield batch
+            batch, size = set(), 0
+        batch.add(project)
+        size += size_of_name
+    if batch:
+        yield batch
+
+
+def registry_pages(http: HTTPClient, output: Path, prefix: str, projects: set[str]):
+    if len(sql_list(projects)) <= REGISTRY_FILTER_SQL_LIMIT:
+        name = f"registry-{prefix}"
+        rows = query_rows(http, output, name, registry_query(prefix, projects))
+        validate_registry_page(rows, name, prefix, targets=projects)
+        yield name, rows
+        return
+
+    # Preserve already captured prefix pages, then request only the remaining frozen targets.
+    after = ""
+    for number in range(1000):
+        name = f"registry-{prefix}-{number:03d}"
+        path = output / "sources" / f"{name}.json"
+        if not path.is_file():
+            break
+        receipt = json.loads(path.read_bytes())
+        expected = registry_query(prefix, projects, after=after or None, limit=REGISTRY_PAGE_SIZE)
+        if receipt["query_sha256"] != digest(expected.encode()) or not stored_source_matches(
+            output, receipt
+        ):
+            raise ValueError(f"registry page checkpoint changed: {name}")
+        rows = parse_rows((output / receipt["path"]).read_bytes())
+        after = validate_registry_page(rows, name, prefix, after=after)
+        yield name, rows
+        if len(rows) < REGISTRY_PAGE_SIZE:
+            return
+
+    for number, batch in enumerate(registry_target_batches(projects, after)):
+        name = f"registry-{prefix}-targets-{number:03d}"
+        query = registry_query(prefix, batch, filter_targets=True)
+        rows = query_rows(http, output, name, query, post=True)
+        validate_registry_page(rows, name, prefix, targets=batch)
+        yield name, rows
+
+
+def historical_registry(http: HTTPClient, output: Path, frozen: dict) -> tuple[dict, dict]:
     path = output / "historical-registry.json"
     if path.exists():
         saved = json.loads(path.read_bytes())
@@ -162,7 +258,7 @@ def historical_registry(http: HTTPClient, output: Path, frozen: dict) -> dict:
             receipt = json.loads((output / "sources" / f"{name}.json").read_bytes())
             if receipt["content_sha256"] != expected or not stored_source_matches(output, receipt):
                 raise ValueError(f"frozen registry source changed: {name}")
-        return saved["packages"]
+        return saved["packages"], saved["registry_receipts"]
 
     buckets = defaultdict(set)
     for row in frozen["targets"]:
@@ -170,15 +266,12 @@ def historical_registry(http: HTTPClient, output: Path, frozen: dict) -> dict:
         buckets[project[0]].add(project)
     registry, receipts = {}, {}
     for prefix, projects in sorted(buckets.items()):
-        query_name = f"registry-{prefix}"
-        raw = query_rows(http, output, query_name, registry_query(prefix, projects))
-        if any(not row["project"].startswith(prefix) for row in raw):
-            raise ValueError(f"registry returned an out-of-scope project for {prefix}")
-        for package in roster_rows([row for row in raw if row["project"] in projects]):
-            registry[package["package_id"]] = package
-        receipts[query_name] = json.loads((output / "sources" / f"{query_name}.json").read_bytes())[
-            "content_sha256"
-        ]
+        for name, raw in registry_pages(http, output, prefix, projects):
+            for package in roster_rows([row for row in raw if row["project"] in projects]):
+                registry[package["package_id"]] = package
+            receipts[name] = json.loads((output / "sources" / f"{name}.json").read_bytes())[
+                "content_sha256"
+            ]
     write_json_atomic(
         path,
         {
@@ -188,7 +281,7 @@ def historical_registry(http: HTTPClient, output: Path, frozen: dict) -> dict:
             "packages": registry,
         },
     )
-    return registry
+    return registry, receipts
 
 
 def pack_groups(groups: list[list[dict]], size: int):
@@ -203,7 +296,9 @@ def pack_groups(groups: list[list[dict]], size: int):
         yield batch
 
 
-def prepare_batch(directory: Path, packages: list[dict], run: Path, frozen: dict) -> None:
+def prepare_batch(
+    directory: Path, packages: list[dict], registry_receipts: dict, frozen: dict
+) -> None:
     roster = jsonl(
         {
             "project": item["package_id"].removeprefix("pypi:"),
@@ -213,16 +308,15 @@ def prepare_batch(directory: Path, packages: list[dict], run: Path, frozen: dict
         for item in packages
     )
     relative = "sources/cohort-drive.jsonl"
-    prefixes = sorted({item["package_id"][5] for item in packages})
+    prefixes = {item["package_id"][5] for item in packages}
     receipt = {
         "path": relative,
         "content_sha256": digest(roster),
         "drive_targets_sha256": frozen["targets_sha256"],
         "registry_receipts": {
-            prefix: json.loads((run / "sources" / f"registry-{prefix}.json").read_bytes())[
-                "content_sha256"
-            ]
-            for prefix in prefixes
+            name.removeprefix("registry-"): sha
+            for name, sha in registry_receipts.items()
+            if name.removeprefix("registry-").split("-", 1)[0] in prefixes
         },
     }
     cohort = {
@@ -247,7 +341,17 @@ def prepare_batch(directory: Path, packages: list[dict], run: Path, frozen: dict
     write_json_atomic(cohort_path, cohort)
 
 
-def collect_batch(http: HTTPClient, directory: Path, groups: list[list[dict]]) -> None:
+def collection_checkpoint(directory: Path) -> dict | None:
+    path = directory / "collection.json"
+    if not path.is_file():
+        return None
+    receipt = json.loads(path.read_bytes())
+    return receipt if receipt["source_reviews_sha256"] == shard_reviews_digest(directory) else None
+
+
+def collect_batch(http: HTTPClient, directory: Path, groups: list[list[dict]]) -> dict:
+    counts = Counter()
+    package_cutoffs = official_leads = 0
     for index, packed in enumerate(pack_groups(groups, MAX_SHARD_SIZE)):
         packages = [item for group in packed for item in group]
         shard = directory / f"shard-{index:04d}"
@@ -255,17 +359,28 @@ def collect_batch(http: HTTPClient, directory: Path, groups: list[list[dict]]) -
         for part, offset in enumerate(range(0, len(packages), MAX_SHARD_SIZE)):
             current = shard if part == 0 else directory / f"shard-{index:04d}-{part:03d}"
             path = current / "collection.json"
-            if path.is_file() and stored_source_matches(current, json.loads(path.read_bytes())):
-                continue
-            summary = collect_shard(http, current, packages[offset : offset + MAX_SHARD_SIZE])
-            write_json_atomic(
-                path,
-                {
-                    **summary,
-                    "path": "review.jsonl",
-                    "content_sha256": file_digest(current / "review.jsonl"),
-                },
-            )
+            summary = json.loads(path.read_bytes()) if path.is_file() else {}
+            if not stored_source_matches(current, summary):
+                summary = collect_shard(http, current, packages[offset : offset + MAX_SHARD_SIZE])
+                write_json_atomic(
+                    path,
+                    {
+                        **summary,
+                        "path": "review.jsonl",
+                        "content_sha256": file_digest(current / "review.jsonl"),
+                    },
+                )
+            counts.update(summary["mapping_review"])
+            package_cutoffs += summary["package_cutoffs"]
+            official_leads += summary["official_leads"]
+    receipt = {
+        "source_reviews_sha256": shard_reviews_digest(directory),
+        "mapping_review": dict(counts),
+        "package_cutoffs": package_cutoffs,
+        "official_leads": official_leads,
+    }
+    write_json_atomic(directory / "collection.json", receipt)
+    return receipt
 
 
 def verification_checkpoint(directory: Path, retry_unverified: bool) -> dict | None:
@@ -273,7 +388,7 @@ def verification_checkpoint(directory: Path, retry_unverified: bool) -> dict | N
     receipt_path = output / "summary.json"
     if receipt_path.exists():
         receipt = json.loads(receipt_path.read_bytes())
-        retryable = {"download_budget_reached"}
+        retryable = {"download_budget_reached", "archive_download_pending"}
         if retry_unverified:
             retryable.update(("archive_evidence_unverified", "pypi_evidence_unverified"))
         if (
@@ -294,6 +409,8 @@ def verify_mapping(directory: Path, args, inventory: dict, budget: int) -> tuple
         inventory_dir=args.inventory_dir,
         archive_dir=args.archive_dir,
         max_downloads=budget,
+        archive_workers=args.archive_workers,
+        archive_pool=getattr(args, "archive_pool", None),
     )
     rows, used = verify_batch(options, candidates, inventory) if candidates else ([], 0)
     body = jsonl(rows)
@@ -406,6 +523,90 @@ def audit_run(output: Path, reviewed: list[Path], observation_end: str) -> dict:
     return audit
 
 
+def collection_plan(http: HTTPClient, args, frozen: dict) -> tuple[dict, dict, list]:
+    output = args.output_dir
+    targets = frozen["targets"]
+    registry, receipts = historical_registry(http, output, frozen)
+    missing = (row for row in targets if row["package_id"] not in registry)
+    atomic_bytes(output / "no-pre-cutoff-distribution.jsonl", jsonl(missing), immutable=False)
+    groups = [
+        [registry[row["package_id"]] for row in group if row["package_id"] in registry]
+        for group in target_groups(targets)
+    ]
+    batches = list(pack_groups([group for group in groups if group], args.batch_size))
+    return registry, receipts, batches
+
+
+def archive_hints(output: Path, targets: list[dict]) -> set[str]:
+    """Names select extra lines to retain, never establish historical identity."""
+    names = {row["repo_full_name"].casefold() for row in targets if row["repo_full_name"]}
+    for directory in sorted(output.glob("batches/*")):
+        marker = directory / "collection.json"
+        if not marker.is_file():
+            continue
+        revision = json.loads(marker.read_bytes())["source_reviews_sha256"]
+        cached = directory / "archive-hints.json"
+        try:
+            receipt = json.loads(cached.read_bytes())
+        except (OSError, ValueError):
+            receipt = {}
+        if receipt.get("source_reviews_sha256") != revision:
+            found = set()
+            for path in directory.glob("shard-*/review.jsonl"):
+                with path.open("rb") as stream:
+                    for line in stream:
+                        row = json.loads(line)
+                        found.update(
+                            url.removeprefix("https://github.com/").casefold()
+                            for url in row.get("explicit_source_urls", ())
+                            if url.startswith("https://github.com/")
+                        )
+            receipt = {"source_reviews_sha256": revision, "names": sorted(found)}
+            write_json_atomic(cached, receipt)
+        names.update(receipt["names"])
+    return names
+
+
+def run_collection(args, frozen: dict) -> dict:
+    output = args.output_dir
+    processed = new_batches = package_cutoffs = official_leads = 0
+    counts = Counter()
+    with HTTPClient(timeout=60, max_retries=2) as http:
+        registry, receipts, batches = collection_plan(http, args, frozen)
+        for index, groups in enumerate(batches):
+            directory = output / "batches" / f"batch-{index:05d}"
+            checkpoint = collection_checkpoint(directory)
+            if checkpoint is None:
+                if args.max_batches and new_batches >= args.max_batches:
+                    break
+                packages = [item for group in groups for item in group]
+                prepare_batch(directory, packages, receipts, frozen)
+                checkpoint = collect_batch(http, directory, groups)
+                new_batches += 1
+                print(f"Collected batch {index + 1}/{len(batches)}", flush=True)
+            counts.update(checkpoint["mapping_review"])
+            package_cutoffs += checkpoint["package_cutoffs"]
+            official_leads += checkpoint["official_leads"]
+            processed += 1
+    complete = processed == len(batches)
+    summary = {
+        "status": "completed" if complete else "resume_to_continue",
+        "stop_reason": None if complete else "batch_budget_reached",
+        "historical_packages": len(registry),
+        "batches_processed": processed,
+        "batches_total": len(batches),
+        "mapping_statuses": dict(counts),
+        "package_cutoffs": package_cutoffs,
+        "official_leads": official_leads,
+    }
+    write_json_atomic(output / "collection-summary.json", summary)
+    print(
+        f"D09 collection: {processed}/{len(batches)} batches | {package_cutoffs} package-cutoffs | {official_leads} review leads",
+        flush=True,
+    )
+    return summary
+
+
 def run(args, frozen: dict) -> dict:
     output = args.output_dir
     targets = frozen["targets"]
@@ -445,16 +646,14 @@ def run(args, frozen: dict) -> dict:
         closing(sqlite3.connect(Path(temporary) / "index.sqlite3")) as db,
         HTTPClient(timeout=60, max_retries=2) as http,
     ):
-        registry = historical_registry(http, output, frozen)
-        missing = [row for row in targets if row["package_id"] not in registry]
-        atomic_bytes(output / "no-pre-cutoff-distribution.jsonl", jsonl(missing), immutable=False)
+        registry, registry_receipts, batch_groups = collection_plan(http, args, frozen)
+        args.archive_pool = ArchivePool(output, archive_hints(output, targets))
+        print(
+            f"Shared archive cache: {len(args.archive_pool.names)} repository hints, "
+            f"{len(args.archive_pool.receipts)} saved proofs",
+            flush=True,
+        )
         reviews_count = index_reviews(db, args.reviews, registry, now)
-        groups = [
-            [registry[row["package_id"]] for row in group if row["package_id"] in registry]
-            for group in target_groups(targets)
-        ]
-        # Preserve repository groups in the outer batches and at provider query boundaries when possible.
-        batch_groups = list(pack_groups([group for group in groups if group], args.batch_size))
         for index, groups_in_batch in enumerate(batch_groups):
             directory = output / "batches" / f"batch-{index:05d}"
             verification = verification_checkpoint(directory, args.retry_unverified)
@@ -464,20 +663,26 @@ def run(args, frozen: dict) -> dict:
                     break
                 new_batches += 1
             packages = [item for group in groups_in_batch for item in group]
-            prepare_batch(directory, packages, output, frozen)
-            collect_batch(http, directory, groups_in_batch)
+            prepare_batch(directory, packages, registry_receipts, frozen)
+            if collection_checkpoint(directory) is None:
+                collect_batch(http, directory, groups_in_batch)
             if verification is None:
                 verification, used = verify_mapping(directory, args, inventory, budget)
                 budget -= used
             mapping_counts.update(verification["statuses"])
             reviewed.append(reviewed_batch(directory, packages, db, now))
-            pending = verification["statuses"].get("download_budget_reached", 0)
+            pending = sum(
+                verification["statuses"].get(status, 0)
+                for status in ("download_budget_reached", "archive_download_pending")
+            )
             print(
-                f"Batch {index + 1}/{len(batch_groups)} | verified {mapping_counts['mapping_sources_matched']} | pending archives {pending}",
+                f"Batch {index + 1}/{len(batch_groups)} | verified package-cutoffs {mapping_counts['mapping_sources_matched']} | package-cutoffs waiting for archives {pending}",
                 flush=True,
             )
             if pending:
-                stop_reason = "archive_download_budget_reached"
+                stop_reason = (
+                    "archive_download_budget_reached" if not budget else "archive_downloads_pending"
+                )
                 break
 
     audit = audit_run(output, reviewed, now)
@@ -488,7 +693,7 @@ def run(args, frozen: dict) -> dict:
         "screening_rows": frozen["drive_metadata"]["row_count"],
         "targets": len(targets),
         "historical_packages": len(registry),
-        "no_observed_pre_cutoff_distribution": len(missing),
+        "no_observed_pre_cutoff_distribution": len(targets) - len(registry),
         "batches_processed": len(reviewed),
         "batches_total": len(batch_groups),
         "archive_downloads_this_invocation": args.max_downloads - budget,
@@ -504,6 +709,25 @@ def run(args, frozen: dict) -> dict:
     if not complete:
         print(f"Pass stopped at {stop_reason}.", flush=True)
     return summary
+
+
+def wait_for_provider(output: Path, continuous: bool) -> bool:
+    path = output / "provider-quota.json"
+    if not path.is_file():
+        return True
+    retry_at = checked_timestamp(json.loads(path.read_bytes())["retry_at_utc"])
+    delay = datetime.fromisoformat(retry_at).timestamp() - time.time()
+    if delay <= 0:
+        return True
+    if continuous:
+        print(f"Public ClickHouse quota reached. Waiting until {retry_at} to resume.", flush=True)
+        time.sleep(delay)
+    else:
+        print(
+            f"Public ClickHouse quota reached. Checkpoint saved. Retry after {retry_at}.",
+            flush=True,
+        )
+    return continuous
 
 
 def main() -> int:
@@ -532,6 +756,12 @@ def main() -> int:
         help="New GH Archive files allowed in this invocation",
     )
     parser.add_argument(
+        "--archive-workers",
+        type=int,
+        default=DEFAULT_ARCHIVE_WORKERS,
+        help="Concurrent archive checks (1–8)",
+    )
+    parser.add_argument(
         "--max-batches",
         type=int,
         help="New batches per invocation; 0 for unlimited (default 5 with --all)",
@@ -543,6 +773,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--continuous", action="store_true", help="Automatically continue successive bounded passes"
+    )
+    parser.add_argument(
+        "--collect-only",
+        action="store_true",
+        help="Collect the review queue across batches without raw archive verification",
     )
     parser.add_argument(
         "--plan-only",
@@ -561,9 +796,12 @@ def main() -> int:
     if (
         args.limit < 1
         or not 1 <= args.batch_size <= 500
+        or not 1 <= args.archive_workers <= MAX_ARCHIVE_WORKERS
         or min(args.max_downloads, args.max_batches) < 0
     ):
-        parser.error("expected positive target limit, batch size 1–500 and nonnegative budgets")
+        parser.error(
+            "expected positive target limit, batch size 1–500, 1–8 archive workers and nonnegative budgets"
+        )
     if args.archive_dir is not None and not args.archive_dir.is_dir():
         parser.error("archive-dir must be an existing directory")
     if args.continuous and args.retry_unverified:
@@ -586,13 +824,43 @@ def main() -> int:
                 return 0
             previous = None
             while True:
-                summary = run(args, frozen)
+                if not wait_for_provider(args.output_dir, args.continuous):
+                    break
+                try:
+                    summary = (
+                        run_collection(args, frozen) if args.collect_only else run(args, frozen)
+                    )
+                except RateLimitExceededError as error:
+                    now = time.time()
+                    retry_at = (
+                        max(now + 5, error.reset_timestamp + 2)
+                        if error.reset_timestamp
+                        else now + 300
+                    )
+                    write_json_atomic(
+                        args.output_dir / "provider-quota.json",
+                        {
+                            "status": "waiting_for_public_clickhouse_quota",
+                            "retry_at_utc": format_utc_timestamp(
+                                datetime.fromtimestamp(retry_at, UTC)
+                            ),
+                        },
+                    )
+                    continue
                 if summary["status"] == "completed":
                     break
                 progress = (
                     summary["batches_processed"],
                     summary["mapping_statuses"],
                     sum(1 for _ in args.output_dir.glob("batches/*/verification/archives/*.json")),
+                    sum(1 for _ in args.output_dir.glob("archive-cache/archives/*.json")),
+                    sum(
+                        path.stat().st_size
+                        for path in args.output_dir.glob("batches/*/verification/*.part")
+                    )
+                    + sum(
+                        path.stat().st_size for path in args.output_dir.glob("archive-cache/*.part")
+                    ),
                 )
                 if (
                     not args.continuous
@@ -616,6 +884,9 @@ def main() -> int:
         pl.exceptions.PolarsError,
     ) as error:
         parser.exit(1, f"D09 Drive run stopped; rerun the same command to resume: {error}\n")
+    except KeyboardInterrupt:
+        print("D09 interrupted. Run the same command again to resume.", flush=True)
+        return 130
     return 0
 
 

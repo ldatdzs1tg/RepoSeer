@@ -6,10 +6,10 @@ import gzip
 import hashlib
 import json
 import re
-import tempfile
 import time
 import zlib
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -20,6 +20,7 @@ from scripts.build_d09_reviewed import load_universe
 from scripts.collect_d09_batch import (
     ACTIVITY_TYPES,
     CUTOFFS,
+    IDENTITY_EVENT_TYPES,
     WINDOW_START,
     archive_timestamp,
     chunked,
@@ -35,6 +36,7 @@ from scripts.collect_d09_pilot import (
     source_links,
     stored_source_matches,
 )
+from scripts.d09_archive_pool import covers_names, local_proof, names_digest, saved_proofs
 from tools.coordination._common import atomic_bytes
 
 from reposeer.collection.http.client import HTTPClient
@@ -55,7 +57,10 @@ MAX_OBJECT_BYTES = 256 * 1024 * 1024
 MAX_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
 MAX_LINE_BYTES = 8 * 1024 * 1024
 BLOCK_BYTES = 1024 * 1024
+DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_DOWNLOAD_SECONDS = 120
+DEFAULT_ARCHIVE_WORKERS = 4
+MAX_ARCHIVE_WORKERS = 8
 
 
 def load_candidates(batch_dir: Path, subjects: set[str]) -> list[dict]:
@@ -95,6 +100,19 @@ def load_candidates(batch_dir: Path, subjects: set[str]) -> list[dict]:
                     "repo_url": _root_url(urls[0]),
                 }
             )
+            if row.get("source_link_policy") is not None:
+                if row["source_link_policy"] != "github-homepage-candidate-v1":
+                    raise ValueError("unsupported historical source-link policy")
+                candidates[-1]["source_link_policy"] = row["source_link_policy"]
+            if row.get("archive_window_start_at") is not None:
+                start = checked_timestamp(row["archive_window_start_at"])
+                if start != "2018-01-01T00:00:00.000Z":
+                    raise ValueError("unsupported extended archive window")
+                candidates[-1]["archive_window_start_at"] = start
+            if row.get("identity_event_policy") is not None:
+                if row["identity_event_policy"] != "all-public-v1":
+                    raise ValueError("unsupported identity event policy")
+                candidates[-1]["identity_event_policy"] = row["identity_event_policy"]
     if seen != set(universe):
         raise ValueError("batch is incomplete; resume collection before verifying evidence")
     return sorted(candidates, key=lambda row: (row["package_id"], row["cutoff_at"]))
@@ -119,7 +137,13 @@ def pypi_evidence(http: HTTPClient, directory: Path, row: dict) -> tuple[dict, d
         or info.get("version") != version
     ):
         raise ValueError("pypi_identity_or_version_mismatch")
-    if set(source_links(info)) != {row["repo_url"]}:
+    declared_sources = source_links(info)
+    if not declared_sources and row.get("source_link_policy") == "github-homepage-candidate-v1":
+        try:
+            declared_sources = {_root_url(info.get("home_page")): set()}
+        except (TypeError, ValueError):
+            pass
+    if set(declared_sources) != {row["repo_url"]}:
         raise ValueError("pypi_explicit_source_mismatch")
     files = payload.get("urls")
     if not isinstance(files, list):
@@ -138,6 +162,14 @@ def pypi_evidence(http: HTTPClient, directory: Path, row: dict) -> tuple[dict, d
 def locate_hours(http: HTTPClient, directory: Path, rows: list[dict]) -> dict:
     pairs = {(row["repo_id"], row["repo_url"].removeprefix("https://github.com/")) for row in rows}
     results = defaultdict(set)
+    types = (
+        IDENTITY_EVENT_TYPES
+        if any(row.get("identity_event_policy") == "all-public-v1" for row in rows)
+        else ACTIVITY_TYPES
+    )
+    window_start = min(
+        (row.get("archive_window_start_at", WINDOW_START) for row in rows), default=WINDOW_START
+    )
     for index, batch in enumerate(chunked(sorted({identity for identity, _ in pairs}), 25)):
         names = {name for identity, name in pairs if identity in batch}
         query = f"""SELECT repo_id, lower(repo_name) AS name,
@@ -145,8 +177,8 @@ def locate_hours(http: HTTPClient, directory: Path, rows: list[dict]) -> dict:
        toString(min(file_time), 'UTC') AS first_hour
 FROM github.github_events
 WHERE repo_id IN ({sql_list(map(parse_repo_id, batch))}) AND lower(repo_name) IN ({sql_list(names)})
-  AND event_type IN ({sql_list(ACTIVITY_TYPES)})
-  AND created_at >= {sql_time(WINDOW_START)} AND created_at <= {sql_time(CUTOFFS[-1])}
+  AND event_type IN ({sql_list(types)})
+  AND created_at >= {sql_time(window_start)} AND created_at <= {sql_time(CUTOFFS[-1])}
 GROUP BY repo_id, name, toYYYYMM(file_time, 'UTC')
 ORDER BY repo_id, name, preferred_hour
 FORMAT JSONEachRow"""
@@ -158,7 +190,7 @@ FORMAT JSONEachRow"""
                 continue
             for field in ("preferred_hour", "first_hour"):
                 hour = archive_timestamp(item[field])
-                if WINDOW_START <= hour <= CUTOFFS[-1] and hour.endswith(":00:00.000Z"):
+                if window_start <= hour <= CUTOFFS[-1] and hour.endswith(":00:00.000Z"):
                     results[pair].add(hour)
     return results
 
@@ -224,7 +256,7 @@ def scan_archive(path: Path, revision: dict, names: set[str]) -> tuple[str, list
                 if not isinstance(repo, dict):
                     continue
                 name = str(repo.get("name", "")).casefold()
-                if name not in names or event.get("type") not in ACTIVITY_TYPES:
+                if name not in names or event.get("type") not in IDENTITY_EVENT_TYPES:
                     continue
                 key = (name, repo_id(str(repo.get("id"))))
                 event_at = provider_time(event.get("created_at"))
@@ -233,52 +265,90 @@ def scan_archive(path: Path, revision: dict, names: set[str]) -> tuple[str, list
         return sha.hexdigest(), [hits[key][1] for key in sorted(hits)]
 
 
+def archive_key(revision: dict) -> str:
+    return f"{revision['name']}.{revision['generation']}"
+
+
+def download_archive(client: httpx.Client, url: str, path: Path, revision: dict,
+                     max_seconds: float = MAX_DOWNLOAD_SECONDS) -> None:
+    expected_size = int(revision["size"])
+    offset = path.stat().st_size if path.exists() else 0
+    if offset > expected_size:
+        path.unlink()
+        offset = 0
+    if offset == expected_size:
+        return
+    deadline = time.monotonic() + max_seconds
+    while offset < expected_size:
+        if time.monotonic() > deadline:
+            raise ValueError("archive_download_time_limit")
+        end = min(expected_size, offset + DOWNLOAD_CHUNK_BYTES) - 1
+        headers = {"Accept-Encoding": "identity", "Range": f"bytes={offset}-{end}"}
+        with client.stream("GET", url, headers=headers) as response:
+            response.raise_for_status()
+            if response.headers.get("x-goog-generation") != revision["generation"]:
+                raise ValueError("archive_response_generation_mismatch")
+            if response.status_code == 206:
+                if response.headers.get("Content-Range") != f"bytes {offset}-{end}/{expected_size}":
+                    raise ValueError("archive_response_range_mismatch")
+            elif not (response.status_code == 200 and offset == 0 and end == expected_size - 1):
+                raise ValueError("archive_response_range_mismatch")
+            with path.open("ab") as temporary:
+                total = offset
+                for block in response.iter_raw():
+                    if time.monotonic() > deadline:
+                        raise ValueError("archive_download_time_limit")
+                    total += len(block)
+                    if total > end + 1:
+                        raise ValueError("archive_object_size_mismatch")
+                    temporary.write(block)
+            if total != end + 1:
+                raise ValueError("archive_download_incomplete")
+            offset = total
+
+
+def cached_archive(
+    directory: Path, source: dict, names: list[str] | None = None
+) -> tuple[dict, list[bytes]] | None:
+    if (names is None or covers_names(source, set(names))) and stored_source_matches(
+        directory, source
+    ):
+        return source, (directory / source["path"]).read_bytes().splitlines(keepends=True)
+    return None
+
+
 def archive_evidence(
     client: httpx.Client,
     directory: Path,
     revision: dict,
     names: set[str],
     local: Path | None,
+    max_seconds: float = MAX_DOWNLOAD_SECONDS,
 ) -> tuple[dict, list[bytes]]:
-    key = f"{revision['name']}.{revision['generation']}"
+    key = archive_key(revision)
     path = directory / "archives" / f"{key}.json"
     source = json.loads(path.read_bytes()) if path.exists() else {}
-    if (
-        source.get("names") == sorted(names)
-        and source.get("revision") == revision
-        and stored_source_matches(directory, source)
+    if source.get("revision") == revision and source.get("identity_event_types") == sorted(
+        IDENTITY_EVENT_TYPES
     ):
-        return source, (directory / source["path"]).read_bytes().splitlines(keepends=True)
+        cached = cached_archive(directory, source, sorted(names))
+        if cached is not None:
+            return cached
 
     url = f"{BUCKET_URL}/{revision['name']}?" + urlencode(
         {"alt": "media", "generation": revision["generation"]}
     )
     if local is not None:
         archive_sha, events = scan_archive(local, revision, names)
+        partial = None
     else:
-        temporary_path = None
+        partial = directory / f"{key}.part"
+        download_archive(client, url, partial, revision, max_seconds)
         try:
-            with tempfile.NamedTemporaryFile(
-                dir=directory, suffix=".part", delete=False
-            ) as temporary:
-                temporary_path = Path(temporary.name)
-                deadline = time.monotonic() + MAX_DOWNLOAD_SECONDS
-                with client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
-                    response.raise_for_status()
-                    if response.headers.get("x-goog-generation") != revision["generation"]:
-                        raise ValueError("archive_response_generation_mismatch")
-                    total = 0
-                    for block in response.iter_raw():
-                        if time.monotonic() > deadline:
-                            raise ValueError("archive_download_time_limit")
-                        total += len(block)
-                        if total > int(revision["size"]):
-                            raise ValueError("archive_object_size_mismatch")
-                        temporary.write(block)
-            archive_sha, events = scan_archive(temporary_path, revision, names)
-        finally:
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
+            archive_sha, events = scan_archive(partial, revision, names)
+        except (OSError, ValueError, EOFError, zlib.error):
+            partial.unlink(missing_ok=True)
+            raise
 
     body = b"".join(line if line.endswith(b"\n") else line + b"\n" for line in events)
     digest = hashlib.sha256(body).hexdigest()
@@ -290,10 +360,14 @@ def archive_evidence(
         "content_sha256": digest,
         "archive_sha256": archive_sha,
         "revision": revision,
-        "names": sorted(names),
+        "scan_names_sha256": names_digest(names),
+        "identity_event_types": sorted(IDENTITY_EVENT_TYPES),
+        "matched_names": sorted({json.loads(line)["repo"]["name"].casefold() for line in events}),
         "retrieved_at": format_utc_timestamp(datetime.now(UTC)),
     }
     write_json_atomic(path, source)
+    if partial is not None:
+        partial.unlink(missing_ok=True)
     return source, body.splitlines(keepends=True)
 
 
@@ -332,115 +406,260 @@ def matching_original(row: dict, source: dict, events: list[bytes]) -> dict | No
     return None
 
 
+def apply_archive(
+    source: dict,
+    events: list[bytes],
+    listing: dict,
+    results: list[dict],
+    unresolved: set[int],
+    by_repo_name: dict,
+) -> None:
+    by_name = defaultdict(list)
+    for line in events:
+        by_name[json.loads(line)["repo"]["name"].casefold()].append(line)
+    for name, lines in by_name.items():
+        for index in by_repo_name.get(name, ()):
+            if index not in unresolved:
+                continue
+            row = results[index]
+            try:
+                match = matching_original(row, source, lines)
+            except ValueError as error:
+                row["reason"] = str(error)
+                if str(error) == "original_archive_repo_id_conflict":
+                    row["status"] = "conflicting_original_repo_id"
+                    unresolved.remove(index)
+                continue
+            if match is None:
+                continue
+            row.pop("reason", None)
+            row.update(
+                status="mapping_sources_matched",
+                scope_quality="repository_only",
+                repo_group_id=row["repo_id"],
+                evidence_available_at=rounded_up_time(
+                    max(
+                        provider_time(row["pypi_source"]["artifact_uploaded_at"]),
+                        provider_time(source["revision"]["timeCreated"]),
+                    )
+                ),
+                archive_source=source,
+                archive_event=match,
+                inventory_listing_sha256=listing["content_sha256"],
+            )
+            unresolved.remove(index)
+
+
+def archive_wave(
+    hour_rows: dict,
+    eligible: set[int],
+    costs: dict[str, int],
+    budget: int,
+    workers: int,
+) -> list[str]:
+    """Prefer free proofs, then cover the most distinct pending rows per remaining byte."""
+    selected = []
+    remaining = eligible.copy()
+    for _ in range(workers):
+        best = None
+        for hour, indices in hour_rows.items():
+            cost = costs[hour]
+            if hour in selected or (cost and not budget):
+                continue
+            covered = remaining & indices
+            if not covered:
+                continue
+            score = (cost == 0, len(covered) / max(1, cost), len(covered), -cost)
+            if best is None or score > best[0] or (score == best[0] and hour < best[1]):
+                best = (score, hour, covered)
+        if best is None:
+            break
+        _, hour, covered = best
+        selected.append(hour)
+        remaining.difference_update(covered)
+        budget -= bool(costs[hour])
+    return selected
+
+
 def verify_batch(args, rows: list[dict], inventory: dict) -> tuple[list[dict], int]:
     directory = args.output_dir
-    results, listings, archives = [], {}, {}
+    archive_pool = getattr(args, "archive_pool", None)
+    shared_directory = archive_pool.directory if archive_pool is not None else directory
+    workers = getattr(args, "archive_workers", DEFAULT_ARCHIVE_WORKERS)
+    results = [{**row, "official_outcome_review": "required"} for row in rows]
+    unresolved, checked = set(), set()
+    by_repo_name, listings = defaultdict(list), {}
     unavailable_releases = {}
     downloads = 0
     names = {row["repo_url"].removeprefix("https://github.com/") for row in rows}
+    if archive_pool is not None:
+        archive_pool.names.update(names)
+    scan_names = names | (archive_pool.names if archive_pool is not None else set())
     with (
         HTTPClient(timeout=45, max_retries=2) as http,
         httpx.Client(timeout=httpx.Timeout(45, connect=15), follow_redirects=False) as client,
+        ThreadPoolExecutor(max_workers=workers) as pool,
     ):
-        locations = locate_hours(http, directory, rows)
-        for row in rows:
-            result = {**row, "official_outcome_review": "required"}
-            results.append(result)
-            release = (row["package_id"], row["source_version"])
+        for index, result in enumerate(results):
+            release = (result["package_id"], result["source_version"])
             if release in unavailable_releases:
                 result.update(
                     status="pypi_evidence_unverified", reason=unavailable_releases[release]
                 )
                 continue
             try:
-                pypi_source, uploaded = pypi_evidence(http, directory, row)
+                pypi_source, _ = pypi_evidence(http, directory, result)
             except (HTTPClientError, OSError, ValueError) as error:
                 if isinstance(error, HTTPClientError):
                     unavailable_releases[release] = str(error)
                 result.update(status="pypi_evidence_unverified", reason=str(error))
                 continue
-            result["pypi_source"] = pypi_source
+            result.update(pypi_source=pypi_source, status="no_pre_cutoff_archive_revision")
+            unresolved.add(index)
+            slug = result["repo_url"].removeprefix("https://github.com/")
+            by_repo_name[slug].append(index)
+
+        # A checked original file can prove other cutoffs and other batches.
+        before_replay = len(unresolved)
+        if archive_pool is not None:
+            proofs = archive_pool.proofs(names)
+        else:
+            proofs = saved_proofs(directory)
+        replayed = 0
+        for proof_directory, receipt in proofs:
+            if not unresolved:
+                break
+            try:
+                revision = receipt["revision"]
+                match = OBJECT_NAME.fullmatch(revision["name"])
+                if match is None:
+                    continue
+                hour = f"{match[1]}T{int(match[2]):02d}:00:00.000Z"
+                if inventory.get(hour) != revision:
+                    continue
+                proof = cached_archive(proof_directory, receipt)
+                if proof is None:
+                    continue
+                listing = verified_revision(args.inventory_dir, hour, revision, listings)
+            except (KeyError, OSError, ValueError):
+                # A bad cache receipt remains eligible for a fresh verification.
+                continue
+            broad_identity = any(
+                row.get("identity_event_policy") == "all-public-v1" for row in rows
+            )
+            if (
+                not broad_identity
+                or receipt.get("identity_event_types") == sorted(IDENTITY_EVENT_TYPES)
+            ) and (covers_names(receipt, scan_names) or covers_names(receipt, names)):
+                checked.add(hour)
+            if proof_directory != directory:
+                proof = local_proof(directory, *proof, names)
+            apply_archive(*proof, listing, results, unresolved, by_repo_name)
+            replayed += 1
+        if replayed:
+            print(
+                f"Reused {replayed} archive proofs for {before_replay - len(unresolved)} package-cutoffs",
+                flush=True,
+            )
+
+        if not unresolved:
+            return results, downloads
+        locations = locate_hours(http, directory, rows)
+        hour_rows = defaultdict(set)
+        costs, local_paths, storage_directories = {}, {}, {}
+        for index in sorted(unresolved):
+            row = results[index]
             slug = row["repo_url"].removeprefix("https://github.com/")
             start = add_calendar_months(row["cutoff_at"], -12)
             cutoff = provider_time(row["cutoff_at"])
-            hours = [
-                hour
-                for hour in locations.get((row["repo_id"], slug), ())
-                if start < hour <= row["cutoff_at"]
-                and hour in inventory
-                and provider_time(inventory[hour]["timeCreated"]) <= cutoff
-            ]
-            # Prefer an hour already scanned, then one close to the release upload.
-            hours.sort(
-                key=lambda hour: (hour not in archives, abs(provider_time(hour) - uploaded), hour)
-            )
-            result["status"] = (
-                "archive_evidence_unverified" if hours else "no_pre_cutoff_archive_revision"
-            )
-            for hour in hours[:3]:
+            for hour in locations.get((row["repo_id"], slug), ()):
+                revision = inventory.get(hour)
+                if (
+                    revision is None
+                    or not start < hour <= row["cutoff_at"]
+                    or provider_time(revision["timeCreated"]) > cutoff
+                ):
+                    continue
+                row["status"] = "archive_evidence_unverified"
+                if hour in checked:
+                    continue
+                hour_rows[hour].add(index)
+                if hour in costs:
+                    continue
+                local = (
+                    args.archive_dir / f"{hour[:10]}-{int(hour[11:13])}.json.gz"
+                    if args.archive_dir
+                    else None
+                )
+                local_paths[hour] = local if local is not None and local.is_file() else None
+                size = int(revision["size"])
+                partial_path = directory / f"{archive_key(revision)}.part"
+                storage = directory if partial_path.exists() else shared_directory
+                storage_directories[hour] = storage
+                partial_path = storage / partial_path.name
+                partial = partial_path.stat().st_size if partial_path.exists() else 0
+                if partial > size:
+                    partial = 0
+                costs[hour] = 0 if local_paths[hour] is not None else size - partial
+
+        attempts = Counter()
+        while hour_rows:
+            eligible = {index for index in unresolved if attempts[index] < 3}
+            wave = archive_wave(hour_rows, eligible, costs, args.max_downloads - downloads, workers)
+            if not wave:
+                if downloads >= args.max_downloads:
+                    for indices in hour_rows.values():
+                        for index in indices & eligible:
+                            results[index]["status"] = "download_budget_reached"
+                break
+
+            scheduled = []
+            for hour in wave:
                 revision = inventory[hour]
+                indices = hour_rows.pop(hour) & unresolved
+                attempts.update(indices)
                 try:
                     listing = verified_revision(args.inventory_dir, hour, revision, listings)
-                    if hour not in archives:
-                        local = args.archive_dir / revision["name"] if args.archive_dir else None
-                        local = local if local is not None and local.is_file() else None
-                        checkpoint = (
-                            directory
-                            / "archives"
-                            / f"{revision['name']}.{revision['generation']}.json"
-                        )
-                        saved = json.loads(checkpoint.read_bytes()) if checkpoint.exists() else {}
-                        reusable = (
-                            saved.get("names") == sorted(names)
-                            and saved.get("revision") == revision
-                            and stored_source_matches(directory, saved)
-                        )
-                        if not reusable and local is None:
-                            if downloads >= args.max_downloads:
-                                result.update(status="download_budget_reached")
-                                continue
-                            downloads += 1
-                            print(f"Verifying original {revision['name']}", flush=True)
-                        try:
-                            archives[hour] = archive_evidence(
-                                client, directory, revision, names, local
-                            )
-                        except (
-                            httpx.HTTPError,
-                            OSError,
-                            ValueError,
-                            EOFError,
-                            zlib.error,
-                        ) as error:
-                            archives[hour] = str(error)
-                    observed = archives[hour]
-                    if isinstance(observed, str):
-                        result["reason"] = observed
-                        continue
-                    source, events = observed
-                    match = matching_original(row, source, events)
-                except (OSError, ValueError) as error:
-                    result["reason"] = str(error)
-                    if str(error) == "original_archive_repo_id_conflict":
-                        result["status"] = "conflicting_original_repo_id"
-                        break
+                except (KeyError, OSError, ValueError) as error:
+                    for index in indices:
+                        results[index]["reason"] = str(error)
                     continue
-                if match is None:
-                    result["reason"] = "original_archive_event_not_found"
-                    continue
-                result.pop("reason", None)
-                result.update(
-                    status="mapping_sources_matched",
-                    scope_quality="repository_only",
-                    repo_group_id=row["repo_id"],
-                    evidence_available_at=rounded_up_time(
-                        max(uploaded, provider_time(revision["timeCreated"]))
-                    ),
-                    archive_source=source,
-                    archive_event=match,
-                    inventory_listing_sha256=listing["content_sha256"],
+                if costs[hour]:
+                    downloads += 1
+                    print(
+                        f"Verifying original {revision['name']} ({costs[hour] / 2**20:.0f} MiB remaining, "
+                        f"up to {len(indices)} package-cutoffs, download {downloads}/{args.max_downloads})",
+                        flush=True,
+                    )
+                task = pool.submit(
+                    archive_evidence,
+                    client,
+                    storage_directories[hour],
+                    revision,
+                    scan_names,
+                    local_paths[hour],
+                    getattr(args, "archive_download_seconds", MAX_DOWNLOAD_SECONDS),
                 )
-                break
+                scheduled.append((revision, indices, listing, storage_directories[hour], task))
+
+            for revision, indices, listing, storage, task in scheduled:
+                try:
+                    source, events = task.result()
+                except (httpx.HTTPError, OSError, ValueError, EOFError, zlib.error) as error:
+                    reason = str(error) or type(error).__name__
+                    print(f"Archive attempt ended for {revision['name']}: {reason}", flush=True)
+                    partial = storage / f"{archive_key(revision)}.part"
+                    has_partial = partial.is_file() and partial.stat().st_size > 0
+                    for index in indices & unresolved:
+                        results[index]["reason"] = reason
+                        if has_partial:
+                            results[index]["status"] = "archive_download_pending"
+                    continue
+                if archive_pool is not None:
+                    archive_pool.remember(storage, source)
+                if storage != directory:
+                    source, events = local_proof(directory, source, events, names)
+                apply_archive(source, events, listing, results, unresolved, by_repo_name)
     return results, downloads
 
 
@@ -458,14 +677,22 @@ def main() -> int:
     parser.add_argument(
         "--max-downloads", type=int, default=6, help="Maximum new archive downloads per invocation"
     )
+    parser.add_argument(
+        "--archive-workers",
+        type=int,
+        default=DEFAULT_ARCHIVE_WORKERS,
+        help="Concurrent archive checks (1–8)",
+    )
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     try:
-        if args.max_downloads < 0 or (
-            args.archive_dir is not None and not args.archive_dir.is_dir()
+        if (
+            args.max_downloads < 0
+            or not 1 <= args.archive_workers <= MAX_ARCHIVE_WORKERS
+            or (args.archive_dir is not None and not args.archive_dir.is_dir())
         ):
             raise ValueError(
-                "expected nonnegative download budget and an existing archive directory"
+                "expected nonnegative download budget, 1–8 archive workers and an existing archive directory"
             )
         subjects = {package_id(value.removeprefix("pypi:")) for value in args.package}
         rows = load_candidates(args.batch_dir, subjects)

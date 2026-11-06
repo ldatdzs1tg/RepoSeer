@@ -12,9 +12,33 @@ The runner validates the Drive screening CSV against its metadata and freezes al
 
 The full run writes to `data/d09/drive-full-v1`. Each pass processes up to five new batches and attempts up to 30 new GH Archive downloads. `--continuous` starts the next pass automatically and stops if repeated passes make no progress. Omit it to run one pass at a time. Run the same command again after an interruption. `--max-batches` and `--max-downloads` change these limits without changing membership. Use `--screening-dir` if the mounted screening folder is elsewhere. Run `--retry-unverified` separately to retry prior PyPI or archive verification failures.
 
+Large registry lookups send bounded batches of frozen package IDs. When the public ClickHouse quota is reached, the runner saves the retry time in `provider-quota.json`. Continuous mode waits and resumes from the checked query receipts. One-pass mode returns control to the terminal so the same command can be rerun after the recorded time.
+
+To build the review queue across all batches before downloading raw archives, use `--all --continuous --collect-only` with the same output directory. Progress goes to `collection-summary.json`. Existing verification and split reports stay available. Run again without `--collect-only` to resume original archive verification. Interrupted downloads from the current verifier resume by byte range and only produce evidence after the full pinned object passes size and checksum validation.
+
+Full verification shares original archive proofs across batches. Every newly scanned object retains matching original lines for all repository hints in the frozen screening and the already collected historical mappings, including repositories in future batches. The shared store is `archive-cache/`. Hints select extra lines to retain and do not establish mapping identity or historical availability. Before reuse, the verifier checks the retained bytes, original revision and inventory receipt, and applies the same numeric repository ID, cutoff and lookback rules. Each batch receives its own matching raw lines and source receipts, so its proofs remain portable. Existing per-batch proofs and unfinished downloads remain usable. Restart a running process to load this update, using the same command and output directory.
+
+Proof receipts record the digest of the full set of extraction hints and the names actually found. A copied subset cannot claim that it covers the entire extraction scope. The runner indexes retained names once per pass and replays only relevant proofs. Historical extraction hints are cached against each batch's collection revision so repeated passes do not rescan the whole review queue.
+
+Within a batch, the verifier also replays proofs across all compatible package-cutoffs and prioritizes new archives by pending rows covered per byte remaining. Up to four distinct archives are checked concurrently by default. Set `--archive-workers` from 1 to 8 to adjust concurrency. The download budget still applies to the whole pass. This reduces repeated network work, but a full run can still require many large original objects. A mapping proof does not establish complete feature coverage or verify an outcome label.
+
 The runner uses the public PyPI and GH Archive mirrors for collection, then verifies candidate evidence against the original providers. Each batch retains its frozen roster, raw receipts, `review.jsonl`, mapping verification and official-status leads. Keep the run directory local while processing. `summary.json` links the reviewed output directories and `split-audit.json` reports the aggregate time and repository-group checks. The pilot and full-run directories have separate checkpoints.
 
 When the team has independently reviewed records for this cohort, place them in `data/d09/drive-full-v1/reviews.jsonl` or pass `--reviews` and rerun. Use one `ReviewedD09Target` per line. Preserve the verified availability dates from the evidence. Missing reviews stay in the eligibility audit. The split audit is available before labels arrive and checks class presence independently of sample-size sufficiency for Model A.
+
+## Check readiness before scaling
+
+After the first completed batches, audit the retained evidence and the actual feature/label builder output before treating further mapping downloads as progress toward training:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.audit_d09_readiness --output-dir data/d09/readiness-audit-v1
+```
+
+The auditor freezes the completed batch set, excludes batches waiting for downloads, checks cohort and source hashes, rechecks retained PyPI and original-event proofs, and runs the reviewed builder and chronological split auditor. It makes no provider requests and writes only to a new audit directory, so the collection can keep running. Use a fresh output directory for another audit. `--reviews` is repeatable to inspect existing review catalogs; only matching package-cutoffs enter the audited cohort, and duplicate or future-dated matching reviews fail validation. With no explicit file, the auditor uses the run's `reviews.jsonl` if it exists.
+
+Read `report.md`, `summary.json` and `split-audit.json`. `eligibility.jsonl` preserves every audited package-cutoff. `review-sample.jsonl` contains a deterministic readiness probe of five mapped rows per split, selected without outcome-based ranking. `official-leads.jsonl` preserves the capped search leads and source paths. Optional `--source-checks` records checksum-checked source observations separately; these observations cannot assign supervised labels. `input-manifest.json` captures source hashes and rejects inputs that change during the audit.
+
+A mapping proof is not a feature snapshot or an outcome label. Original-event excerpts do not certify a complete activity census, and keyword hits can describe a dependency or API change. The current D09 policy also places actual official verification and complete-follow-up verification times into label availability. Labels first verified in 2026 miss the existing 2022 fit and 2024 selection deadlines. Resolve that evaluation design using genuinely pre-existing verified labels or a prospective holdout before claiming training readiness. Do not backdate new reviews. Class presence alone is not sample-size or calibration approval.
 
 ## Run the historical PyPI pilot
 
@@ -68,4 +92,28 @@ python -m scripts.audit_model_a_splits --d09-dir data/d09/reviewed-300-v3 `
   --selection-freeze-at 2024-09-30T23:59:59.999Z --test-start-at 2024-10-01T00:00:00.000Z `
   --test-end-at 2025-01-01T00:00:00.000Z --evaluation-as-of $observationEnd `
   --output data/d09/outcome-review-v2/split-audit-final.json
+```
+
+## Train the retrospective Model A baseline
+
+Install the `training` extra in the environment used for fitting. Inference loads the JSON artifact and uses the existing RepoSeer runtime.
+
+```powershell
+uv pip install --python .\.venv\Scripts\python.exe -e ".[training]"
+```
+
+Use `scripts.prepare_d09_model_a` to build CORE snapshots from completed mapping batches. It checks the historical release census against publisher data and retains original files when a release is missing from the current index and `--repair-artifact-budget` allows another download. Repository activity features remain null when their history lacks verified coverage. Pass `--outcomes` with one independently reviewed `OutcomeReview` per line. Each decision references retained source files and their checksums. A negative approval also requires a complete 12-month follow-up with verified maintenance. Leads without an approval stay outside supervised fitting.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.prepare_d09_model_a --run-dir data/d09/drive-full-v1 `
+  --output-dir data/d09/model-a-retrospective-v1 --outcomes data/d09/approved-outcomes.jsonl
+.\.venv\Scripts\python.exe -m scripts.train_model_a --data-dir data/d09/model-a-retrospective-v1
+```
+
+The trainer checks the prepared sources and removes rows with overlapping horizons or labels unavailable at the actual fitting and evaluation times. The default validation window starts in January 2022 and the test window covers 2024. Each split needs both classes after those checks. If a class is missing, `training-readiness.json` reports the counts and the command exits with code 2. The separate unseen-repository audit uses the frozen cohort and can be stricter than the chronological fit.
+
+On success, the timestamped run folder contains the frozen `model-a.json`, split audit, metrics with feature coverage, and a held-out `sample-snapshot.json` and `sample-inference.json`. The pilot selects cases by outcome to exercise the workflow. Its metrics describe that sample and its retrospective evaluation. Release gates keep the artifact out of production scoring. The optional `--experimental` flag returns a development score when the snapshot has usable CORE features.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.infer_model_a --model <run-folder>/model-a.json --snapshot <run-folder>/sample-snapshot.json
 ```

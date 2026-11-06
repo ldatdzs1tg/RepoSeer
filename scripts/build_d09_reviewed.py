@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
-from scripts.collect_d09_batch import CUTOFFS, parse_rows, roster_rows
+from scripts.collect_d09_batch import CUTOFFS, EXTENDED_CUTOFFS, parse_rows, roster_rows
 from scripts.collect_d09_pilot import stored_source_matches
 
 from reposeer.collection.persistence import write_json_atomic
@@ -27,12 +27,14 @@ def load_universe(batch_dir: Path) -> dict[tuple[str, str], str]:
     if not stored_source_matches(batch_dir, receipt):
         raise ValueError("frozen cohort response is missing or its checksum changed")
     packages = roster_rows(parse_rows((batch_dir / receipt["path"]).read_bytes()))
-    if packages != cohort["packages"] or cohort["config"]["cutoffs"] != list(CUTOFFS):
+    cutoffs = cohort["config"]["cutoffs"]
+    extended = cohort["config"].get("cutoff_policy") == "quarterly-2019-2024-v2"
+    if packages != cohort["packages"] or cutoffs != list(EXTENDED_CUTOFFS if extended else CUTOFFS):
         raise ValueError("cohort differs from the archived roster or configured cutoffs")
     return {
         (package["package_id"], cutoff): package["first_upload_at"]
         for package in packages
-        for cutoff in CUTOFFS
+        for cutoff in cutoffs
         if package["first_upload_at"] < cutoff
     }
 

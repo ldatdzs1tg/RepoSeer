@@ -21,9 +21,9 @@ HOUR = timedelta(hours=1)
 OBJECT_NAME = re.compile(r"(\d{4}-\d{2}-\d{2})-(0|[1-9]|1[0-9]|2[0-3])\.json\.gz")
 
 
-def inventory(http: HTTPClient, directory: Path) -> dict:
+def inventory(http: HTTPClient, directory: Path, *, start_year=None, end_year=None) -> dict:
     objects = {}
-    for year in range(int(WINDOW_START[:4]), int(WINDOW_END[:4]) + 1):
+    for year in range(start_year or int(WINDOW_START[:4]), (end_year or int(WINDOW_END[:4])) + 1):
         print(f"Inventorying GH Archive {year}", flush=True)
         params = {
             "prefix": f"{year}-",
@@ -105,11 +105,13 @@ def window_audit(objects: dict, start_at: str, end_at: str) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--start-year", type=int)
+    parser.add_argument("--end-year", type=int)
     args = parser.parse_args()
     try:
         args.output_dir.mkdir(parents=True, exist_ok=True)
         with run_lock(args.output_dir), HTTPClient(timeout=45, max_retries=2) as http:
-            objects = inventory(http, args.output_dir)
+            objects = inventory(http, args.output_dir, start_year=args.start_year, end_year=args.end_year)
             write_json_atomic(
                 args.output_dir / "inventory.json",
                 {

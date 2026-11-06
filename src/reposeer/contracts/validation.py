@@ -11,6 +11,7 @@ from reposeer.contracts.models import (
     ContractRecord,
     NormalizationRequest,
     NormalizationResult,
+    PackageSnapshot,
     SnapshotBuildRequest,
     SnapshotBuildResult,
     TechnologyLinkRequest,
@@ -219,8 +220,15 @@ def validate_snapshot_pair(request: SnapshotBuildRequest, result: SnapshotBuildR
         raise ValueError("snapshot provenance must match requested evidence")
     if snapshot.coverage != request.coverage:
         raise ValueError("snapshot coverage mismatch")
+    validate_snapshot_coverage(snapshot)
+
+
+def validate_snapshot_coverage(snapshot: PackageSnapshot) -> None:
+    for coverage in snapshot.coverage:
+        if coverage.time_range is not None and coverage.time_range.end_at > snapshot.cutoff_at:
+            raise ValueError("snapshot coverage extends past cutoff")
     # Unobserved groups cannot become known feature values, including zero.
-    groups = {coverage.data_group: coverage.status for coverage in request.coverage}
+    groups = {coverage.data_group: coverage.status for coverage in snapshot.coverage}
     feature_groups = {
         "package_age_days": "releases",
         "releases_total": "releases",

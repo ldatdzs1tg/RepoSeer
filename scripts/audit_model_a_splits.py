@@ -29,6 +29,7 @@ def audit_splits(
     test_start_at: str,
     test_end_at: str,
     evaluation_as_of: str,
+    purpose: str = "prospective_backtest",
 ) -> dict:
     times = {
         "fold_fit_at": fold_fit_at,
@@ -40,14 +41,24 @@ def audit_splits(
     }
     for timestamp in times.values():
         checked_timestamp(timestamp)
-    if not (
-        fold_fit_at
-        < validation_start_at
-        < selection_freeze_at
-        < test_start_at
-        < test_end_at
-        <= evaluation_as_of
-    ):
+    if purpose not in {"prospective_backtest", "retrospective_analysis"}:
+        raise ValueError("unsupported split evaluation purpose")
+    ordered = (
+        (
+            fold_fit_at
+            < validation_start_at
+            < selection_freeze_at
+            < test_start_at
+            < test_end_at
+            <= evaluation_as_of
+        )
+        if purpose == "prospective_backtest"
+        else (
+            validation_start_at < test_start_at < test_end_at <= evaluation_as_of
+            and fold_fit_at <= selection_freeze_at <= evaluation_as_of
+        )
+    )
+    if not ordered:
         raise ValueError("split windows and decision times are out of order")
 
     def split_at(cutoff: str) -> str | None:
@@ -158,6 +169,8 @@ def audit_splits(
         later_groups.update(groups[split])
         later_events.update(event_id for _, event_id, _ in eligible[split] if event_id is not None)
     return {
+        "purpose": purpose,
+        "prospective_accuracy_claim_supported": purpose == "prospective_backtest",
         "status": "both_classes_in_each_disjoint_split"
         if all(audit["repo_group_disjoint"]["both_classes"] for audit in audits.values())
         else "insufficient_classes_after_purge",
@@ -172,6 +185,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--d09-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--purpose",
+        choices=("prospective_backtest", "retrospective_analysis"),
+        default="prospective_backtest",
+    )
     for name in (
         "fold-fit-at",
         "validation-start-at",

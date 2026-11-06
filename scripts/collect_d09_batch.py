@@ -10,9 +10,11 @@ import json
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
+import httpx
 from scripts.collect_d09_pilot import (
     ACTIVITY_TYPES,
     ACTIVITY_URL,
@@ -29,23 +31,42 @@ from reposeer.collectors.package.repository_mapping import _root_url
 from reposeer.contracts.identity import (
     add_calendar_months,
     checked_timestamp,
+    format_utc_timestamp,
     package_id,
     parse_repo_id,
     repo_id,
 )
-from reposeer.exceptions import HTTPClientError
+from reposeer.exceptions import HTTPClientError, RateLimitExceededError
 
 CUTOFFS = tuple(
     f"{year}-{day}T23:59:59.999Z"
     for year in range(2020, 2025)
     for day in ("03-31", "06-30", "09-30", "12-31")
 )
+EXTENDED_CUTOFFS = (
+    tuple(f"2019-{day}T23:59:59.999Z" for day in ("03-31", "06-30", "09-30", "12-31")) + CUTOFFS
+)
 MAX_SAMPLE_SIZE = 10_000
 MAX_SHARD_SIZE = 30
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+RESULT_PAGE_SIZE = 5000
 SEED = "reposeer-d09-v1"
 WINDOW_START = "2019-01-01T00:00:00.000Z"
 WINDOW_END = add_calendar_months(CUTOFFS[-1], 12)
+IDENTITY_EVENT_TYPES = (
+    *ACTIVITY_TYPES,
+    "IssueCommentEvent",
+    "PullRequestReviewCommentEvent",
+    "PullRequestReviewEvent",
+    "CommitCommentEvent",
+    "WatchEvent",
+    "ForkEvent",
+    "CreateEvent",
+    "DeleteEvent",
+    "PublicEvent",
+    "MemberEvent",
+    "GollumEvent",
+)
 
 
 def sql_string(value: str) -> str:
@@ -61,32 +82,95 @@ def sql_time(value: str) -> str:
     return f"toDateTime64({literal}, 3, 'UTC')"
 
 
-def query_rows(http: HTTPClient, directory: Path, name: str, query: str) -> list[dict]:
+def post_query(query: str) -> tuple[bytes, dict]:
+    """Send an internally generated read-only SQL query too long for a GET URL."""
+    body = bytearray()
+    try:
+        with httpx.stream(
+            "POST",
+            ACTIVITY_URL,
+            params={"user": "demo"},
+            content=query.encode(),
+            timeout=httpx.Timeout(60, connect=15),
+            follow_redirects=False,
+        ) as response:
+            for block in response.iter_bytes():
+                if len(body) + len(block) > MAX_RESPONSE_BYTES:
+                    raise HTTPClientError("Archive query exceeded its response byte limit")
+                body.extend(block)
+            if response.status_code != 200:
+                raise HTTPClientError(
+                    f"HTTP {response.status_code} from archive query",
+                    status_code=response.status_code,
+                    response_body=body.decode(errors="replace"),
+                )
+    except httpx.RequestError as error:
+        raise HTTPClientError(f"Archive query failed: {type(error).__name__}") from error
+    return bytes(body), {
+        "retrieved_at": format_utc_timestamp(datetime.now(UTC)),
+        "content_sha256": hashlib.sha256(body).hexdigest(),
+    }
+
+
+def query_rows(
+    http: HTTPClient, directory: Path, name: str, query: str, *, post: bool = False
+) -> list[dict]:
     """Reuse only a receipt whose query and response SHA match this invocation."""
+
+    def parse_response(body: bytes) -> list[dict]:
+        rows = parse_rows(body)
+        for row in rows:
+            if "exception" in row:
+                raise HTTPClientError(
+                    "Archive query returned a partial response", response_body=str(row["exception"])
+                )
+        return rows
+
     receipt_path = directory / "sources" / f"{name}.json"
     query_sha = hashlib.sha256(query.encode()).hexdigest()
     receipt = json.loads(receipt_path.read_bytes()) if receipt_path.exists() else {}
     if receipt.get("query_sha256") == query_sha and stored_source_matches(directory, receipt):
-        body = (directory / receipt["path"]).read_bytes()
-    else:
-        print(f"Collecting {directory.name}/{name}", flush=True)
-        url = ACTIVITY_URL + "?" + urlencode({"user": "demo", "query": query})
-        body, receipt = fetch_public(http, url, MAX_RESPONSE_BYTES)
-        rows = parse_rows(body)
-        path = f"sources/{name}-{receipt['content_sha256']}.jsonl"
-        atomic_bytes(directory / path, body, immutable=False)
-        write_json_atomic(
-            receipt_path,
-            {
-                **receipt,
-                "url": ACTIVITY_URL,
-                "query": query,
-                "query_sha256": query_sha,
-                "path": path,
-            },
-        )
-        return rows
-    return parse_rows(body)
+        try:
+            return parse_response((directory / receipt["path"]).read_bytes())
+        except (ValueError, HTTPClientError):
+            # A streamed provider exception is never a valid checkpoint.
+            pass
+    print(f"Collecting {directory.name}/{name}", flush=True)
+    try:
+        if post:
+            body, receipt = post_query(query)
+        else:
+            url = ACTIVITY_URL + "?" + urlencode({"user": "demo", "query": query})
+            body, receipt = fetch_public(http, url, MAX_RESPONSE_BYTES)
+        rows = parse_response(body)
+    except RateLimitExceededError:
+        raise
+    except HTTPClientError as error:
+        detail = error.response_body or ""
+        if "QUOTA_EXCEEDED" in detail or error.status_code == 429:
+            match = re.search(r"Interval will end at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", detail)
+            reset = (
+                datetime.fromisoformat(match[1]).replace(tzinfo=UTC).timestamp() if match else None
+            )
+            raise RateLimitExceededError(
+                "Public ClickHouse quota exhausted",
+                reset_timestamp=reset,
+                response_body=detail,
+            ) from error
+        raise
+    path = f"sources/{name}-{receipt['content_sha256']}.jsonl"
+    atomic_bytes(directory / path, body, immutable=False)
+    write_json_atomic(
+        receipt_path,
+        {
+            **receipt,
+            "url": ACTIVITY_URL,
+            "query": query,
+            "query_sha256": query_sha,
+            "path": path,
+        },
+    )
+    return rows
 
 
 def parse_rows(body: bytes) -> list[dict]:
@@ -160,22 +244,58 @@ def roster_rows(rows: list[dict]) -> list[dict]:
     return packages
 
 
-def release_history(http: HTTPClient, directory: Path, packages: list[dict]) -> dict[str, list]:
-    names = {name for package in packages for name in package["source_names"]}
-    query = f"""SELECT name, version,
+def distribution_query(
+    names: set[str], after: tuple[str, str] | None = None, *, page: bool = False
+) -> str:
+    cursor = (
+        f" AND (name, version) > ({sql_string(after[0])}, {sql_string(after[1])})"
+        if after is not None
+        else ""
+    )
+    order = f"name, version\nLIMIT {RESULT_PAGE_SIZE}" if page else "name, uploaded_at, version"
+    return f"""SELECT name, version,
        toString(tupleElement(artifact, 1), 'UTC') AS uploaded_at,
        tupleElement(artifact, 2) AS sha256, tupleElement(artifact, 3) AS project_urls,
        tupleElement(artifact, 4) AS requires_python
 FROM (
     SELECT name, version, min(tuple(upload_time, sha256_digest, project_urls, requires_python)) AS artifact
     FROM pypi.projects
-    WHERE name IN ({sql_list(names)}) AND upload_time < {sql_time(WINDOW_END)}
+    WHERE name IN ({sql_list(names)}) AND upload_time < {sql_time(WINDOW_END)}{cursor}
     GROUP BY name, version
 )
-ORDER BY name, uploaded_at, version
+ORDER BY {order}
 FORMAT JSONEachRow"""
+
+
+def distribution_rows(http: HTTPClient, directory: Path, names: set[str]) -> Iterator[dict]:
+    if not (directory / "sources/distributions-page-000.json").exists():
+        try:
+            yield from query_rows(http, directory, "distributions", distribution_query(names))
+            return
+        except HTTPClientError as error:
+            if "TOO_MANY_ROWS_OR_BYTES" not in (error.response_body or ""):
+                raise
+    after = None
+    for index in range(1000):
+        name = f"distributions-page-{index:03d}"
+        rows = query_rows(http, directory, name, distribution_query(names, after, page=True))
+        if len(rows) > RESULT_PAGE_SIZE:
+            raise ValueError(f"distribution page exceeds its limit: {name}")
+        for row in rows:
+            key = (row["name"], row["version"])
+            if after is not None and key <= after:
+                raise ValueError(f"distribution page is not strictly ordered: {name}")
+            after = key
+            yield row
+        if len(rows) < RESULT_PAGE_SIZE:
+            return
+    raise ValueError("distribution page limit reached")
+
+
+def release_history(http: HTTPClient, directory: Path, packages: list[dict]) -> dict[str, list]:
+    names = {name for package in packages for name in package["source_names"]}
     grouped = defaultdict(dict)
-    for row in query_rows(http, directory, "distributions", query):
+    for row in distribution_rows(http, directory, names):
         uploaded_at = archive_timestamp(row["uploaded_at"])
         if row["name"] not in names or uploaded_at >= WINDOW_END or not row["version"]:
             raise ValueError("distribution response outside requested cohort or window")
@@ -211,21 +331,36 @@ def explicit_sources(distribution: dict) -> dict[str, set[str]]:
     return result
 
 
-def review_rows(packages: list[dict], history: dict[str, list]) -> Iterator[dict]:
+def review_rows(
+    packages: list[dict],
+    history: dict[str, list],
+    *,
+    cutoffs=CUTOFFS,
+    allow_github_homepage: bool = False,
+) -> Iterator[dict]:
     for package in packages:
         subject = package["package_id"]
         releases = history.get(subject, [])
         if not releases or releases[0]["uploaded_at"] != package["first_upload_at"]:
             raise ValueError(f"release history does not match frozen roster for {subject}")
-        for cutoff in CUTOFFS:
+        for cutoff in cutoffs:
             if package["first_upload_at"] >= cutoff:
                 continue
             horizon = add_calendar_months(cutoff, 12)
             # Mirror timestamps have millisecond precision. Leave the boundary out.
             selected = next(row for row in reversed(releases) if row["uploaded_at"] < cutoff)
             sources = explicit_sources(selected)
+            homepage_candidate = False
+            if not sources and allow_github_homepage and selected.get("home_page"):
+                try:
+                    root = _root_url(selected["home_page"])
+                except ValueError:
+                    pass
+                else:
+                    sources = {root: {urlsplit(selected["home_page"]).path.strip("/")}}
+                    homepage_candidate = True
             names = sorted(set().union(*sources.values())) if len(sources) == 1 else []
-            yield {
+            result = {
                 "package_id": subject,
                 "cutoff_at": cutoff,
                 "horizon_end_at": horizon,
@@ -238,6 +373,9 @@ def review_rows(packages: list[dict], history: dict[str, list]) -> Iterator[dict
                     cutoff < row["uploaded_at"] < horizon for row in releases
                 ),
             }
+            if homepage_candidate:
+                result["source_link_policy"] = "github-homepage-candidate-v1"
+            yield result
 
 
 def chunked(values: list, size: int) -> Iterator[list]:
@@ -245,21 +383,29 @@ def chunked(values: list, size: int) -> Iterator[list]:
         yield values[offset : offset + size]
 
 
-def observe_repo_ids(http: HTTPClient, directory: Path, rows: list[dict]) -> set[str]:
+def observe_repo_ids(
+    http: HTTPClient,
+    directory: Path,
+    rows: list[dict],
+    *,
+    window_start=WINDOW_START,
+    identity_events=False,
+) -> set[str]:
     names = {name for row in rows for name in row["archive_names"]}
     observations = defaultdict(list)
     for index, batch in enumerate(chunked(sorted(names), 40)):
+        types = IDENTITY_EVENT_TYPES if identity_events else ACTIVITY_TYPES
         query = f"""SELECT repo_name, repo_id, toYYYYMM(created_at, 'UTC') AS month, count() AS events
 FROM github.events
-WHERE event_type IN ({sql_list(ACTIVITY_TYPES)}) AND repo_name IN ({sql_list(batch)})
-  AND created_at >= {sql_time(WINDOW_START)} AND created_at <= {sql_time(CUTOFFS[-1])}
+WHERE event_type IN ({sql_list(types)}) AND repo_name IN ({sql_list(batch)})
+  AND created_at >= {sql_time(window_start)} AND created_at <= {sql_time(CUTOFFS[-1])}
 GROUP BY repo_name, repo_id, month
 ORDER BY repo_name, repo_id, month
 FORMAT JSONEachRow"""
         for item in query_rows(http, directory, f"repo-names-{index:03d}", query):
             month = item["month"]
             if item["repo_name"] not in batch or not (
-                201901 <= month <= 202412 and 1 <= month % 100 <= 12
+                int(window_start[:7].replace("-", "")) <= month <= 202412 and 1 <= month % 100 <= 12
             ):
                 raise ValueError("GitHub name response outside requested scope")
             observations[item["repo_name"]].append((month, repo_id(item["repo_id"])))
@@ -294,7 +440,8 @@ FORMAT JSONEachRow"""
 
 def collect_official_leads(http: HTTPClient, directory: Path, identities: set[str]) -> Counter:
     counts = Counter()
-    for index, batch in enumerate(chunked(sorted(identities), 30)):
+    # Five results per repo-month over 84 months must fit the public endpoint's 10k-row cap.
+    for index, batch in enumerate(chunked(sorted(identities), 20)):
         query = f"""SELECT repo_id, repo_name, event_type, toString(created_at, 'UTC') AS event_at,
        actor_login, toString(author_association) AS association, number, comment_id,
        title, release_tag_name, substringUTF8(body, 1, 1200) AS excerpt

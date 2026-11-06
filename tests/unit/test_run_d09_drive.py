@@ -3,6 +3,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import closing
+from types import SimpleNamespace
 
 import pytest
 from scripts import run_d09_drive
@@ -109,3 +110,93 @@ def test_continuous_mode_stops_when_passes_make_no_progress(tmp_path, monkeypatc
     monkeypatch.setattr(run_d09_drive, "run", pass_without_progress)
     assert run_d09_drive.main() == 0
     assert len(calls) == 2
+
+
+def test_registry_reuses_valid_page_then_queries_only_remaining_targets(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_d09_drive, "REGISTRY_PAGE_SIZE", 2)
+    monkeypatch.setattr(run_d09_drive, "REGISTRY_FILTER_SQL_LIMIT", 1)
+    projects = {"aardvark", "alpha", "azure"}
+    raw = run_d09_drive.jsonl([{"project": "aardvark"}, {"project": "abacus"}])
+    (tmp_path / "sources").mkdir()
+    path = "sources/old.jsonl"
+    (tmp_path / path).write_bytes(raw)
+    query = run_d09_drive.registry_query("a", projects, limit=2)
+    (tmp_path / "sources/registry-a-000.json").write_text(
+        json.dumps(
+            {
+                "path": path,
+                "content_sha256": run_d09_drive.digest(raw),
+                "query_sha256": run_d09_drive.digest(query.encode()),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def lookup(http, output, name, sql, *, post):
+        assert post and name == "registry-a-targets-000"
+        assert "project IN ('alpha', 'azure')" in sql
+        return [{"project": "azure"}]
+
+    monkeypatch.setattr(run_d09_drive, "query_rows", lookup)
+    pages = list(run_d09_drive.registry_pages(None, tmp_path, "a", projects))
+    assert [name for name, _ in pages] == ["registry-a-000", "registry-a-targets-000"]
+
+
+def test_waits_for_saved_provider_reset_only_in_continuous_mode(tmp_path, monkeypatch):
+    (tmp_path / "provider-quota.json").write_text(
+        '{"retry_at_utc":"1970-01-01T00:01:00.000Z"}', encoding="utf-8"
+    )
+    monkeypatch.setattr(run_d09_drive.time, "time", lambda: 35)
+    delays = []
+    monkeypatch.setattr(run_d09_drive.time, "sleep", delays.append)
+    assert run_d09_drive.wait_for_provider(tmp_path, continuous=False) is False
+    assert run_d09_drive.wait_for_provider(tmp_path, continuous=True) is True
+    assert delays == [25]
+
+
+def test_collection_continues_past_a_batch_waiting_for_archive_verification(tmp_path, monkeypatch):
+    args = SimpleNamespace(output_dir=tmp_path, max_batches=1)
+    packages = [{"package_id": f"pypi:{name}"} for name in ("alpha", "beta")]
+    groups = [[[package]] for package in packages]
+    monkeypatch.setattr(
+        run_d09_drive, "collection_plan", lambda *args: ({"alpha": {}, "beta": {}}, {}, groups)
+    )
+    monkeypatch.setattr(run_d09_drive, "prepare_batch", lambda *args: None)
+
+    def collect(http, directory, groups):
+        receipt = {
+            "source_reviews_sha256": run_d09_drive.shard_reviews_digest(directory),
+            "mapping_review": {"single_id_observed": 4},
+            "package_cutoffs": 4,
+            "official_leads": 1,
+        }
+        run_d09_drive.write_json_atomic(directory / "collection.json", receipt)
+        return receipt
+
+    monkeypatch.setattr(run_d09_drive, "collect_batch", collect)
+    blocked = tmp_path / "batches/batch-00000/verification/summary.json"
+    run_d09_drive.write_json_atomic(blocked, {"statuses": {"download_budget_reached": 4}})
+    first = run_d09_drive.run_collection(args, {})
+    assert first["batches_processed"] == 1 and first["status"] == "resume_to_continue"
+    second = run_d09_drive.run_collection(args, {})
+    assert second["batches_processed"] == 2 and second["status"] == "completed"
+    assert second["official_leads"] == 2
+    assert json.loads(blocked.read_bytes())["statuses"] == {"download_budget_reached": 4}
+
+
+def test_archive_hints_reuse_cached_names_until_collection_revision_changes(tmp_path):
+    directory = tmp_path / "batches/batch-00000"
+    path = directory / "shard-00000/review.jsonl"
+    run_d09_drive.write_json_atomic(directory / "collection.json", {"source_reviews_sha256": "old"})
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(
+        run_d09_drive.jsonl([{"explicit_source_urls": ["https://github.com/old/repo"]}])
+    )
+    targets = [{"repo_full_name": "Current/Repo"}]
+    assert run_d09_drive.archive_hints(tmp_path, targets) == {"current/repo", "old/repo"}
+    path.write_bytes(
+        run_d09_drive.jsonl([{"explicit_source_urls": ["https://github.com/new/repo"]}])
+    )
+    assert run_d09_drive.archive_hints(tmp_path, targets) == {"current/repo", "old/repo"}
+    run_d09_drive.write_json_atomic(directory / "collection.json", {"source_reviews_sha256": "new"})
+    assert run_d09_drive.archive_hints(tmp_path, targets) == {"current/repo", "new/repo"}

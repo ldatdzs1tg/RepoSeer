@@ -46,3 +46,19 @@ def test_purges_overlapping_horizons_late_labels_and_heldout_groups():
     assert result["splits"]["validation"]["group_or_event_purged"] == 1
     assert result["splits"]["test"]["repo_group_disjoint"]["labels"] == {"0": 0, "1": 1}
     assert result["status"] == "insufficient_classes_after_purge"
+
+
+def test_retrospective_mode_preserves_real_review_dates_without_claiming_prospective_accuracy():
+    import pytest
+
+    now = "2026-01-01T00:00:00.000Z"
+    sample = row("reviewed-now", "2021-12-31", 9, available_at=now)
+    times = {**TIMES, "fold_fit_at": now, "selection_freeze_at": now}
+    with pytest.raises(ValueError, match="out of order"):
+        audit_splits([sample], [sample], **times)
+    result = audit_splits([sample], [sample], **times, purpose="retrospective_analysis")
+    assert result["splits"]["train"]["chronological"]["rows"] == 1
+    assert result["prospective_accuracy_claim_supported"] is False
+    times["fold_fit_at"] = "2025-12-31T00:00:00.000Z"
+    late = audit_splits([sample], [sample], **times, purpose="retrospective_analysis")
+    assert late["splits"]["train"]["purged"]["label_unavailable_at_decision"] == 1
