@@ -8,44 +8,33 @@ from itertools import combinations
 from pathlib import Path
 
 import polars as pl
-from scripts.audit_model_a_splits import SPLITS, audit_splits
-from scripts.run_d09_drive import file_digest
+from scripts.audit_model_a_splits import SPLITS, materialize_splits
+from scripts.run_d09_drive import digest, file_digest
 
 from reposeer.collection.persistence import write_json_atomic
 from reposeer.contracts.identity import format_utc_timestamp
 from reposeer.features.builder import FEATURE_COLUMNS, FeatureBuilder
 from reposeer.modeling.model_a import ModelA
 
+MIN_ROWS_PER_CLASS = 20
+MIN_REPO_GROUPS = 20
+DEFAULT_WINDOWS = {
+    "validation_start_at": "2022-01-01T00:00:00.000Z",
+    "test_start_at": "2024-01-01T00:00:00.000Z",
+    "test_end_at": "2025-01-01T00:00:00.000Z",
+}
 
-def materialize_splits(universe, rows, plan):
-    audit = audit_splits(universe, rows, **plan)
-    sets = {split: [] for split in SPLITS}
-    for row in rows:
-        cutoff = row["cutoff_at"]
-        split = (
-            "train"
-            if cutoff < plan["validation_start_at"]
-            else ("validation" if cutoff < plan["test_start_at"] else "test")
-        )
-        if cutoff >= plan["test_end_at"]:
-            continue
-        boundary = {"train": plan["validation_start_at"], "validation": plan["test_start_at"]}.get(
-            split
-        )
-        decision = {
-            "train": plan["fold_fit_at"],
-            "validation": plan["selection_freeze_at"],
-            "test": plan["evaluation_as_of"],
-        }[split]
-        if (boundary is not None and row["outcome_end_at"] >= boundary) or max(
-            row["outcome_end_at"], row["label_available_at"]
-        ) > decision:
-            continue
-        sets[split].append(row)
+
+def minimum_sample_deficits(audit: dict) -> dict[str, dict[str, int]]:
+    deficits = {}
     for split in SPLITS:
-        if len(sets[split]) != audit["splits"][split]["chronological"]["rows"]:
-            raise ValueError("training rows disagree with the independent chronological auditor")
-    return sets, audit
+        held_out = audit["splits"][split]["repo_group_disjoint"]
+        deficits[split] = {
+            "negative": max(0, MIN_ROWS_PER_CLASS - held_out["labels"]["0"]),
+            "positive": max(0, MIN_ROWS_PER_CLASS - held_out["labels"]["1"]),
+            "repo_groups": max(0, MIN_REPO_GROUPS - held_out["repo_groups"]),
+        }
+    return deficits
 
 
 def metrics(y, probabilities):
@@ -94,23 +83,24 @@ def metrics(y, probabilities):
     }
 
 
-def run(args, *, model_version: str = "0.1.0"):
-    summary_path = args.data_dir / "summary.json"
-    summary = json.loads(summary_path.read_bytes())
+def load_prepared(data_dir: Path) -> tuple[dict, list[dict], list[dict], dict[str, str]]:
+    summary_path = data_dir / "summary.json"
+    summary_body = summary_path.read_bytes()
+    summary = json.loads(summary_body)
     if not summary.get("reviewed_directories"):
         raise ValueError("no prepared D09 directories were supplied")
     hashes = summary["artifact_hashes"]
     for path, expected in hashes.items():
         if file_digest(Path(path)) != expected:
             raise ValueError("a prepared feature or label artifact changed")
-    if file_digest(args.data_dir / "reviews.jsonl") != summary["reviews_sha256"]:
+    reviews_path = data_dir / "reviews.jsonl"
+    if file_digest(reviews_path) != summary["reviews_sha256"]:
         raise ValueError("prepared review records differ from the build summary")
-    manifest_path = args.data_dir / "source-manifest.json"
-    if not manifest_path.is_file() or file_digest(manifest_path) != summary.get(
-        "source_manifest_sha256"
-    ):
+    manifest_path = data_dir / "source-manifest.json"
+    manifest = manifest_path.read_bytes()
+    if digest(manifest) != summary.get("source_manifest_sha256"):
         raise ValueError("prepared source manifest is missing or differs from the build summary")
-    sources = json.loads(manifest_path.read_bytes())
+    sources = json.loads(manifest)
     for path, expected in sources.items():
         if file_digest(Path(path)) != expected:
             raise ValueError("a prepared source changed")
@@ -128,6 +118,20 @@ def run(args, *, model_version: str = "0.1.0"):
             rows.extend(pl.read_parquet(strict).iter_rows(named=True))
     if len(rows) != summary["strict_rows"]:
         raise ValueError("strict row count differs from the build summary")
+    checked_files = {
+        **sources,
+        **hashes,
+        str(summary_path.resolve()): digest(summary_body),
+        str(reviews_path.resolve()): summary["reviews_sha256"],
+        str(manifest_path.resolve()): summary["source_manifest_sha256"],
+    }
+    return summary, universe, rows, checked_files
+
+
+def run(args, *, model_version: str = "0.1.0"):
+    summary, universe, rows, checked_files = load_prepared(args.data_dir)
+    summary_path = args.data_dir / "summary.json"
+    source_manifest_sha = summary["source_manifest_sha256"]
     now = format_utc_timestamp(datetime.now(UTC))
     plan = {
         "purpose": "retrospective_analysis",
@@ -138,22 +142,30 @@ def run(args, *, model_version: str = "0.1.0"):
         "test_start_at": args.test_start_at,
         "test_end_at": args.test_end_at,
     }
-    sets, audit = materialize_splits(universe, rows, plan)
+    sets, audit = materialize_splits(universe, rows, **plan)
     args.output_dir.mkdir(parents=True, exist_ok=False)
     split_path = args.output_dir / "split-audit.json"
     write_json_atomic(split_path, audit)
     failures = [
-        split for split in SPLITS if not audit["splits"][split]["chronological"]["both_classes"]
+        split for split in SPLITS if not audit["splits"][split]["repo_group_disjoint"]["both_classes"]
     ]
-    if failures:
+    deficits = minimum_sample_deficits(audit)
+    sample_minimum_met = not any(value for split in deficits.values() for value in split.values())
+    minimum_required = getattr(args, "require_minimum_sample", False)
+    if failures or (minimum_required and not sample_minimum_met):
         result = {
-            "status": "blocked_missing_classes",
+            "status": "blocked_missing_classes" if failures else "blocked_minimum_sample",
             "purpose": "retrospective_analysis",
             "splits_missing_a_class": failures,
             "counts": {
-                split: audit["splits"][split]["chronological"]["labels"] for split in SPLITS
+                split: audit["splits"][split]["repo_group_disjoint"]["labels"] for split in SPLITS
             },
-            "reason": "Each chronological split must contain independently verified positive and negative labels after all temporal guards.",
+            "minimum_sample_deficits": deficits,
+            "reason": (
+                "Every repository-disjoint split requires both verified classes after temporal guards."
+                if failures
+                else f"Every split requires {MIN_ROWS_PER_CLASS} rows per class and {MIN_REPO_GROUPS} repositories."
+            ),
         }
         write_json_atomic(args.output_dir / "training-readiness.json", result)
         return result
@@ -211,15 +223,7 @@ def run(args, *, model_version: str = "0.1.0"):
         for first, second in combinations(SPLITS, 2)
     }
     # These predeclared sample gates block release of a tiny proof-of-concept model.
-    sample_release_gates = (
-        calibration["status"] == "fitted"
-        and all(
-            min(Counter(row["label"] for row in sets[split]).values()) >= 20
-            and group_counts[split] >= 20
-            for split in SPLITS
-        )
-        and all(audit["splits"][split]["repo_group_disjoint"]["both_classes"] for split in SPLITS)
-    )
+    sample_release_gates = calibration["status"] == "fitted" and sample_minimum_met
     release_eligible = False
     artifact = {
         "format": "reposeer.model-a.logistic.v1",
@@ -244,8 +248,8 @@ def run(args, *, model_version: str = "0.1.0"):
         "fitted_at": now,
         "frozen_at": format_utc_timestamp(datetime.now(UTC)),
         "sklearn_version": sklearn.__version__,
-        "prepared_summary_sha256": file_digest(summary_path),
-        "source_manifest_sha256": file_digest(manifest_path),
+        "prepared_summary_sha256": checked_files[str(summary_path.resolve())],
+        "source_manifest_sha256": source_manifest_sha,
         "split_audit_sha256": file_digest(split_path),
         "training_population": "strict independently reviewed subset of the frozen Drive cohort; conditional retrospective evaluation",
     }
@@ -284,7 +288,7 @@ def run(args, *, model_version: str = "0.1.0"):
         "release_eligible": release_eligible,
         "purpose": "retrospective_analysis",
         "prospective_accuracy_claim_supported": False,
-        "source_manifest_sha256": file_digest(manifest_path),
+        "source_manifest_sha256": source_manifest_sha,
         "model_sha256": file_digest(artifact_path),
         "metrics": reports,
         "repo_groups": group_counts,
@@ -309,9 +313,13 @@ def main():
         "--output-dir", type=Path, help="New output folder (defaults to a timestamped run)"
     )
     parser.add_argument("--model-version", default="0.1.0", help="Version recorded in the frozen model")
-    parser.add_argument("--validation-start-at", default="2022-01-01T00:00:00.000Z")
-    parser.add_argument("--test-start-at", default="2024-01-01T00:00:00.000Z")
-    parser.add_argument("--test-end-at", default="2025-01-01T00:00:00.000Z")
+    parser.add_argument(
+        "--require-minimum-sample",
+        action="store_true",
+        help=f"Require {MIN_ROWS_PER_CLASS} verified rows per class and {MIN_REPO_GROUPS} repos per split",
+    )
+    for key, value in DEFAULT_WINDOWS.items():
+        parser.add_argument("--" + key.replace("_", "-"), default=value)
     args = parser.parse_args()
     model_version = args.model_version.strip()
     if not model_version:

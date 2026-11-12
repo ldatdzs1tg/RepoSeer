@@ -19,7 +19,7 @@ from reposeer.contracts.identity import (
 SPLITS = ("train", "validation", "test")
 
 
-def audit_splits(
+def materialize_splits(
     universe: Iterable[dict],
     strict_rows: Iterable[dict],
     *,
@@ -30,7 +30,8 @@ def audit_splits(
     test_end_at: str,
     evaluation_as_of: str,
     purpose: str = "prospective_backtest",
-) -> dict:
+) -> tuple[dict[str, list[dict]], dict]:
+    """Return the repository-disjoint rows and the audit for the same split plan."""
     times = {
         "fold_fit_at": fold_fit_at,
         "validation_start_at": validation_start_at,
@@ -86,7 +87,7 @@ def audit_splits(
             if group is not None:
                 groups[split].add(group)
 
-    eligible = {split: Counter() for split in SPLITS}
+    eligible = {split: [] for split in SPLITS}
     counts = {split: Counter() for split in SPLITS}
     decisions = {"train": fold_fit_at, "validation": selection_freeze_at, "test": evaluation_as_of}
     boundaries = {"train": validation_start_at, "validation": test_start_at}
@@ -128,29 +129,25 @@ def audit_splits(
         elif label_at > decisions[split]:
             counts[split]["label_unavailable_at_decision"] += 1
         else:
-            eligible[split][(group, event_id, label)] += 1
+            eligible[split].append(row)
 
-    def stats(rows: Counter) -> dict:
-        classes = Counter()
-        for (_, _, label), count in rows.items():
-            classes[label] += count
+    def stats(rows: list[dict]) -> dict:
+        classes = Counter(row["label"] for row in rows)
         return {
-            "rows": classes.total(),
+            "rows": len(rows),
             "labels": {str(label): classes[label] for label in (0, 1)},
-            "repo_groups": len({group for group, _, _ in rows}),
+            "repo_groups": len({row["repo_group_id"] for row in rows}),
             "both_classes": bool(classes[0] and classes[1]),
         }
 
     later_groups, later_events = set(), set()
-    audits = {}
+    selected, audits = {}, {}
     for split in reversed(SPLITS):
-        strict = Counter(
-            {
-                (group, event_id, label): count
-                for (group, event_id, label), count in eligible[split].items()
-                if group not in later_groups and event_id not in later_events
-            }
-        )
+        strict = [
+            row for row in eligible[split]
+            if row["repo_group_id"] not in later_groups and row.get("event_id") not in later_events
+        ]
+        selected[split] = strict
         audits[split] = {
             "cohort_rows": cohorts[split],
             "strict_rows_before_purge": counts[split]["strict_rows_before_purge"],
@@ -164,11 +161,11 @@ def audit_splits(
             },
             "chronological": stats(eligible[split]),
             "repo_group_disjoint": stats(strict),
-            "group_or_event_purged": eligible[split].total() - strict.total(),
+            "group_or_event_purged": len(eligible[split]) - len(strict),
         }
         later_groups.update(groups[split])
-        later_events.update(event_id for _, event_id, _ in eligible[split] if event_id is not None)
-    return {
+        later_events.update(row["event_id"] for row in eligible[split] if row.get("event_id"))
+    return {split: selected[split] for split in SPLITS}, {
         "purpose": purpose,
         "prospective_accuracy_claim_supported": purpose == "prospective_backtest",
         "status": "both_classes_in_each_disjoint_split"
@@ -179,6 +176,10 @@ def audit_splits(
         "input_strict_rows": len(strict_keys),
         "splits": {split: audits[split] for split in SPLITS},
     }
+
+
+def audit_splits(universe: Iterable[dict], strict_rows: Iterable[dict], **plan) -> dict:
+    return materialize_splits(universe, strict_rows, **plan)[1]
 
 
 def main() -> int:

@@ -1,4 +1,4 @@
-from scripts.audit_model_a_splits import audit_splits
+from scripts.audit_model_a_splits import audit_splits, materialize_splits
 
 from reposeer.contracts.identity import add_calendar_months
 
@@ -39,7 +39,8 @@ def test_purges_overlapping_horizons_late_labels_and_heldout_groups():
     test_event = row("event-late", "2024-12-31", 5, label=1, event="same-notice")
     holdout_unknown = row("shared-late", "2024-12-31", 3)
     rows = [train_overlap, train_late, train_shared, val_shared_event, test_event]
-    result = audit_splits([*rows, holdout_unknown], rows, **TIMES)
+    splits, result = materialize_splits([*rows, holdout_unknown], rows, **TIMES)
+    assert splits == {"train": [], "validation": [], "test": [test_event]}
     assert result["splits"]["train"]["purged"]["overlapping_horizon"] == 1
     assert result["splits"]["train"]["purged"]["label_unavailable_at_decision"] == 1
     assert result["splits"]["train"]["group_or_event_purged"] == 1

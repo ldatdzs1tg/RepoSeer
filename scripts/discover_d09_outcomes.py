@@ -4,8 +4,9 @@ import argparse
 import json
 from pathlib import Path
 
-from scripts.collect_d09_batch import archive_timestamp, query_rows, sql_list
+from scripts.collect_d09_batch import archive_timestamp, parse_rows, query_rows, sql_list
 from scripts.collect_d09_pilot import run_lock
+from scripts.d09_notice_signals import PUBLISHER_NOTICE_PHRASES
 from scripts.run_d09_drive import canonical_json, digest, jsonl
 from tools.coordination._common import atomic_bytes
 
@@ -14,30 +15,14 @@ from reposeer.collection.persistence import write_json_atomic
 from reposeer.contracts.identity import package_id
 from reposeer.exceptions import HTTPClientError
 
-PHRASES = [
-    "no longer maintained",
-    "no longer supported",
-    "not maintained",
-    "project has been discontinued",
-    "project is discontinued",
-    "end of life",
-    "development has stopped",
-    "unmaintained",
-    "no longer actively maintained",
-    "not actively maintained",
-    "no longer developed",
-    "no further releases",
-    "this project is deprecated",
-    "this package is deprecated",
-    "archived and",
-]
 
-
-def discovery_query(names, *, headlines=False):
-    phrases = sql_list(PHRASES)
+def discovery_query(names, *, headlines=False, by_year=False):
+    phrases = sql_list(PUBLISHER_NOTICE_PHRASES)
     searched = "substringUTF8(description, 1, 2500)" if headlines else "description"
     aggregate = "argMax" if headlines else "argMin"
-    return f"""SELECT name,
+    year = ", toYear(upload_time, 'UTC') AS upload_year" if by_year else ""
+    year_group = ", upload_year" if by_year else ""
+    return f"""SELECT name{year},
        {aggregate}(tuple(version, toString(upload_time, 'UTC'), sha256_digest, project_urls,
          substringUTF8({searched}, greatest(1, multiSearchFirstPositionCaseInsensitiveUTF8({searched}, [{phrases}]) - 200), 1800)), upload_time) AS notice
 FROM pypi.projects
@@ -45,7 +30,7 @@ WHERE name IN ({sql_list(names)})
   AND upload_time >= toDateTime64('2019-01-01 00:00:00', 3, 'UTC')
   AND upload_time < toDateTime64('2026-01-01 00:00:00', 3, 'UTC')
   AND multiSearchAnyCaseInsensitiveUTF8({searched}, [{phrases}])
-GROUP BY name ORDER BY name
+GROUP BY name{year_group} ORDER BY name{year_group}
 FORMAT JSONEachRow"""
 
 
@@ -57,12 +42,20 @@ def run(args):
     packages = registry["packages"]
     if digest(canonical_json(packages)) != registry["packages_sha256"]:
         raise ValueError("frozen registry checksum differs")
-    subjects = sorted(
-        (
+    targets = set()
+    if args.targets:
+        targets = {row["package_id"] for row in parse_rows(args.targets.read_bytes())}
+        if not targets or not targets.issubset(packages):
+            raise ValueError("publisher targets must identify packages in the frozen registry")
+        selected = [packages[key] for key in targets]
+    else:
+        selected = [
             row
             for row in packages.values()
             if args.include_newer or row["first_upload_at"] < "2020-01-01T00:00:00.000Z"
-        ),
+        ]
+    subjects = sorted(
+        selected,
         key=lambda row: (row["first_upload_at"], row["package_id"]),
     )
     names = list(dict.fromkeys(name for row in subjects for name in row["source_names"]))
@@ -76,7 +69,7 @@ def run(args):
                 http,
                 output,
                 f"publisher-notices-{index:03d}",
-                discovery_query(group, headlines=args.headlines),
+                discovery_query(group, headlines=args.headlines, by_year=bool(targets)),
                 post=True,
             )
             for row in rows:
@@ -108,7 +101,9 @@ def run(args):
         "unreviewed_leads": len(leads),
         "labels_assigned": 0,
         "registry_sha256": digest(body),
-        "selection": "Drive historical cohort, oldest packages first; discovery only",
+        "selection": "Frozen target packages, per-year leads"
+        if targets
+        else "Drive historical cohort, oldest packages first; discovery only",
         "includes_newer_packages": args.include_newer,
         "headlines_only": args.headlines,
     }
@@ -118,9 +113,12 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--targets", type=Path, help="Limit discovery to packages in a candidate JSONL"
+    )
     parser.add_argument("--run-dir", type=Path, default=Path("data/d09/drive-full-v1"))
     parser.add_argument(
-        "--output-dir", type=Path, default=Path("data/d09/publisher-outcome-discovery-v1")
+        "--output-dir", type=Path, default=Path("data/d09/publisher-outcome-discovery-v2")
     )
     parser.add_argument(
         "--max-shards", type=int, default=3, help="Bounded batches of 1000 names; 0 for all"

@@ -112,6 +112,82 @@ def test_continuous_mode_stops_when_passes_make_no_progress(tmp_path, monkeypatc
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize("collect_only", [False, True])
+def test_continuous_mode_exits_at_total_batch_limit(tmp_path, monkeypatch, collect_only):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_d09_drive",
+            "--all",
+            "--continuous",
+            "--stop-after-batches",
+            "2",
+            "--output-dir",
+            str(tmp_path),
+            *(["--collect-only"] if collect_only else []),
+        ],
+    )
+
+    def freeze(_screening, _output, config):
+        assert "stop_after_batches" not in config
+        return {"targets": [], "drive_metadata": {"row_count": 0}}
+
+    monkeypatch.setattr(run_d09_drive, "freeze_targets", freeze)
+    monkeypatch.setattr(run_d09_drive.time, "sleep", lambda seconds: None)
+    calls = []
+
+    def limited_pass(args, _frozen):
+        assert args.stop_after_batches == 2
+        calls.append(None)
+        assert len(calls) <= 2
+        stopped = len(calls) == 2
+        return {
+            "status": "stopped_at_batch_limit" if stopped else "resume_to_continue",
+            "batches_processed": 2,
+            "mapping_statuses": {"mapping_sources_matched": len(calls)},
+            "stop_reason": "batch_limit_reached" if stopped else "batch_budget_reached",
+        }
+
+    monkeypatch.setattr(run_d09_drive, "run_collection" if collect_only else "run", limited_pass)
+    assert run_d09_drive.main() == 0
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("limit", ["0", "-1"])
+def test_total_batch_limit_must_be_positive(monkeypatch, limit):
+    monkeypatch.setattr("sys.argv", ["run_d09_drive", "--all", "--stop-after-batches", limit])
+    with pytest.raises(SystemExit) as result:
+        run_d09_drive.main()
+    assert result.value.code == 2
+
+
+@pytest.mark.parametrize("workers", [16, 17])
+def test_archive_worker_limit_accepts_sixteen_and_rejects_more(tmp_path, monkeypatch, workers):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_d09_drive",
+            "--all",
+            "--plan-only",
+            "--output-dir",
+            str(tmp_path),
+            "--archive-workers",
+            str(workers),
+        ],
+    )
+    monkeypatch.setattr(
+        run_d09_drive,
+        "freeze_targets",
+        lambda *args: {"targets": [], "drive_metadata": {"row_count": 0}},
+    )
+    if workers == 16:
+        assert run_d09_drive.main() == 0
+    else:
+        with pytest.raises(SystemExit) as result:
+            run_d09_drive.main()
+        assert result.value.code == 2
+
+
 def test_registry_reuses_valid_page_then_queries_only_remaining_targets(tmp_path, monkeypatch):
     monkeypatch.setattr(run_d09_drive, "REGISTRY_PAGE_SIZE", 2)
     monkeypatch.setattr(run_d09_drive, "REGISTRY_FILTER_SQL_LIMIT", 1)
@@ -182,6 +258,104 @@ def test_collection_continues_past_a_batch_waiting_for_archive_verification(tmp_
     assert second["batches_processed"] == 2 and second["status"] == "completed"
     assert second["official_leads"] == 2
     assert json.loads(blocked.read_bytes())["statuses"] == {"download_budget_reached": 4}
+
+
+def test_collection_total_limit_counts_cached_batches_and_can_be_raised(tmp_path, monkeypatch):
+    args = SimpleNamespace(output_dir=tmp_path, max_batches=1, stop_after_batches=2)
+    packages = [{"package_id": f"pypi:{name}"} for name in ("alpha", "beta", "gamma")]
+    groups = [[[package]] for package in packages]
+    monkeypatch.setattr(run_d09_drive, "collection_plan", lambda *args: ({}, {}, groups))
+    monkeypatch.setattr(run_d09_drive, "prepare_batch", lambda *args: None)
+    collected = []
+
+    def collect(_http, directory, _groups):
+        collected.append(directory.name)
+        receipt = {
+            "source_reviews_sha256": run_d09_drive.shard_reviews_digest(directory),
+            "mapping_review": {"single_id_observed": 1},
+            "package_cutoffs": 1,
+            "official_leads": 0,
+        }
+        run_d09_drive.write_json_atomic(directory / "collection.json", receipt)
+        return receipt
+
+    monkeypatch.setattr(run_d09_drive, "collect_batch", collect)
+    assert run_d09_drive.run_collection(args, {})["status"] == "resume_to_continue"
+    limited = run_d09_drive.run_collection(args, {})
+    assert limited["status"] == "stopped_at_batch_limit"
+    assert limited["batches_processed"] == 2 and limited["batches_total"] == 3
+    assert limited["stop_reason"] == "batch_limit_reached"
+    assert run_d09_drive.run_collection(args, {})["status"] == "stopped_at_batch_limit"
+    assert collected == ["batch-00000", "batch-00001"]
+
+    args.stop_after_batches = 3
+    assert run_d09_drive.run_collection(args, {})["status"] == "completed"
+    assert collected == ["batch-00000", "batch-00001", "batch-00002"]
+
+
+def test_verification_finishes_pending_archives_at_limit_and_resumes_after_it(
+    tmp_path, monkeypatch
+):
+    inventory = tmp_path / "inventory"
+    run_d09_drive.write_json_atomic(inventory / "inventory.json", {})
+    args = SimpleNamespace(
+        output_dir=tmp_path,
+        inventory_dir=inventory,
+        reviews=tmp_path / "reviews.jsonl",
+        max_downloads=30,
+        max_batches=5,
+        stop_after_batches=1,
+        retry_unverified=False,
+    )
+    packages = [{"package_id": f"pypi:{name}"} for name in ("alpha", "beta")]
+    groups = [[[package]] for package in packages]
+    registry = {row["package_id"]: {} for row in packages}
+    monkeypatch.setattr(run_d09_drive, "collection_plan", lambda *args: (registry, {}, groups))
+    monkeypatch.setattr(run_d09_drive, "archive_hints", lambda *args: set())
+    monkeypatch.setattr(
+        run_d09_drive, "ArchivePool", lambda *args: SimpleNamespace(names=set(), receipts={})
+    )
+    monkeypatch.setattr(run_d09_drive, "index_reviews", lambda *args: 0)
+    monkeypatch.setattr(run_d09_drive, "prepare_batch", lambda *args: None)
+    monkeypatch.setattr(run_d09_drive, "collection_checkpoint", lambda *args: {})
+    monkeypatch.setattr(
+        run_d09_drive, "reviewed_batch", lambda directory, *args: directory / "reviewed"
+    )
+    monkeypatch.setattr(
+        run_d09_drive, "audit_run", lambda *args: {"status": "checked", "input_strict_rows": 0}
+    )
+    verified, checkpoints = [], {}
+    monkeypatch.setattr(
+        run_d09_drive,
+        "verification_checkpoint",
+        lambda directory, _retry: checkpoints.get(directory),
+    )
+
+    def verify(directory, _args, _inventory, _budget):
+        verified.append(directory.name)
+        pending = len(verified) == 1
+        receipt = {
+            "statuses": {"archive_download_pending" if pending else "mapping_sources_matched": 1}
+        }
+        if not pending:
+            checkpoints[directory] = receipt
+        return receipt, 1
+
+    monkeypatch.setattr(run_d09_drive, "verify_mapping", verify)
+    frozen = {"targets": packages, "drive_metadata": {"row_count": len(packages)}}
+    pending = run_d09_drive.run(args, frozen)
+    assert pending["status"] == "resume_to_continue"
+    assert pending["stop_reason"] == "archive_downloads_pending"
+
+    limited = run_d09_drive.run(args, frozen)
+    assert limited["status"] == "stopped_at_batch_limit"
+    assert limited["stop_reason"] == "batch_limit_reached"
+    assert limited["batches_processed"] == 1 and limited["batches_total"] == 2
+    assert verified == ["batch-00000", "batch-00000"]
+
+    args.stop_after_batches = 2
+    assert run_d09_drive.run(args, frozen)["status"] == "completed"
+    assert verified == ["batch-00000", "batch-00000", "batch-00001"]
 
 
 def test_archive_hints_reuse_cached_names_until_collection_revision_changes(tmp_path):

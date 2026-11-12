@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from scripts import collect_d09_pilot as pilot
 from scripts import verify_d09_evidence as verify
 from scripts.d09_archive_pool import ArchivePool
 
@@ -120,6 +121,32 @@ def test_matches_exact_pypi_version_hash_and_upload_time(tmp_path, monkeypatch):
         verify.pypi_evidence(None, tmp_path, ROW)
 
 
+def test_pypi_evidence_saves_and_reuses_response_under_windows_path_limit(tmp_path, monkeypatch):
+    directory = tmp_path / ("s" * max(1, 140 - len(str(tmp_path.resolve())) - 1))
+    payload = {
+        "info": {"name": "Demo", "version": "1.0", "project_urls": {"Source": ROW["repo_url"]}},
+        "urls": [{"digests": {"sha256": "a" * 64}, "upload_time_iso_8601": "2024-09-26T08:00:00Z"}],
+    }
+    body = json.dumps(payload).encode()
+    requests = []
+
+    def fetch(_http, url, _maximum):
+        requests.append(url)
+        return body, {
+            "url": url,
+            "content_sha256": hashlib.sha256(body).hexdigest(),
+            "retrieved_at": "2026-11-11T00:00:00.000Z",
+        }
+
+    monkeypatch.setattr(pilot, "fetch_public", fetch)
+    receipt, uploaded = verify.pypi_evidence(None, directory, ROW)
+    retained = directory / receipt["path"]
+    assert len(str(retained.resolve())) < 260
+    assert retained.read_bytes() == body
+    assert verify.pypi_evidence(None, directory, ROW) == (receipt, uploaded)
+    assert len(requests) == 1
+
+
 def test_archive_wave_prefers_coverage_per_byte_and_avoids_duplicate_work():
     hours = {"expensive": {1, 2, 3}, "cheap": {1, 2}, "overlaps": {1, 2}, "separate": {3}}
     costs = {"expensive": 100, "cheap": 40, "overlaps": 45, "separate": 30}
@@ -131,20 +158,26 @@ def test_archive_wave_prefers_coverage_per_byte_and_avoids_duplicate_work():
     assert verify.archive_wave(hours, {1, 2, 3}, costs, budget=0, workers=4) == ["separate"]
 
 
-def test_batch_checks_distinct_archives_concurrently_and_counts_the_budget(tmp_path, monkeypatch):
-    other = {
-        **ROW,
-        "package_id": "pypi:other",
-        "repo_url": "https://github.com/org/other",
-        "repo_id": "github:repository:321",
-    }
-    hours = ["2024-09-27T15:00:00.000Z", "2024-09-27T16:00:00.000Z"]
+@pytest.mark.parametrize("workers", [2, 16])
+def test_batch_checks_distinct_archives_concurrently_and_counts_the_budget(
+    tmp_path, monkeypatch, workers
+):
+    candidates = [
+        {
+            **ROW,
+            "package_id": f"pypi:package-{index}",
+            "repo_url": f"https://github.com/org/package-{index}",
+            "repo_id": f"github:repository:{1000 + index}",
+        }
+        for index in range(workers)
+    ]
+    hours = [f"2024-09-27T{index:02d}:00:00.000Z" for index in range(workers)]
     inventory = {
         hour: {
-            "name": f"2024-09-27-{15 + index}.json.gz",
+            "name": f"2024-09-27-{index}.json.gz",
             "generation": str(index + 1),
             "size": "100",
-            "timeCreated": f"2024-09-27T{16 + index}:05:00.000Z",
+            "timeCreated": f"2024-09-27T{index + 1:02d}:05:00.000Z",
         }
         for index, hour in enumerate(hours)
     }
@@ -157,34 +190,34 @@ def test_batch_checks_distinct_archives_concurrently_and_counts_the_budget(tmp_p
         verify,
         "locate_hours",
         lambda *args: {
-            (ROW["repo_id"], "org/demo"): {hours[0]},
-            (other["repo_id"], "org/other"): {hours[1]},
+            (row["repo_id"], f"org/package-{index}"): {hours[index]}
+            for index, row in enumerate(candidates)
         },
     )
     monkeypatch.setattr(verify, "verified_revision", lambda *args: {"content_sha256": "inventory"})
-    barrier = Barrier(2, timeout=3)
+    barrier = Barrier(workers, timeout=10)
 
     def archive(*args):
         revision = args[2]
+        index = int(revision["generation"]) - 1
         barrier.wait()
-        raw = (
-            event()
-            if revision["generation"] == "1"
-            else event(321).replace(b"Org/Demo", b"Org/Other")
-        )
-        return {"revision": revision}, [raw]
+        payload = json.loads(event(1000 + index))
+        payload["id"] = str(456 + index)
+        payload["repo"]["name"] = f"org/package-{index}"
+        payload["created_at"] = f"2024-09-27T{index:02d}:31:00Z"
+        return {"revision": revision}, [json.dumps(payload).encode() + b"\n"]
 
     monkeypatch.setattr(verify, "archive_evidence", archive)
     args = SimpleNamespace(
         output_dir=tmp_path,
         inventory_dir=tmp_path,
         archive_dir=None,
-        archive_workers=2,
-        max_downloads=2,
+        archive_workers=workers,
+        max_downloads=workers,
     )
-    rows, used = verify.verify_batch(args, [ROW, other], inventory)
-    assert used == 2
-    assert [row["status"] for row in rows] == ["mapping_sources_matched", "mapping_sources_matched"]
+    rows, used = verify.verify_batch(args, candidates, inventory)
+    assert used == workers
+    assert [row["status"] for row in rows] == ["mapping_sources_matched"] * workers
 
 
 @pytest.mark.parametrize("tamper", [False, True])

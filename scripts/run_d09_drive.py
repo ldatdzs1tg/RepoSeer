@@ -569,11 +569,12 @@ def archive_hints(output: Path, targets: list[dict]) -> set[str]:
 
 def run_collection(args, frozen: dict) -> dict:
     output = args.output_dir
+    batch_limit = getattr(args, "stop_after_batches", None)
     processed = new_batches = package_cutoffs = official_leads = 0
     counts = Counter()
     with HTTPClient(timeout=60, max_retries=2) as http:
         registry, receipts, batches = collection_plan(http, args, frozen)
-        for index, groups in enumerate(batches):
+        for index, groups in enumerate(batches[:batch_limit]):
             directory = output / "batches" / f"batch-{index:05d}"
             checkpoint = collection_checkpoint(directory)
             if checkpoint is None:
@@ -589,9 +590,15 @@ def run_collection(args, frozen: dict) -> dict:
             official_leads += checkpoint["official_leads"]
             processed += 1
     complete = processed == len(batches)
+    status = "completed" if complete else "resume_to_continue"
+    stop_reason = None if complete else "batch_budget_reached"
+    if processed == batch_limit and not complete:
+        status = "stopped_at_batch_limit"
+        stop_reason = "batch_limit_reached"
     summary = {
-        "status": "completed" if complete else "resume_to_continue",
-        "stop_reason": None if complete else "batch_budget_reached",
+        "status": status,
+        "stop_reason": stop_reason,
+        "stop_after_batches": batch_limit,
         "historical_packages": len(registry),
         "batches_processed": processed,
         "batches_total": len(batches),
@@ -609,6 +616,7 @@ def run_collection(args, frozen: dict) -> dict:
 
 def run(args, frozen: dict) -> dict:
     output = args.output_dir
+    batch_limit = getattr(args, "stop_after_batches", None)
     targets = frozen["targets"]
     now = format_utc_timestamp(datetime.now(UTC))
     budget = args.max_downloads
@@ -654,7 +662,7 @@ def run(args, frozen: dict) -> dict:
             flush=True,
         )
         reviews_count = index_reviews(db, args.reviews, registry, now)
-        for index, groups_in_batch in enumerate(batch_groups):
+        for index, groups_in_batch in enumerate(batch_groups[:batch_limit]):
             directory = output / "batches" / f"batch-{index:05d}"
             verification = verification_checkpoint(directory, args.retry_unverified)
             if verification is None:
@@ -687,9 +695,14 @@ def run(args, frozen: dict) -> dict:
 
     audit = audit_run(output, reviewed, now)
     complete = len(reviewed) == len(batch_groups) and not pending
+    status = "completed" if complete else "resume_to_continue"
+    if len(reviewed) == batch_limit and not complete and not pending:
+        status = "stopped_at_batch_limit"
+        stop_reason = "batch_limit_reached"
     summary = {
-        "status": "completed" if complete else "resume_to_continue",
+        "status": status,
         "stop_reason": stop_reason,
+        "stop_after_batches": batch_limit,
         "screening_rows": frozen["drive_metadata"]["row_count"],
         "targets": len(targets),
         "historical_packages": len(registry),
@@ -753,18 +766,23 @@ def main() -> int:
         "--max-downloads",
         type=int,
         default=30,
-        help="New GH Archive files allowed in this invocation",
+        help="GH Archive download attempts allowed per pass",
     )
     parser.add_argument(
         "--archive-workers",
         type=int,
         default=DEFAULT_ARCHIVE_WORKERS,
-        help="Concurrent archive checks (1–8)",
+        help=f"Concurrent archive checks (1–{MAX_ARCHIVE_WORKERS})",
     )
     parser.add_argument(
         "--max-batches",
         type=int,
-        help="New batches per invocation; 0 for unlimited (default 5 with --all)",
+        help="New batch attempts per pass; 0 for unlimited (default 5 with --all)",
+    )
+    parser.add_argument(
+        "--stop-after-batches",
+        type=int,
+        help="Stop after checking the first N frozen batches, including existing checkpoints",
     )
     parser.add_argument(
         "--retry-unverified",
@@ -798,9 +816,11 @@ def main() -> int:
         or not 1 <= args.batch_size <= 500
         or not 1 <= args.archive_workers <= MAX_ARCHIVE_WORKERS
         or min(args.max_downloads, args.max_batches) < 0
+        or (args.stop_after_batches is not None and args.stop_after_batches < 1)
     ):
         parser.error(
-            "expected positive target limit, batch size 1–500, 1–8 archive workers and nonnegative budgets"
+            "expected positive target/batch limits, batch size 1–500, "
+            f"1–{MAX_ARCHIVE_WORKERS} archive workers and nonnegative budgets"
         )
     if args.archive_dir is not None and not args.archive_dir.is_dir():
         parser.error("archive-dir must be an existing directory")
@@ -847,7 +867,7 @@ def main() -> int:
                         },
                     )
                     continue
-                if summary["status"] == "completed":
+                if summary["status"] in {"completed", "stopped_at_batch_limit"}:
                     break
                 progress = (
                     summary["batches_processed"],

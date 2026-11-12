@@ -350,7 +350,33 @@ def build_target(
     return reviewed, {"cutoff_release_census": full_before, "horizon_release_census": full_horizon}
 
 
+def load_outcomes(body: bytes) -> dict[tuple[str, str | None], OutcomeReview]:
+    outcomes = {}
+    for row in parse_rows(body):
+        review = OutcomeReview.model_validate(row)
+        for retained in review.sources:
+            source_path = Path(review.source_paths[retained.source_id])
+            if file_digest(source_path) != retained.content_sha256:
+                raise ValueError("outcome source checksum mismatch")
+        for evidence in review.official_evidence:
+            for citation in evidence.citations:
+                text = Path(review.source_paths[citation.source_id]).read_text(encoding="utf-8")
+                if text[citation.start_offset : citation.end_offset] != citation.quote:
+                    raise ValueError("official outcome citation does not match its source revision")
+        key = (review.package_id, review.cutoff_at)
+        if key in outcomes:
+            raise ValueError("duplicate outcome review")
+        outcomes[key] = review
+    return outcomes
+
+
 def run(args):
+    outcome_body = args.outcomes.read_bytes() if args.outcomes else b""
+    outcomes = load_outcomes(outcome_body)
+    approved_only = getattr(args, "approved_only", False)
+    if approved_only and (not outcomes or any(cutoff is None for _, cutoff in outcomes)):
+        raise ValueError("--approved-only requires at least one outcome with an exact cutoff")
+    approved_subjects = {subject for subject, _ in outcomes}
     output = args.output_dir
     cache_root = args.project_cache_dir or output
     output.mkdir(parents=True, exist_ok=True)
@@ -374,12 +400,17 @@ def run(args):
         packages.update(by_id)
         package_batches.update({subject: directory for subject in by_id})
         for row in parse_rows((directory / "verification/mapping_evidence.jsonl").read_bytes()):
-            if row["status"] == "mapping_sources_matched":
-                candidates[(row["package_id"], row["cutoff_at"])] = row
+            key = (row["package_id"], row["cutoff_at"])
+            if row["status"] == "mapping_sources_matched" and (not approved_only or key in outcomes):
+                candidates[key] = row
+        if approved_only and not approved_subjects.intersection(by_id):
+            continue
         with HTTPClient(timeout=45, max_retries=2) as http:
             for shard in sorted(directory.glob("shard-*")):
                 shard_rows = parse_rows((shard / "review.jsonl").read_bytes())
                 subjects = {row["package_id"] for row in shard_rows}
+                if approved_only and not approved_subjects.intersection(subjects):
+                    continue
                 for row in shard_rows:
                     retained = row.get("metadata_repair_source")
                     if retained is not None:
@@ -403,6 +434,8 @@ def run(args):
                         release_material[subject][str((shard / receipt["path"]).resolve())] = (
                             receipt["content_sha256"]
                         )
+    if approved_only and (missing := outcomes.keys() - candidates.keys()):
+        raise ValueError(f"{len(missing)} approved cutoffs lack a verified mapping: {sorted(missing)[:5]}")
     selected = {row["package_id"] for row in candidates.values()}
     if args.package:
         selected.intersection_update(
@@ -425,25 +458,6 @@ def run(args):
                 f"Checked PyPI project {subject} ({'available' if result[0] else 'not found'})",
                 flush=True,
             )
-    outcomes = {}
-    if args.outcomes:
-        for row in parse_rows(args.outcomes.read_bytes()):
-            review = OutcomeReview.model_validate(row)
-            for retained in review.sources:
-                path = Path(review.source_paths[retained.source_id])
-                if file_digest(path) != retained.content_sha256:
-                    raise ValueError("outcome source checksum mismatch")
-            for evidence in review.official_evidence:
-                for citation in evidence.citations:
-                    text = Path(review.source_paths[citation.source_id]).read_text(encoding="utf-8")
-                    if text[citation.start_offset : citation.end_offset] != citation.quote:
-                        raise ValueError(
-                            "official outcome citation does not match its source revision"
-                        )
-            key = (review.package_id, review.cutoff_at)
-            if key in outcomes:
-                raise ValueError("duplicate outcome review")
-            outcomes[key] = review
     checked_at = format_utc_timestamp(datetime.now(UTC))
     body_rows, findings = [], []
     applied_outcomes = 0
@@ -512,6 +526,8 @@ def run(args):
             for row in json.loads((directory / "cohort.json").read_bytes())["packages"]
         }
         part = jsonl(row for row in body_rows if row["snapshot"]["package_id"] in subjects)
+        if approved_only and not part:
+            continue
         destination = output / "reviewed" / directory.name / digest(part)
         if not (destination / "summary.json").exists():
             write_reviewed_run(directory, destination, part or None, checked_at)
@@ -523,6 +539,11 @@ def run(args):
         for path in destination.iterdir():
             if path.is_file():
                 artifact_hashes[str(path.resolve())] = file_digest(path)
+    if approved_only and totals["strict_rows"] != len(outcomes):
+        raise ValueError(
+            f"{totals['strict_rows']}/{len(outcomes)} approved cutoffs produced strict rows. "
+            "Check the reviewed eligibility reports and rerun the same preparation."
+        )
     summary = {
         "status": "project_budget_reached" if len(pending) > len(budgeted) else "prepared",
         "purpose": "retrospective_analysis",
@@ -547,7 +568,7 @@ def run(args):
     for census_path in (output / "censuses").glob("*.json"):
         material_sources[str(census_path.resolve())] = file_digest(census_path)
     if args.outcomes:
-        material_sources[str(args.outcomes.resolve())] = file_digest(args.outcomes)
+        material_sources[str(args.outcomes.resolve())] = digest(outcome_body)
         for outcome in outcomes.values():
             material_sources.update(
                 {
@@ -572,6 +593,11 @@ def main():
     )
     parser.add_argument("--outcomes", type=Path)
     parser.add_argument(
+        "--approved-only",
+        action="store_true",
+        help="Prepare exact package-cutoffs from --outcomes and require every approval to qualify",
+    )
+    parser.add_argument(
         "--project-cache-dir",
         type=Path,
         help="Reuse checked project responses from another preparation run",
@@ -588,6 +614,8 @@ def main():
     )
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
+    if args.approved_only and (args.outcomes is None or args.package):
+        parser.error("--approved-only uses the cutoff list from --outcomes")
     if args.max_packages < 0 or args.repair_artifact_budget < 0 or not 1 <= args.workers <= 8:
         parser.error("expected nonnegative project budget and 1–8 workers")
     try:

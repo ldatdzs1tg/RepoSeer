@@ -60,7 +60,7 @@ BLOCK_BYTES = 1024 * 1024
 DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_DOWNLOAD_SECONDS = 120
 DEFAULT_ARCHIVE_WORKERS = 4
-MAX_ARCHIVE_WORKERS = 8
+MAX_ARCHIVE_WORKERS = 16
 
 
 def load_candidates(batch_dir: Path, subjects: set[str]) -> list[dict]:
@@ -128,7 +128,7 @@ def pypi_evidence(http: HTTPClient, directory: Path, row: dict) -> tuple[dict, d
     if source.get("url") == url and stored_source_matches(directory, source):
         payload = json.loads((directory / source["path"]).read_bytes())
     else:
-        payload, source = pypi_json(http, url, directory, f"pypi/{key}-release")
+        payload, source = pypi_json(http, url, directory, "pypi/release")
         write_json_atomic(receipt_path, source)
     info = payload.get("info")
     if (
@@ -681,7 +681,7 @@ def main() -> int:
         "--archive-workers",
         type=int,
         default=DEFAULT_ARCHIVE_WORKERS,
-        help="Concurrent archive checks (1–8)",
+        help=f"Concurrent archive checks (1–{MAX_ARCHIVE_WORKERS})",
     )
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
@@ -692,7 +692,8 @@ def main() -> int:
             or (args.archive_dir is not None and not args.archive_dir.is_dir())
         ):
             raise ValueError(
-                "expected nonnegative download budget, 1–8 archive workers and an existing archive directory"
+                f"expected nonnegative download budget, 1–{MAX_ARCHIVE_WORKERS} archive workers "
+                "and an existing archive directory"
             )
         subjects = {package_id(value.removeprefix("pypi:")) for value in args.package}
         rows = load_candidates(args.batch_dir, subjects)

@@ -20,7 +20,7 @@ Full verification shares original archive proofs across batches. Every newly sca
 
 Proof receipts record the digest of the full set of extraction hints and the names actually found. A copied subset cannot claim that it covers the entire extraction scope. The runner indexes retained names once per pass and replays only relevant proofs. Historical extraction hints are cached against each batch's collection revision so repeated passes do not rescan the whole review queue.
 
-Within a batch, the verifier also replays proofs across all compatible package-cutoffs and prioritizes new archives by pending rows covered per byte remaining. Up to four distinct archives are checked concurrently by default. Set `--archive-workers` from 1 to 8 to adjust concurrency. The download budget still applies to the whole pass. This reduces repeated network work, but a full run can still require many large original objects. A mapping proof does not establish complete feature coverage or verify an outcome label.
+Within a batch, the verifier also replays proofs across all compatible package-cutoffs and prioritizes new archives by pending rows covered per byte remaining. Up to four distinct archives are checked concurrently by default. Set `--archive-workers` from 1 to 16 to adjust concurrency. The download budget still applies to the whole pass. This reduces repeated network work, but a full run can still require many large original objects. A mapping proof does not establish complete feature coverage or verify an outcome label.
 
 The runner uses the public PyPI and GH Archive mirrors for collection, then verifies candidate evidence against the original providers. Each batch retains its frozen roster, raw receipts, `review.jsonl`, mapping verification and official-status leads. Keep the run directory local while processing. `summary.json` links the reviewed output directories and `split-audit.json` reports the aggregate time and repository-group checks. The pilot and full-run directories have separate checkpoints.
 
@@ -94,6 +94,30 @@ python -m scripts.audit_model_a_splits --d09-dir data/d09/reviewed-300-v3 `
   --output data/d09/outcome-review-v2/split-audit-final.json
 ```
 
+## Find more first-party outcome evidence
+
+Use a JSONL queue with `package_id`, `repo_group_id`, `cutoff_at` and `horizon_end_at`
+from the checked snapshots. The repository scan reads README, changelog, release
+notes and status or migration documents at pinned Git revisions. It also searches
+GitHub release notes, issues, pull requests and comments. The publisher scan uses
+the same expanded phrases and looks for release metadata by year for queued packages.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.discover_d09_repo_notices --targets candidate-cutoffs.jsonl `
+  --output-dir data/d09/notice-scan-v1 --use-gh
+.\.venv\Scripts\python.exe -m scripts.discover_d09_outcomes --targets candidate-cutoffs.jsonl `
+  --output-dir data/d09/publisher-notices-v2 --headlines --max-shards 0
+```
+
+`--use-gh` uses an existing GitHub CLI login for public reads. The scan records
+what it could fetch, including document and page limits. It separates material
+before cutoff, in the outcome horizon and after the horizon. `leads.jsonl` retains
+source paths, checksums and excerpts. Candidate dates still need verification
+against the original publication and edit history. Review the package scope,
+authority, effective date, any successor, and whether maintenance resumed.
+An incomplete scan leaves follow-up unresolved. Approved decisions still enter
+`prepare_d09_model_a` as `OutcomeReview` records with retained sources.
+
 ## Train the retrospective Model A baseline
 
 Install the `training` extra in the environment used for fitting. Inference loads the JSON artifact and uses the existing RepoSeer runtime.
@@ -110,7 +134,34 @@ Use `scripts.prepare_d09_model_a` to build CORE snapshots from completed mapping
 .\.venv\Scripts\python.exe -m scripts.train_model_a --data-dir data/d09/model-a-retrospective-v1
 ```
 
-The trainer checks the prepared sources and removes rows with overlapping horizons or labels unavailable at the actual fitting and evaluation times. The default validation window starts in January 2022 and the test window covers 2024. Each split needs both classes after those checks. If a class is missing, `training-readiness.json` reports the counts and the command exits with code 2. The separate unseen-repository audit uses the frozen cohort and can be stricter than the chronological fit.
+The trainer checks the prepared sources and fits on the repository-disjoint rows
+from the chronological audit. It removes rows with overlapping horizons or labels
+unavailable at the actual fitting and evaluation times. The default validation
+window starts in January 2022 and the test window covers 2024. Each split needs
+both classes after those checks.
+
+To combine independently checked preparations, supply each directory with
+`--prepared-dir`. The assembler keeps one reviewed cutoff per package and repo,
+rebuilds the labels from the checked reviews, and reports the per-split gaps.
+For incremental preparation, put only the new reviewed `OutcomeReview` records
+in the next JSONL. `--approved-only` builds their exact package-cutoffs and
+checks that each approval has a verified mapping and produces a strict row.
+Reuse the project cache and use a new directory for each batch of approvals.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.prepare_d09_model_a --run-dir data/d09/drive-full-v1 `
+  --project-cache-dir data/d09/model-a-retrospective-v1 --outcomes data/d09/approved-next.jsonl `
+  --approved-only --output-dir data/d09/new-approved-prep
+.\.venv\Scripts\python.exe -m scripts.build_model_a_sample `
+  --prepared-dir data/d09/model-a-next-v1/prepared --prepared-dir data/d09/new-approved-prep `
+  --output-dir data/d09/model-a-minimum-sample-v1
+.\.venv\Scripts\python.exe -m scripts.train_model_a --data-dir data/d09/model-a-minimum-sample-v1 `
+  --require-minimum-sample
+```
+
+The minimum sample gate requires 20 verified rows per class and at least 20
+repository groups in each split. `training-readiness.json` records any gaps and
+the trainer exits with code 2 when the selected requirement fails.
 
 On success, the timestamped run folder contains the frozen `model-a.json`, split audit, metrics with feature coverage, and a held-out `sample-snapshot.json` and `sample-inference.json`. The pilot selects cases by outcome to exercise the workflow. Its metrics describe that sample and its retrospective evaluation. Release gates keep the artifact out of production scoring. The optional `--experimental` flag returns a development score when the snapshot has usable CORE features.
 
