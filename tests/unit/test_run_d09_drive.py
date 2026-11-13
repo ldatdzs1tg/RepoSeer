@@ -358,6 +358,28 @@ def test_verification_finishes_pending_archives_at_limit_and_resumes_after_it(
     assert verified == ["batch-00000", "batch-00000", "batch-00001"]
 
 
+def test_team_member_collects_only_assigned_global_batches(tmp_path, monkeypatch):
+    args = SimpleNamespace(
+        output_dir=tmp_path, max_batches=5, stop_after_batches=3, batch_indices=[1, 2]
+    )
+    packages = [{"package_id": f"pypi:{name}"} for name in ("alpha", "beta", "gamma")]
+    groups = [[[package]] for package in packages]
+    monkeypatch.setattr(run_d09_drive, "collection_plan", lambda *args: ({}, {}, groups))
+    monkeypatch.setattr(run_d09_drive, "prepare_batch", lambda *args: None)
+    seen = []
+
+    def collect(_http, directory, _groups):
+        seen.append(directory.name)
+        return {"mapping_review": {}, "package_cutoffs": 1, "official_leads": 0}
+
+    monkeypatch.setattr(run_d09_drive, "collect_batch", collect)
+    result = run_d09_drive.run_collection(args, {})
+    assert result["status"] == "completed"
+    assert result["batches_processed"] == 2 and result["batches_total"] == 3
+    assert result["team_batch_indices"] == [1, 2]
+    assert seen == ["batch-00001", "batch-00002"]
+
+
 def test_archive_hints_reuse_cached_names_until_collection_revision_changes(tmp_path):
     directory = tmp_path / "batches/batch-00000"
     path = directory / "shard-00000/review.jsonl"

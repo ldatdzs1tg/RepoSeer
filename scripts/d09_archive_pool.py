@@ -2,12 +2,14 @@
 
 import hashlib
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 
 from tools.coordination._common import atomic_bytes
 
 from reposeer.collection.persistence import write_json_atomic
+from reposeer.storage.screening_mapping import checked_mount_path
 
 
 def names_digest(names) -> str:
@@ -57,12 +59,18 @@ class ArchivePool:
     """Index retained proofs once per pass; raw hashes are checked before reuse."""
 
     def __init__(self, output: Path, names: set[str]):
+        if os.name == "nt":
+            output = checked_mount_path(output.absolute())
         self.directory = output / "archive-cache"
         self.directory.mkdir(parents=True, exist_ok=True)
         self.names = names.copy()
         self.by_name = defaultdict(set)
         self.receipts = {}
-        directories = [self.directory, *sorted(output.glob("batches/*/verification"))]
+        directories = [
+            self.directory,
+            *sorted(self.directory.glob("team/*/sets/*")),
+            *sorted(output.glob("batches/*/verification")),
+        ]
         for directory in directories:
             for _, source in saved_proofs(directory):
                 try:

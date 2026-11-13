@@ -567,6 +567,19 @@ def archive_hints(output: Path, targets: list[dict]) -> set[str]:
     return names
 
 
+def selected_batches(args, batches: list) -> list[tuple[int, list]]:
+    """Keep global batch IDs stable when a team member checks a disjoint subset."""
+    limit = getattr(args, "stop_after_batches", None)
+    indices = getattr(args, "batch_indices", None)
+    if indices is None:
+        return list(enumerate(batches[:limit]))
+    if len(indices) != len(set(indices)) or any(
+        type(index) is not int or not 0 <= index < len(batches) for index in indices
+    ):
+        raise ValueError("invalid team batch indices")
+    return [(index, batches[index]) for index in sorted(indices) if limit is None or index < limit]
+
+
 def run_collection(args, frozen: dict) -> dict:
     output = args.output_dir
     batch_limit = getattr(args, "stop_after_batches", None)
@@ -574,7 +587,8 @@ def run_collection(args, frozen: dict) -> dict:
     counts = Counter()
     with HTTPClient(timeout=60, max_retries=2) as http:
         registry, receipts, batches = collection_plan(http, args, frozen)
-        for index, groups in enumerate(batches[:batch_limit]):
+        selected = selected_batches(args, batches)
+        for index, groups in selected:
             directory = output / "batches" / f"batch-{index:05d}"
             checkpoint = collection_checkpoint(directory)
             if checkpoint is None:
@@ -589,7 +603,8 @@ def run_collection(args, frozen: dict) -> dict:
             package_cutoffs += checkpoint["package_cutoffs"]
             official_leads += checkpoint["official_leads"]
             processed += 1
-    complete = processed == len(batches)
+    team_member = getattr(args, "batch_indices", None) is not None
+    complete = processed == (len(selected) if team_member else len(batches))
     status = "completed" if complete else "resume_to_continue"
     stop_reason = None if complete else "batch_budget_reached"
     if processed == batch_limit and not complete:
@@ -602,6 +617,7 @@ def run_collection(args, frozen: dict) -> dict:
         "historical_packages": len(registry),
         "batches_processed": processed,
         "batches_total": len(batches),
+        "team_batch_indices": [index for index, _ in selected] if team_member else None,
         "mapping_statuses": dict(counts),
         "package_cutoffs": package_cutoffs,
         "official_leads": official_leads,
@@ -655,6 +671,7 @@ def run(args, frozen: dict) -> dict:
         HTTPClient(timeout=60, max_retries=2) as http,
     ):
         registry, registry_receipts, batch_groups = collection_plan(http, args, frozen)
+        selected = selected_batches(args, batch_groups)
         args.archive_pool = ArchivePool(output, archive_hints(output, targets))
         print(
             f"Shared archive cache: {len(args.archive_pool.names)} repository hints, "
@@ -662,7 +679,7 @@ def run(args, frozen: dict) -> dict:
             flush=True,
         )
         reviews_count = index_reviews(db, args.reviews, registry, now)
-        for index, groups_in_batch in enumerate(batch_groups[:batch_limit]):
+        for index, groups_in_batch in selected:
             directory = output / "batches" / f"batch-{index:05d}"
             verification = verification_checkpoint(directory, args.retry_unverified)
             if verification is None:
@@ -694,7 +711,10 @@ def run(args, frozen: dict) -> dict:
                 break
 
     audit = audit_run(output, reviewed, now)
-    complete = len(reviewed) == len(batch_groups) and not pending
+    team_member = getattr(args, "batch_indices", None) is not None
+    complete = (
+        len(reviewed) == (len(selected) if team_member else len(batch_groups)) and not pending
+    )
     status = "completed" if complete else "resume_to_continue"
     if len(reviewed) == batch_limit and not complete and not pending:
         status = "stopped_at_batch_limit"
@@ -709,6 +729,7 @@ def run(args, frozen: dict) -> dict:
         "no_observed_pre_cutoff_distribution": len(targets) - len(registry),
         "batches_processed": len(reviewed),
         "batches_total": len(batch_groups),
+        "team_batch_indices": [index for index, _ in selected] if team_member else None,
         "archive_downloads_this_invocation": args.max_downloads - budget,
         "mapping_statuses": dict(mapping_counts),
         "review_input": str(args.reviews.resolve()),
