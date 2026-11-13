@@ -72,17 +72,21 @@ class StackExchangeClient(DiscoveryProvider):
             params["fromdate"] = int(window_start.timestamp())
         if window_end is not None:
             params["todate"] = int(window_end.timestamp())
+        headers = {"Accept": "application/json"}
         if self.api_key:
-            params["key"] = self.api_key
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
         try:
             data = self.http.get_json(
                 endpoint,
                 params=params,
-                headers={"Accept": "application/json"},
+                headers=headers,
+                follow_redirects=False,
             )
             if not isinstance(data, dict):
                 raise ValueError("invalid_stackexchange_payload")
+            if "backoff" in data:
+                self.http.defer_requests(endpoint, data["backoff"])
             if data.get("error_id"):
                 # Native error text may echo request credentials; retain only safe error categories.
                 error_name = data.get("error_name")

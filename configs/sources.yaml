@@ -20,12 +20,19 @@ external:
       api_base_url: "https://hn.algolia.com/api/v1"
       enabled: true
     - name: "stackexchange"
+      configuration: "STACKEXCHANGE_API_KEY"
       api_base_url: "https://api.stackexchange.com/2.3"
       enabled: true
     - name: "devto"
+      configuration: "DEVTO_API_KEY"
       api_base_url: "https://dev.to/api"
       enabled: true
     - name: "rss"
+      configuration: "REPOSEER_RSS_FEEDS"
+      coverage: "configured_feed_entries_only"
       enabled: true
     - name: "news"
-      enabled: false
+      api_base_url: "https://newsapi.org/v2"
+      configuration: "NEWS_API_KEY"
+      coverage: "current_plan_accessible_articles_only"
+      enabled: true

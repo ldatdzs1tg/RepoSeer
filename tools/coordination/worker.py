@@ -19,7 +19,6 @@ from tools.coordination._common import (
     atomic_bytes,
     checked_mount_path,
     cli_guard,
-    collection_options,
     copy_verified,
     digest,
     files,
@@ -32,11 +31,13 @@ from tools.coordination._common import (
     notification,
     now,
     parser,
+    policy_options,
     read_checksums,
     read_json,
     redact,
     require,
     safe_path,
+    screening_policy,
     seal_bundle,
     slug,
     timestamp,
@@ -49,6 +50,12 @@ from tools.coordination._common import (
     worker_id,
     write_json,
 )
+from tools.coordination.external import AUTO_ENRICH_MAX_PACKAGES
+from tools.coordination.external import schedule as schedule_external
+
+from reposeer.collection.provider_preflight import check_providers
+from reposeer.storage.artifact_integrity import drive_part_facts as drive_part_facts
+from reposeer.storage.artifact_integrity import verify_drive_part as verify_drive_part
 
 
 def run(worker, assignment_path, data_root, *, remote="reposeer:", dry_run=False, runner=None):
@@ -353,63 +360,7 @@ def work(
     )
 
 
-def drive_part_facts(root: Path, expected: dict, run_id: str) -> dict:
-    """Reuse raw/provider verification, without constructing a legacy claim assignment."""
-    facts = integration_evidence(
-        root,
-        dict(
-            targets=expected["package_ids"],
-            expected_repo_full_name=expected["repo_full_name"],
-        ),
-        run_id,
-    )
-    require(facts["overall_status"] in {"complete", "partial"}, "drive_collection_not_successful")
-    require(
-        facts["collected_repository"] and facts["verified_package_ids"] == expected["package_ids"],
-        "drive_mapping_verification_failed",
-    )
-    require(
-        safe_path(root, "targets.txt").read_bytes()
-        == ("\n".join(expected["package_ids"]) + "\n").encode("utf-8"),
-        "drive_targets_mismatch",
-    )
-    return facts
-
-
-def verify_drive_part(root: Path, expected: dict, *, marker: dict | None = None) -> dict:
-    root = checked_mount_path(root)
-    marker = read_json(safe_path(root, "READY.json")) if marker is None else marker
-    require(
-        type(marker.get("schema_version")) is int
-        and all(marker.get(key) == value for key, value in expected.items()),
-        "drive_part_identity_mismatch",
-    )
-    require(
-        read_json(safe_path(root, "COLLECTION_INPUT.json")) == expected, "drive_part_input_mismatch"
-    )
-    checksums = safe_path(root, "CHECKSUMS.sha256")
-    declared = read_checksums(checksums)
-    require(fingerprint(checksums)[0] == marker["checksums_sha256"], "checksum_list_mismatch")
-    inventory = files(root, declared=declared)
-    require(
-        declared
-        == {
-            name: value
-            for name, value in inventory.items()
-            if name not in {"CHECKSUMS.sha256", "READY.json"}
-        },
-        "bundle_checksum_mismatch",
-    )
-    facts = drive_part_facts(root, expected, uid(marker["integration_run_id"]))
-    require(
-        marker["collection_status"] == facts["overall_status"]
-        and marker["completed_at_utc"] == facts["finished_at"],
-        "drive_part_status_mismatch",
-    )
-    return marker
-
-
-def collect_drive_part(root: Path, expected: dict, log: Path, *, runner=None) -> dict:
+def collect_drive_part(root: Path, expected: dict, log: Path, *, runner=None, available_sources=None) -> dict:
     root = checked_mount_path(root)
     if (root / "READY.json").exists():
         return verify_drive_part(root, expected)
@@ -423,7 +374,9 @@ def collect_drive_part(root: Path, expected: dict, log: Path, *, runner=None) ->
     require(len(manifests) <= 1, "multiple_local_integration_runs")
     if not manifests:
         require(not started, "drive_collection_interrupted_requires_inspection")
-        options = collection_options("initial")
+        options = expected["collection"]
+        require(options in [policy_options(name) for name in ("legacy-initial", "distributed-v2")],
+                "invalid_collection_policy")
         command = [
             "uv",
             "run",
@@ -442,6 +395,8 @@ def collect_drive_part(root: Path, expected: dict, log: Path, *, runner=None) ->
                 "--" + name.replace("_", "-"),
                 ",".join(value) if isinstance(value, list) else str(value),
             ]
+        if available_sources is not None:
+            command += ["--available-external-sources", ",".join(available_sources)]
         # No Registry credential reaches the child, even from an operator's shell.
         environment = {
             key: value
@@ -457,6 +412,7 @@ def collect_drive_part(root: Path, expected: dict, log: Path, *, runner=None) ->
                     stderr=subprocess.STDOUT,
                     timeout=6 * 3600,
                     env=environment,
+                    cwd=Path(__file__).resolve().parents[2],
                 )
             except (OSError, subprocess.SubprocessError):
                 interrupted = True
@@ -492,9 +448,9 @@ def collect_drive_part(root: Path, expected: dict, log: Path, *, runner=None) ->
     return verify_drive_part(root, expected)
 
 
-def publish_drive_part(source: Path, destination: Path, expected: dict) -> dict:
+def publish_drive_part(source: Path, destination: Path, expected: dict, *, verifier=verify_drive_part) -> dict:
     source, destination = checked_mount_path(source), checked_mount_path(destination)
-    marker = verify_drive_part(source, expected)
+    marker = verifier(source, expected)
     inventory = files(source, declared=read_checksums(source / "CHECKSUMS.sha256"))
     existing = files(destination, declared=inventory)
     require(set(existing) <= set(inventory), "unexpected_mounted_bundle_files")
@@ -504,9 +460,9 @@ def publish_drive_part(source: Path, destination: Path, expected: dict) -> dict:
     )
     for name in sorted(set(inventory) - {"READY.json"}):
         copy_verified(safe_path(source, name), safe_path(destination, name))
-    verify_drive_part(destination, expected, marker=marker)
+    verifier(destination, expected, marker=marker)
     copy_verified(safe_path(source, "READY.json"), safe_path(destination, "READY.json"))
-    require(verify_drive_part(destination, expected) == marker, "mounted_bundle_changed")
+    require(verifier(destination, expected) == marker, "mounted_bundle_changed")
     return marker
 
 
@@ -528,6 +484,7 @@ def crawl_drive(
     drive_root = assignment.parents[2]
     safe_path(drive_root, f"assignments/{worker}/{run_id}.csv")
     ready, _, assignments = verify_drive_screening(drive_root, run_id)
+    policy_id = screening_policy(ready)
     groups = {}
     for row in assignments[worker]:
         repo = slug(row["repo_full_name"]).casefold()
@@ -547,7 +504,7 @@ def crawl_drive(
                 part_index=index,
                 package_ids=packages[offset : offset + 100],
                 assignment_sha256=ready["assignments_sha256"][worker],
-                collection=collection_options("initial"),
+                collection=policy_options(policy_id),
             )
             suffix = f"{worker}/{run_id}/{repository_id}/part_{index:03d}"
             plan.append(
@@ -561,6 +518,7 @@ def crawl_drive(
         packages=len(assignments[worker]),
         repositories=len(groups),
         parts=len(plan),
+        policy_id=policy_id,
         unit="repository_parts",
         completed=0,
         partial=0,
@@ -569,8 +527,27 @@ def crawl_drive(
         output=mounted_display_path(drive_root / "submissions" / worker / run_id),
         failures=[],
     )
+    if policy_id == "legacy-initial":
+        print("Legacy collection: original budgets retained; use enrich-drive for external V2.", file=sys.stderr)
     if dry_run:
+        if policy_id == "distributed-v2":
+            summary["preflight"] = check_providers(live=False)
+        summary["enrichment"] = schedule_external([destination for _, _, destination in plan
+            if (destination / "READY.json").exists()], drive_root, worker, data_root=data_root,
+            dry_run=True, limit=AUTO_ENRICH_MAX_PACKAGES, checker=check_providers)
         return summary
+    network_needed = any(not (destination / "READY.json").exists()
+                         and not (local / "READY.json").exists()
+                         for _, local, destination in plan)
+    preflight = None
+    if policy_id == "distributed-v2" and network_needed:
+        preflight = check_providers()
+        if not preflight.get("configuration_valid", preflight.get("ready", False)) or not preflight.get("github_ready", preflight.get("ready", False)):
+            summary.update(status="configuration_incomplete" if not preflight.get("configuration_valid", preflight.get("ready", False)) else "github_unavailable", failed=1, preflight=preflight)
+            return summary
+    from reposeer.pipelines.external_enrichment import provider_deferrals
+
+    invocation_deferred = {}
     for expected, local, destination in plan:
         try:
             if (destination / "READY.json").exists():
@@ -585,8 +562,15 @@ def crawl_drive(
                 base,
                 f"{worker}/{run_id}/logs/{expected['repository_id']}-part_{expected['part_index']:03d}.log",
             )
-            collect_drive_part(local, expected, log, runner=runner)
+            collect_drive_part(local, expected, log, runner=runner, available_sources=None if preflight is None
+                               else [name for name in preflight.get("available_external_sources", expected["collection"]["discovery_sources"])
+                                     if name not in invocation_deferred])
             marker = publish_drive_part(local, destination, expected)
+            if preflight is not None:
+                manifest = read_json(safe_path(destination, f"metadata/collection_runs/integration_{marker['integration_run_id']}.json"))
+                invocation_deferred.update(provider_deferrals([job for entry in manifest["stages"]
+                    if entry["stage"] == "external_discovery"
+                    for job in entry.get("details", {}).get("discovery", {}).get("per_job_stats", [])]))
             summary["completed" if marker["collection_status"] == "complete" else "partial"] += 1
         except (CoordinationError, OSError, ValueError, TypeError, KeyError) as error:
             summary["failed"] += 1
@@ -599,8 +583,52 @@ def crawl_drive(
                     else type(error).__name__,
                 )
             )
+    summary["enrichment"] = schedule_external([destination for _, _, destination in plan
+        if (destination / "READY.json").exists()], drive_root, worker, data_root=data_root,
+        limit=AUTO_ENRICH_MAX_PACKAGES, preflight=preflight, checker=check_providers, deferred=invocation_deferred)
     if summary["failed"]:
         summary["status"] = "failed"
+    return summary
+
+
+EXTERNAL_OPTIONS = {key: value for key, value in policy_options("distributed-v2").items()
+                    if key not in {"max_pages", "max_records"}}
+
+
+def _enrichment_source(source: Path, drive_root: Path, worker: str):
+    from reposeer.storage.external_inputs import source_facts
+
+    facts, scopes = source_facts(source)
+    expected = read_json(safe_path(source, "COLLECTION_INPUT.json"))
+    run_id, index = expected["sampling_run_id"], expected["part_index"]
+    screening = safe_path(drive_root, f"screening/runs/{run_id}/READY.json")
+    if screening.exists():
+        ready, _, assignments = verify_drive_screening(drive_root, run_id)
+        packages = sorted(row["package_id"] for row in assignments[worker]
+                          if row["repo_full_name"].casefold() == expected["repo_full_name"])
+        require(expected["assignment_sha256"] == ready["assignments_sha256"][worker]
+                and expected["package_ids"] == packages[(index - 1) * 100:index * 100]
+                and expected["collection"] == policy_options(screening_policy(ready)),
+                "source_assignment_mismatch")
+    require(facts["worker_id"] == worker and source.parents[4] == drive_root, "source_directory_identity_mismatch")
+    return facts, scopes
+
+def enrich_drive(submissions_dir: Path, *, data_root: Path | None = None,
+                 dry_run: bool = False, pipeline_factory=None) -> dict:
+    """Run the same planner as crawl-drive over all verified historical source parts."""
+    from tools.coordination.external import scan_parts
+
+    submissions = checked_mount_path(submissions_dir)
+    worker = worker_id(submissions.name, "crawler")
+    require(submissions.parent.name == "submissions" and submissions.is_dir(), "invalid_submissions_directory")
+    parts, errors = scan_parts(submissions)
+    summary = schedule_external(parts, submissions.parent.parent, worker, data_root=data_root,
+        dry_run=dry_run, checker=check_providers, pipeline_factory=pipeline_factory)
+    summary["failed"] += len(errors)
+    summary["failures"].extend(errors)
+    if summary["failed"]:
+        summary["status"] = "failed"
+    summary["planned"] = summary["packages_planned"]
     return summary
 
 
@@ -624,10 +652,27 @@ def main():
     sub.add_argument("--assignment", type=Path, required=True)
     sub.add_argument("--data-root", type=Path)
     sub.add_argument("--dry-run", action="store_true")
+    sub = commands.add_parser("enrich-drive", help="Enrich every verified submission for C1-C7")
+    sub.add_argument("--submissions-dir", type=Path, required=True)
+    sub.add_argument("--data-root", type=Path)
+    sub.add_argument("--dry-run", action="store_true")
+    commands.add_parser("check-providers", help="Verify local V2 credentials and connectivity")
     args = cli.parse_args()
+    if args.command == "check-providers":
+        result = check_providers()
+        if not result["ready"]:
+            print(json.dumps(result, sort_keys=True))
+            raise SystemExit(1)
+        return result
+    if args.command == "enrich-drive":
+        result = enrich_drive(args.submissions_dir, data_root=args.data_root, dry_run=args.dry_run)
+        if result["failed"]:
+            print(json.dumps(result, sort_keys=True))
+            raise SystemExit(1)
+        return result
     if args.command == "crawl-drive":
         result = crawl_drive(args.assignment, data_root=args.data_root, dry_run=args.dry_run)
-        if result["failed"]:
+        if result["failed"] or result.get("enrichment", {}).get("failed"):
             print(json.dumps(result, sort_keys=True))
             raise SystemExit(1)
         return result

@@ -70,7 +70,7 @@ class DevToClient(DiscoveryProvider):
             headers["api-key"] = self.api_key
 
         try:
-            data = self.http.get_json(endpoint, params=params, headers=headers)
+            data = self.http.get_json(endpoint, params=params, headers=headers, follow_redirects=False)
             if not isinstance(data, list):
                 raise ValueError("invalid_devto_payload")
 

@@ -39,6 +39,7 @@ from tools.coordination._common import (
     copy_verified,
     digest,
     enabled_worker,
+    files,
     fingerprint,
     finish_job,
     format_utc_timestamp,
@@ -605,6 +606,10 @@ def screen_drive(
     stage = safe_path(local_drive_workspace("screening", data_root, drive_root), run_id)
     output = safe_path(stage, f"screening/runs/{run_id}")
     if not (output / "READY.json").exists():
+        intent_path = safe_path(stage, "COLLECTION_POLICY.json")
+        intent = dict(policy_id="distributed-v2", source_hashes=source_hashes)
+        require(intent_path.exists() or not files(stage), "staged_policy_requires_inspection")
+        write_json(intent_path, intent)
         for name in ("manifest.json", "package_candidates.csv"):
             copy_verified(
                 safe_path(run_dir, name), safe_path(stage, f"discovery/submissions/{run_id}/{name}")
@@ -704,6 +709,7 @@ def screen_drive(
             dict(
                 schema_version=1,
                 sampling_run_id=run_id,
+                collection_policy=dict(policy_id="distributed-v2"),
                 mapping_sha256=fingerprint(output / "mapping.csv")[0],
                 evidence_sha256=fingerprint(output / "pypi_evidence.jsonl")[0],
                 assignments_sha256={
@@ -1626,6 +1632,8 @@ def main():
     )
     sub.add_argument("--drive-root", type=Path, required=True)
     sub.add_argument("--dry-run", action="store_true")
+    sub = commands.add_parser("external-report", help="Write verified external coverage without changing master mapping")
+    sub.add_argument("--drive-root", type=Path, required=True)
     sub = commands.add_parser("screen-local")
     sub.add_argument("--assignment", type=Path, required=True)
     sub.add_argument("--out-dir", type=Path, required=True)
@@ -1647,7 +1655,7 @@ def main():
     group.add_argument("--dry-run", action="store_true")
     sub.add_argument("--pending-dir", type=Path, default=Path("data/coordination"))
     for name, sub in commands.choices.items():
-        if name not in {"screen-drive", "bootstrap-mapping"}:
+        if name not in {"screen-drive", "bootstrap-mapping", "external-report"}:
             sub.add_argument("--remote", default=argparse.SUPPRESS)
     args = cli.parse_args()
     if args.command == "screen-drive":
@@ -1659,6 +1667,10 @@ def main():
         )
     if args.command == "bootstrap-mapping":
         return bootstrap_mapping(args.drive_root, dry_run=args.dry_run)
+    if args.command == "external-report":
+        from tools.coordination.external import external_report
+
+        return external_report(args.drive_root)
     registry = Registry()
     if args.command in {"import-discovery", "import-screening"}:
         function = import_discovery if args.command == "import-discovery" else import_screening

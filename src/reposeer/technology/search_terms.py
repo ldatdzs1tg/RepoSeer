@@ -126,6 +126,7 @@ class SearchTermGenerator:
         topics: list[str] | None = None,
         platforms: list[SearchPlatform] | None = None,
         query_version: str = "1.0.0",
+        extended_package_queries: bool = False,
         entities: list[TechnologyEntity | TechSpec] | None = None,
         cutoff_at: str | None = None,
         historical_mode: bool | None = None,
@@ -232,6 +233,19 @@ class SearchTermGenerator:
             add(f"{disambiguated} release", target_slug, "direct_package", "hackernews", priority=1)
             add(f"{pkg_name} python", target_slug, "direct_package", "stackexchange", priority=2)
             add(f"{pkg_name} python", target_slug, "direct_package", "devto", priority=2)
+
+        if extended_package_queries:
+            # Package-level topics require identity context, but no inferred functional profile.
+            identity = f"{pkg_name} Python package" if pkg_name else repo_full_name
+            if identity:
+                add(identity, target_slug, "direct_package", "web", priority=1)
+                for intent, suffix in (("announcement", "release announcement"),
+                                       ("maintenance", "maintenance status"),
+                                       ("deprecation", "deprecation announcement"),
+                                       ("security", "security advisory"),
+                                       ("migration", "migration guide"),
+                                       ("alternatives", "alternatives replacement")):
+                    add(f"{identity} {suffix}", target_slug, intent, "web", priority=1)
 
         if include_technology_context:
             concepts = [*(specs or []), *(entities or [])]

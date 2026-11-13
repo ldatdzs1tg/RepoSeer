@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -95,6 +96,26 @@ def _group_candidates(candidates: Iterable[CandidateInput]) -> tuple[list[Candid
             key = raw_id or json.dumps(reference, sort_keys=True)
             group.references[key] = reference
     return [group for group in groups if group is not None], count, raw_fingerprints
+
+
+def _select_candidate_groups(groups: list[CandidateGroup]) -> list[CandidateGroup]:
+    """Rank identity metadata, then round-robin providers deterministically per rank."""
+    ranks = {"exact_url_match": 0, "high_confidence_metadata": 1}
+    buckets = defaultdict(lambda: defaultdict(deque))
+    for group in sorted(groups, key=lambda g: canonical_article_url(candidate_data(g)["url"])):
+        data = candidate_data(group)
+        refs = list(group.references.values())
+        rank = min((ranks.get(ref.get("subject_match_status"), 2) for ref in refs), default=2)
+        provider = min((ref.get("discovery_provider", "web") for ref in refs), default=data.get("discovery_provider", "web"))
+        buckets[rank][provider].append(group)
+    result = []
+    for rank in sorted(buckets):
+        providers = buckets[rank]
+        while any(providers.values()):
+            for provider in sorted(providers):
+                if providers[provider]:
+                    result.append(providers[provider].popleft())
+    return result
 
 
 def _apply_projection_states(groups: list[CandidateGroup], state_paths: Sequence[Path],
@@ -234,6 +255,8 @@ class ExternalCrawlPipeline:
         if offset >= len(groups):
             raise ValueError("no_remaining_candidates")
         _apply_projection_states(groups, discovery_state_paths, fingerprints)
+        if len(groups) > max_candidates:
+            groups = _select_candidate_groups(groups)
         batch = groups[offset:offset + max_candidates]
         data = [candidate_data(group) for group in batch]
         run_id = str(uuid4())

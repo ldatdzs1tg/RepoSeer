@@ -1,1 +1,1 @@
-"""Offline, evidence-grounded analysis services; no collection or inference."""
+"""Analysis services for frozen CORE models and external evidence."""

@@ -23,8 +23,25 @@ def main(
     discovery_max_pages: int = typer.Option(1, "--discovery-max-pages"),
     discovery_max_records: int = typer.Option(30, "--discovery-max-records"),
     max_candidates: int = typer.Option(15, "--max-candidates"),
+    available_external_sources: str | None = typer.Option(None, "--available-external-sources", hidden=True),
+    policy: str | None = typer.Option(None, "--policy", help="Explicit distributed-v2 setup gate"),
     cutoff_at: str | None = typer.Option(None, "--cutoff-at", help="Stored diagnostics only"),
 ) -> None:
+    if policy is not None:
+        if policy != "distributed-v2" or mode != "live":
+            raise typer.BadParameter("distributed-v2 requires live mode")
+        from reposeer.collection.provider_preflight import check_providers
+
+        preflight = check_providers()
+        if not preflight["configuration_valid"] or not preflight["github_ready"]:
+            import json
+
+            typer.echo(json.dumps(preflight), err=True)
+            raise typer.Exit(1)
+        available_external_sources = ",".join(preflight["available_external_sources"])
+        max_pages, max_records = 4, 300
+        discovery_sources = "hackernews,devto,stackexchange,rss,news"
+        discovery_max_pages, discovery_max_records, max_candidates = 3, 150, 20
     options = dict(mode=mode, groups=[value.strip() for value in groups.split(",")],
                    max_pages=max_pages, max_records=max_records,
                    discovery_sources=[value.strip() for value in discovery_sources.split(",")],
@@ -39,7 +56,9 @@ def main(
         typer.echo("Invalid targets file, targets, mode, groups or budgets. Cutoff requires stored diagnostics.", err=True)
         raise typer.Exit(2) from None
     try:
-        result = CollectionPipeline(StoragePaths(data_dir)).run(targets, **options)
+        result = CollectionPipeline(StoragePaths(data_dir)).run(
+            targets, **options, available_external_sources=None if available_external_sources is None
+            else [name for name in available_external_sources.split(",") if name])
     except (OSError, ValueError, TypeError, CollectionError, StorageError):
         typer.echo("Integration interrupted; inspect its saved manifest and child checkpoints.", err=True)
         raise typer.Exit(1) from None

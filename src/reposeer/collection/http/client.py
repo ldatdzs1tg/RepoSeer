@@ -39,6 +39,7 @@ class HTTPClient:
         sleep: Callable[[float], None] | None = None,
     ):
         self.base_url = base_url
+        self.requests_attempted = 0
         default_headers = httpx.Headers(
             {
                 "User-Agent": "RepoSeer/0.1.0",
@@ -97,6 +98,14 @@ class HTTPClient:
             clock=self._clock,
             sleep=self._sleep,
         )
+
+    def defer_requests(self, url: str, seconds: float) -> None:
+        """Honor a provider's JSON backoff using the shared per-origin limiter."""
+        if type(seconds) not in {int, float} or not math.isfinite(seconds) or seconds < 0:
+            raise ValueError("invalid_provider_backoff")
+        origin = self._origin(httpx.URL(url))
+        tracker = self._rate_limiters.setdefault(origin, self._new_rate_limiter())
+        tracker.retry_after_epoch = max(tracker.retry_after_epoch or 0.0, self._clock() + seconds)
 
     def close(self) -> None:
         """Close underlying HTTP sessions."""
@@ -162,6 +171,7 @@ class HTTPClient:
         @retry_dec
         def _request() -> httpx.Response:
             rate_limiter.check_and_wait_if_needed()
+            self.requests_attempted += 1
             response = self._sync_client.send(
                 request,
                 follow_redirects=(
@@ -235,9 +245,13 @@ class HTTPClient:
         headers: dict[str, str] | None = None,
         *,
         use_cache: bool = True,
+        follow_redirects: bool | None = None,
     ) -> Any:
         """Convenience method returning parsed JSON."""
-        response = self.get(url, params=params, headers=headers, use_cache=use_cache)
+        response = self.get(url, params=params, headers=headers, use_cache=use_cache,
+                            follow_redirects=follow_redirects)
+        if response.is_redirect:
+            raise HTTPClientError("Unexpected API redirect", status_code=response.status_code)
         try:
             return response.json()
         except ValueError as e:

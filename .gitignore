@@ -58,7 +58,9 @@ data/**
 # Preserve directory placeholders
 !data/**/
 !data/**/.gitkeep
-
+README_C1-C7.md
+README_D1.md
+README_D2.md
 # Reference & temporary
 reference-markdown/
 *.tmp

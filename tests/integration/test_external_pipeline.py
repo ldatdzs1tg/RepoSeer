@@ -783,8 +783,10 @@ def test_provider_api_keys_from_settings(tmp_path, monkeypatch, provider_name, s
     monkeypatch.setattr(settings, setting_name, api_key)
 
     def handler(request):
-        transmitted = request.headers.get("api-key") if provider_name == "devto" else request.url.params.get("key")
-        assert transmitted == (api_key or None)
+        transmitted = request.headers.get("api-key") if provider_name == "devto" else request.headers.get("Authorization")
+        expected = (api_key or None) if provider_name == "devto" else f"Bearer {api_key}" if api_key else None
+        assert transmitted == expected
+        assert "key" not in request.url.params
         payload = [] if provider_name == "devto" else {"items": [], "has_more": False}
         return httpx.Response(200, json=payload)
 
