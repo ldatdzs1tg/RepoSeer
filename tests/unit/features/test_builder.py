@@ -5,18 +5,14 @@ import json
 from pathlib import Path
 
 import polars as pl
-import pytest
 
 from reposeer.contracts.models import (
     Coverage,
-    DataError,
     PackageRelease,
-    PackageSnapshot,
     Provenance,
     RepoIdentity,
     RepositoryActivity,
     SnapshotBuildRequest,
-    SnapshotBuildResult,
     TimeRange,
 )
 from reposeer.contracts.validation import validate_snapshot_pair
@@ -148,11 +144,9 @@ class TestFeatureBuilderGoldenFixture:
 
     def test_golden_fixture_build_snapshot(self) -> None:
         req_path = ROOT / "examples/contracts/snapshot_build_request.json"
-        res_path = ROOT / "examples/contracts/snapshot_build_result.json"
         snap_path = ROOT / "examples/contracts/package_snapshot.json"
 
         request = SnapshotBuildRequest.model_validate_json(req_path.read_text(encoding="utf-8"))
-        expected_result = json.loads(res_path.read_text(encoding="utf-8"))
         expected_snapshot = json.loads(snap_path.read_text(encoding="utf-8"))
 
         builder = FeatureBuilder()

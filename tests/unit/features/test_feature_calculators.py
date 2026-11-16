@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import pytest
 
-from reposeer.contracts.identity import add_calendar_months
 from reposeer.contracts.models import (
     Coverage,
     PackageRelease,
@@ -21,7 +20,6 @@ from reposeer.features.activity import ActivityFeatures
 from reposeer.features.package import PackageFeatures
 from reposeer.features.repository import (
     FORBIDDEN_COUNTER_FIELDS,
-    RepositoryFeatures,
     assert_no_counter_leakage,
     compute_horizon_end_at,
     compute_lookback_boundaries,

@@ -1,8 +1,9 @@
 """Package feature calculator enforcing temporal validity, boundary rules, and coverage."""
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Mapping, NamedTuple, Sequence
+from typing import NamedTuple
 
 from reposeer.contracts.models import (
     Coverage,

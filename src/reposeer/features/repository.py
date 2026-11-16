@@ -1,7 +1,7 @@
 """Repository feature extraction, temporal window boundaries, and coverage gating."""
 from __future__ import annotations
 
-from typing import Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 from reposeer.contracts.identity import add_calendar_months
 from reposeer.contracts.models import (
@@ -9,7 +9,6 @@ from reposeer.contracts.models import (
     DataGroup,
     MissingReason,
     RepoId,
-    RepoIdentity,
     UtcTimestamp,
     unique,
 )

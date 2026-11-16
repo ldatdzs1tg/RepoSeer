@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Mapping, Sequence
 from uuid import uuid4
 
 import polars as pl
@@ -13,7 +13,6 @@ from reposeer.contracts.identity import add_calendar_months
 from reposeer.contracts.models import (
     Coverage,
     DataError,
-    DataGroup,
     PackageId,
     PackageRelease,
     PackageSnapshot,

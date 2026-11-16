@@ -1,12 +1,10 @@
 """Integration tests for FeatureService, FeaturesPipeline, and build-features CLI (T-022)."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from uuid import uuid4
 
 import polars as pl
-import pytest
 from typer.testing import CliRunner
 
 from reposeer.cli.app import app
@@ -350,28 +348,26 @@ class TestFeaturePipelineEndToEnd:
         pipeline = FeaturesPipeline(paths=paths)
 
         # Evaluate target by target with their respective official events
-        targets = [(pkg, rep, cutoff) for pkg, rep in targets_info]
-
-        summary_pos = pipeline.run(
+        pipeline.run(
             targets=[(targets_info[0][0], targets_info[0][1], cutoff)],
             evaluate_labels=True,
             official_events=[ev_pos],
             observation_end_at=obs_end,
             persist=True,
         )
-        summary_neg = pipeline.run(
+        pipeline.run(
             targets=[(targets_info[1][0], targets_info[1][1], cutoff)],
             evaluate_labels=True,
             observation_end_at=obs_end,
             persist=True,
         )
-        summary_unk = pipeline.run(
+        pipeline.run(
             targets=[(targets_info[2][0], targets_info[2][1], cutoff)],
             evaluate_labels=True,
             observation_end_at=obs_end,
             persist=True,
         )
-        summary_exc = pipeline.run(
+        pipeline.run(
             targets=[(targets_info[3][0], targets_info[3][1], cutoff)],
             evaluate_labels=True,
             official_events=[ev_exc],

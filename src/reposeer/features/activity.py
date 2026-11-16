@@ -1,7 +1,8 @@
 """Activity feature calculator for repository events across temporal windows."""
 from __future__ import annotations
 
-from typing import Mapping, NamedTuple, Sequence
+from collections.abc import Mapping, Sequence
+from typing import NamedTuple
 
 from reposeer.contracts.models import (
     Coverage,
