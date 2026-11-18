@@ -13,6 +13,7 @@ from reposeer.contracts.identity import add_calendar_months
 from reposeer.contracts.models import (
     Coverage,
     DataError,
+    DataGroup,
     PackageId,
     PackageRelease,
     PackageSnapshot,
@@ -22,7 +23,6 @@ from reposeer.contracts.models import (
     RepositoryActivity,
     SnapshotBuildRequest,
     SnapshotBuildResult,
-    TimeRange,
     UtcTimestamp,
 )
 from reposeer.contracts.validation import validate_snapshot_pair
@@ -33,6 +33,13 @@ from reposeer.storage.features.parquet import FeatureStorage
 from reposeer.storage.paths import StoragePaths
 from reposeer.storage.processed.parquet import ParquetStorage
 from reposeer.storage.query.duckdb import DuckDBQueryEngine
+
+_ACTIVITY_KINDS = {
+    "commits": ("commit",),
+    "contributors": ("commit",),
+    "issues": ("issue_opened", "issue_closed", "issue_reopened"),
+    "pull_requests": ("pr_opened", "pr_closed", "pr_reopened", "pr_merged"),
+}
 
 
 def _make_error(message: str) -> DataError:
@@ -170,13 +177,11 @@ class FeatureService:
 
         # Read activity dataset
         activities_df = self._read_processed("github_activity")
-        has_activity_table = not activities_df.is_empty()
 
         # Read releases dataset
         releases_df = self._read_processed("package_releases")
         if releases_df.is_empty():
             releases_df = self._read_processed("releases")
-        has_releases_table = not releases_df.is_empty()
 
         results: list[SnapshotBuildResult] = []
         snapshots_to_persist: list[PackageSnapshot] = []
@@ -209,16 +214,25 @@ class FeatureService:
             )
             assert_no_counter_leakage(repo_identity.model_dump())
 
-            # Strict point-in-time filtering on activities
+            # Counts and exclusions belong to this target, not the whole storage root.
+            raw_group_counts = dict.fromkeys(("releases", *_ACTIVITY_KINDS), 0)
+            excluded_events = {group: [] for group in raw_group_counts}
             acts_for_target: list[RepositoryActivity] = []
-            if has_activity_table:
-                matching_acts = activities_df.filter(
-                    (pl.col("repo_id") == rep_id)
-                    & (pl.col("event_at") <= cutoff)
+            if not activities_df.is_empty():
+                target_acts = activities_df.filter(pl.col("repo_id") == rep_id)
+                eligible = (
+                    (pl.col("event_at") <= cutoff)
                     & (pl.col("valid_at") <= cutoff)
                     & pl.col("available_at").is_not_null()
                     & (pl.col("available_at") <= cutoff)
-                )
+                ).fill_null(False)
+                matching_acts = target_acts.filter(eligible)
+                excluded = target_acts.filter((pl.col("event_at") <= cutoff) & ~eligible)
+                for group, kinds in _ACTIVITY_KINDS.items():
+                    raw_group_counts[group] = target_acts.filter(pl.col("activity_kind").is_in(kinds)).height
+                    excluded_events[group] = excluded.filter(
+                        pl.col("activity_kind").is_in(kinds)
+                    ).get_column("event_at").to_list()
 
                 # Group by activity_id to deduplicate and collect raw_record_ids
                 grouped_acts: dict[str, list[dict]] = {}
@@ -279,22 +293,33 @@ class FeatureService:
             rels_for_target: list[PackageRelease] = []
             if releases_override is not None:
                 for rel in releases_override:
+                    if rel.package_id != pkg_id or rel.repo_id not in (None, rep_id):
+                        continue
+                    raw_group_counts["releases"] += 1
                     if (
-                        rel.package_id == pkg_id
-                        and rel.uploaded_at <= cutoff
+                        rel.uploaded_at <= cutoff
                         and rel.provenance.valid_at <= cutoff
                         and rel.provenance.available_at is not None
                         and rel.provenance.available_at <= cutoff
                     ):
                         rels_for_target.append(rel)
-            elif has_releases_table:
-                matching_rels = releases_df.filter(
-                    (pl.col("package_id") == pkg_id)
-                    & (pl.col("uploaded_at") <= cutoff)
+                    elif rel.uploaded_at <= cutoff:
+                        excluded_events["releases"].append(rel.uploaded_at)
+            elif not releases_df.is_empty():
+                target_rels = releases_df.filter(pl.col("package_id") == pkg_id)
+                if "repo_id" in target_rels.columns:
+                    target_rels = target_rels.filter(pl.col("repo_id").is_null() | (pl.col("repo_id") == rep_id))
+                raw_group_counts["releases"] = target_rels.height
+                eligible = (
+                    (pl.col("uploaded_at") <= cutoff)
                     & (pl.col("valid_at") <= cutoff)
                     & pl.col("available_at").is_not_null()
                     & (pl.col("available_at") <= cutoff)
-                )
+                ).fill_null(False)
+                matching_rels = target_rels.filter(eligible)
+                excluded_events["releases"] = target_rels.filter(
+                    (pl.col("uploaded_at") <= cutoff) & ~eligible
+                ).get_column("uploaded_at").to_list()
                 for r_row in matching_rels.iter_rows(named=True):
                     up_at = r_row["uploaded_at"]
                     v_at = r_row["valid_at"]
@@ -342,16 +367,29 @@ class FeatureService:
                         matched_coverage = list(coverage_overrides[k])
                         break
 
+            defaults = self._derive_default_coverage(
+                releases=rels_for_target, activities=acts_for_target, raw_group_counts=raw_group_counts,
+            )
+            coverage = defaults if matched_coverage is None else matched_coverage
             if matched_coverage is not None:
-                coverage = matched_coverage
-            else:
-                coverage = self._derive_default_coverage(
-                    cutoff_at=cutoff,
-                    releases=rels_for_target,
-                    activities=acts_for_target,
-                    has_releases_data=(has_releases_table or releases_override is not None),
-                    has_activity_data=has_activity_table,
-                )
+                fallback = {cov.data_group: cov for cov in defaults}
+                coverage = []
+                for cov in matched_coverage:
+                    window = cov.time_range
+                    excluded = any(
+                        window is None or window.start_at <= event_at <= window.end_at
+                        for event_at in excluded_events.get(cov.data_group, [])
+                    )
+                    short_window = window is None or window.end_at != cutoff or (
+                        cov.data_group in _ACTIVITY_KINDS
+                        and window.start_at > add_calendar_months(cutoff, -12)
+                    )
+                    # External census evidence cannot erase known temporal gaps or prove a shorter window.
+                    if cov.status == "complete" and cov.data_group in fallback and (excluded or short_window):
+                        cov = fallback[cov.data_group].model_copy(update={
+                            "missing_reason": "historical_unavailable" if excluded else "ambiguous",
+                        })
+                    coverage.append(cov)
 
             req = SnapshotBuildRequest(
                 schema_version="0.1.0",
@@ -381,174 +419,19 @@ class FeatureService:
     @staticmethod
     def _derive_default_coverage(
         *,
-        cutoff_at: UtcTimestamp,
         releases: list[PackageRelease],
         activities: list[RepositoryActivity],
-        has_releases_data: bool,
-        has_activity_data: bool,
+        raw_group_counts: Mapping[DataGroup, int],
     ) -> list[Coverage]:
-        """Construct canonical Coverage entries for core data groups."""
-        covs: list[Coverage] = []
-        default_start = add_calendar_months(cutoff_at, -12)
-
-        # 1. Releases
-        if releases:
-            earliest = min(r.uploaded_at for r in releases)
-            start_at = earliest if earliest < cutoff_at else default_start
-            covs.append(
-                Coverage(
-                    data_group="releases",
-                    status="complete",
-                    time_range=TimeRange(start_at=start_at, end_at=cutoff_at),
-                    records_observed=len(releases),
-                    missing_reason=None,
-                )
-            )
-        else:
-            covs.append(
-                Coverage(
-                    data_group="releases",
-                    status="unavailable",
-                    time_range=None,
-                    records_observed=0,
-                    missing_reason="not_collected" if not has_releases_data else "unavailable",
-                )
-            )
-
-        # 2. Commits & Contributors
-        commits = [a for a in activities if a.activity_kind == "commit"]
-        if commits:
-            earliest = min(c.event_at for c in commits)
-            start_at = earliest if earliest < cutoff_at else default_start
-            covs.append(
-                Coverage(
-                    data_group="commits",
-                    status="complete",
-                    time_range=TimeRange(start_at=start_at, end_at=cutoff_at),
-                    records_observed=len(commits),
-                    missing_reason=None,
-                )
-            )
-            covs.append(
-                Coverage(
-                    data_group="contributors",
-                    status="complete",
-                    time_range=TimeRange(start_at=start_at, end_at=cutoff_at),
-                    records_observed=len({c.actor_id for c in commits if c.actor_id}),
-                    missing_reason=None,
-                )
-            )
-        elif has_activity_data:
-            covs.append(
-                Coverage(
-                    data_group="commits",
-                    status="complete",
-                    time_range=TimeRange(start_at=default_start, end_at=cutoff_at),
-                    records_observed=0,
-                    missing_reason=None,
-                )
-            )
-            covs.append(
-                Coverage(
-                    data_group="contributors",
-                    status="complete",
-                    time_range=TimeRange(start_at=default_start, end_at=cutoff_at),
-                    records_observed=0,
-                    missing_reason=None,
-                )
-            )
-        else:
-            covs.append(
-                Coverage(
-                    data_group="commits",
-                    status="unavailable",
-                    time_range=None,
-                    records_observed=0,
-                    missing_reason="not_collected",
-                )
-            )
-            covs.append(
-                Coverage(
-                    data_group="contributors",
-                    status="unavailable",
-                    time_range=None,
-                    records_observed=0,
-                    missing_reason="not_collected",
-                )
-            )
-
-        # 3. Issues
-        issues = [
-            a for a in activities if a.activity_kind in ("issue_opened", "issue_closed", "issue_reopened")
-        ]
-        if issues:
-            earliest = min(i.event_at for i in issues)
-            start_at = earliest if earliest < cutoff_at else default_start
-            covs.append(
-                Coverage(
-                    data_group="issues",
-                    status="complete",
-                    time_range=TimeRange(start_at=start_at, end_at=cutoff_at),
-                    records_observed=len(issues),
-                    missing_reason=None,
-                )
-            )
-        elif has_activity_data:
-            covs.append(
-                Coverage(
-                    data_group="issues",
-                    status="complete",
-                    time_range=TimeRange(start_at=default_start, end_at=cutoff_at),
-                    records_observed=0,
-                    missing_reason=None,
-                )
-            )
-        else:
-            covs.append(
-                Coverage(
-                    data_group="issues",
-                    status="unavailable",
-                    time_range=None,
-                    records_observed=0,
-                    missing_reason="not_collected",
-                )
-            )
-
-        # 4. Pull Requests
-        prs = [
-            a for a in activities if a.activity_kind in ("pr_opened", "pr_closed", "pr_reopened", "pr_merged")
-        ]
-        if prs:
-            earliest = min(p.event_at for p in prs)
-            start_at = earliest if earliest < cutoff_at else default_start
-            covs.append(
-                Coverage(
-                    data_group="pull_requests",
-                    status="complete",
-                    time_range=TimeRange(start_at=start_at, end_at=cutoff_at),
-                    records_observed=len(prs),
-                    missing_reason=None,
-                )
-            )
-        elif has_activity_data:
-            covs.append(
-                Coverage(
-                    data_group="pull_requests",
-                    status="complete",
-                    time_range=TimeRange(start_at=default_start, end_at=cutoff_at),
-                    records_observed=0,
-                    missing_reason=None,
-                )
-            )
-        else:
-            covs.append(
-                Coverage(
-                    data_group="pull_requests",
-                    status="unavailable",
-                    time_range=None,
-                    records_observed=0,
-                    missing_reason="not_collected",
-                )
-            )
-
-        return covs
+        """Eligible observations establish presence, never a complete source census."""
+        counts = {"releases": len(releases)}
+        counts.update({group: sum(act.activity_kind in kinds for act in activities)
+                       for group, kinds in _ACTIVITY_KINDS.items()})
+        return [Coverage(
+            data_group=group,
+            status="partial" if count else "unavailable",
+            time_range=None,
+            records_observed=count,
+            missing_reason=("unavailable" if count else
+                            "historical_unavailable" if raw_group_counts[group] else "not_collected"),
+        ) for group, count in counts.items()]

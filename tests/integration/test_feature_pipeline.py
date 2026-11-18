@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import polars as pl
+import pytest
 from typer.testing import CliRunner
 
 from reposeer.cli.app import app
@@ -12,6 +13,7 @@ from reposeer.contracts.analysis import OfficialStatus
 from reposeer.contracts.models import Coverage, TimeRange
 from reposeer.features.builder import FeatureBuilder
 from reposeer.pipelines.features import FeaturesPipeline
+from reposeer.services.feature_service import FeatureService
 from reposeer.storage.features.parquet import FeatureStorage
 from reposeer.storage.paths import StoragePaths
 from reposeer.storage.processed.dataset_writer import DATASET_SCHEMAS
@@ -111,6 +113,14 @@ def _make_release_row(
     }
 
 
+def _trusted_coverage(cutoff: str, **counts: int) -> list[Coverage]:
+    """Explicit synthetic census evidence, independent of the presence of stored rows."""
+    return [Coverage(data_group=group, status="complete",
+        time_range=TimeRange(start_at="2023-01-01T00:00:00.000Z", end_at=cutoff),
+        records_observed=counts.get(group, 0), missing_reason=None)
+        for group in ("releases", "commits", "contributors", "issues", "pull_requests")]
+
+
 class TestFeaturePipelineEndToEnd:
     """End-to-end integration tests for T-022."""
 
@@ -161,6 +171,10 @@ class TestFeaturePipelineEndToEnd:
         pipeline = FeaturesPipeline(paths=paths)
         summary = pipeline.run(
             targets=[(pkg_id, repo_id, cutoffs[0]), (pkg_id, repo_id, cutoffs[1])],
+            coverage_overrides={
+                f"{pkg_id}:{cutoffs[0]}": _trusted_coverage(cutoffs[0], releases=1, commits=2, contributors=1, issues=1),
+                f"{pkg_id}:{cutoffs[1]}": _trusted_coverage(cutoffs[1], releases=2, commits=3, contributors=1, issues=1, pull_requests=2),
+            },
             persist=True,
         )
 
@@ -489,3 +503,102 @@ class TestFeaturePipelineEndToEnd:
         assert res_processed.exit_code == 0
         assert "Snapshots built: 1 total" in res_processed.stdout
         assert paths.features_path("repository_package_snapshots").is_file()
+
+
+
+ACTIVITY_FEATURES = (
+    "commit_count_3m", "commit_count_6m", "commit_count_12m", "contributor_count_12m",
+    "issue_opened_count_12m", "issue_closed_count_12m", "pr_opened_count_12m", "pr_merged_count_12m",
+)
+
+
+def _seed_feature_inputs(tmp_path, activities, releases=()):
+    paths = StoragePaths(tmp_path)
+    storage = ParquetStorage()
+    storage.write(paths.processed_path("repositories"),
+        pl.DataFrame([_make_repo_row()], schema=DATASET_SCHEMAS["repositories"]))
+    storage.write(paths.processed_path("github_activity"),
+        pl.DataFrame(activities, schema=DATASET_SCHEMAS["github_activity"]))
+    if releases:
+        storage.write(paths.processed_path("package_releases"), pl.DataFrame(releases))
+    return FeatureService(paths=paths)
+
+
+@pytest.mark.parametrize("temporal_gap", ["unknown_availability", "late_availability", "late_validity"])
+def test_processed_temporal_gaps_never_become_zero_activity(tmp_path, temporal_gap):
+    repo_id = "github:repository:900000001"
+    cutoff = "2024-03-31T23:59:59.999Z"
+    kinds = ("commit", "issue_opened", "pr_opened")
+    rows = [_make_activity_row(repo_id, f"github:activity:900000001:{kinds[index % 3]}:{index}", kinds[index % 3],
+        "2024-01-10T00:00:00.000Z", str(index)) for index in range(42)]
+    for row in rows:
+        if temporal_gap == "unknown_availability":
+            row["available_at"] = None
+        elif temporal_gap == "late_availability":
+            row["available_at"] = "2024-04-01T00:00:00.000Z"
+        else:
+            row["valid_at"] = "2024-04-01T00:00:00.000Z"
+    service = _seed_feature_inputs(tmp_path, rows)
+    for overrides in (None, {"default": _trusted_coverage(cutoff)}):
+        result = service.build_from_processed(targets=[("pypi:demo-pkg", repo_id, cutoff)],
+            coverage_overrides=overrides, persist=False)[0]
+        assert result.status == "partial"
+        snapshot = result.snapshot
+        coverage = {c.data_group: c for c in snapshot.coverage}
+        for group in ("commits", "contributors", "issues", "pull_requests"):
+            assert coverage[group].status == "unavailable"
+            assert coverage[group].missing_reason == "historical_unavailable"
+            assert coverage[group].records_observed == 0 and coverage[group].time_range is None
+        values = snapshot.features.model_dump()
+        assert all(values[name] is None for name in ACTIVITY_FEATURES)
+        missing = {m.field_path: m for m in snapshot.missing_fields}
+        assert all(missing[f"features.{name}"].reason == "historical_unavailable" for name in ACTIVITY_FEATURES)
+
+
+def test_processed_other_target_rows_do_not_establish_coverage(tmp_path):
+    repo_a, repo_b = "github:repository:900000001", "github:repository:900000002"
+    cutoff = "2024-03-31T23:59:59.999Z"
+    service = _seed_feature_inputs(tmp_path,
+        [_make_activity_row(repo_b, "github:activity:900000002:commit:foreign", "commit", "2024-01-10T00:00:00.000Z", "foreign")],
+        [_make_release_row("pypi:other", repo_a, "1.0.0", "2024-01-01T00:00:00.000Z"),
+         _make_release_row("pypi:demo-pkg", repo_b, "1.0.0", "2024-01-01T00:00:00.000Z")])
+    result = service.build_from_processed(targets=[("pypi:demo-pkg", repo_a, cutoff)], persist=False)[0]
+    assert result.status == "partial"
+    assert all(c.status == "unavailable" and c.records_observed == 0
+               and c.missing_reason == "not_collected" for c in result.snapshot.coverage)
+    assert all(value is None for value in result.snapshot.features.model_dump().values())
+
+
+def test_eligible_processed_rows_are_partial_without_trusted_census(tmp_path):
+    repo_id = "github:repository:900000001"
+    cutoff = "2024-03-31T23:59:59.999Z"
+    rows = [_make_activity_row(repo_id, f"github:activity:900000001:{kind}:one", kind,
+        "2024-01-10T00:00:00.000Z", kind) for kind in ("commit", "issue_opened", "pr_opened")]
+    service = _seed_feature_inputs(tmp_path, rows,
+        [_make_release_row("pypi:demo-pkg", repo_id, "1.0.0", "2024-01-01T00:00:00.000Z")])
+    result = service.build_from_processed(targets=[("pypi:demo-pkg", repo_id, cutoff)], persist=False)[0]
+    assert result.status == "partial"
+    assert all(c.status == "partial" and c.records_observed == 1 and c.time_range is None
+               and c.missing_reason is not None for c in result.snapshot.coverage)
+    assert all(value is None for value in result.snapshot.features.model_dump().values())
+    # An external assertion about an incomplete window cannot certify annual features.
+    coverage = _trusted_coverage(cutoff)
+    for cov in coverage:
+        cov.time_range = TimeRange(start_at="2024-01-01T00:00:00.000Z", end_at=cutoff)
+    short = service.build_from_processed(targets=[("pypi:demo-pkg", repo_id, cutoff)],
+        coverage_overrides={"default": coverage}, persist=False)[0]
+    assert all(getattr(short.snapshot.features, name) is None for name in ACTIVITY_FEATURES)
+
+
+def test_temporally_unknown_release_cannot_be_overridden_as_complete(tmp_path):
+    repo_id = "github:repository:900000001"
+    cutoff = "2024-03-31T23:59:59.999Z"
+    release = _make_release_row("pypi:demo-pkg", repo_id, "1.0.0", "2024-01-01T00:00:00.000Z")
+    release["available_at"] = None
+    service = _seed_feature_inputs(tmp_path, [], [release])
+    result = service.build_from_processed(targets=[("pypi:demo-pkg", repo_id, cutoff)],
+        coverage_overrides={"default": _trusted_coverage(cutoff)}, persist=False)[0]
+    coverage = next(c for c in result.snapshot.coverage if c.data_group == "releases")
+    assert coverage.status == "unavailable" and coverage.missing_reason == "historical_unavailable"
+    assert result.snapshot.features.releases_total is None
+    assert result.snapshot.features.commit_count_12m == 0  # Independently complete and empty.
