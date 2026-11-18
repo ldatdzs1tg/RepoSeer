@@ -151,6 +151,47 @@ are capped at 20 items per response category with recorded truncation. Per-agent
 call counts and unprocessed candidate assignments remain visible. Task completion never
 claims a complete source census, historical coverage or E2 eligibility.
 
+## Prompt design v0.2.0
+
+[`prompts.py`](prompts.py) combines common evidence-analysis, temporal, authority and
+injection-resistance instructions with one of the three specialist rubrics and a
+separate research or strict-extraction task. The bounded reviewer gets common/review
+instructions only, without a fourth specialist role. Both live transports use the
+same pure builder; package/source JSON stays in the user message.
+
+Observations are stated from supplied text; interpretations explain their limited
+meaning; hypotheses retain uncertainty rather than becoming independently verified
+facts. Research should recover useful grounded leads despite missing relevance or
+dates. When source text cannot support an insight, abstain from that insight and
+identify the precise gap, why it matters, and a focused D03/D04/D05 enrichment action.
+Strict instructions cover the allowed signal types, exact quotes, null unknown dates,
+and provisional use without bypassing D06 gates. They do not replace code validation.
+
+`prompt_version="0.2.0"` identifies the runtime instruction revision. Contract and replay
+schemas stay `0.1.0`. Replay keeps stored content and does not regenerate responses or
+prove they were produced by v2. Fake-client/replay tests check composition, schema,
+grounding and promotion behavior, **not live model quality or improvement over v1**.
+
+For real-document evaluation, pin model/provider/configuration and the same source
+revisions/cutoff for both prompt versions. Manually review quote support, relationship
+scope, unsupported claims, missing-information specificity and enrichment usefulness.
+Use a small explicit API budget; do not run this evaluation automatically in CI.
+
+| Specialist | Case | Expected review criterion |
+| --- | --- | --- |
+| Maintenance | Few releases but ongoing issue support | No automatic abandonment conclusion |
+| Maintenance | Maintainer lacks time | Supported maintenance-capacity concern |
+| Maintenance | Scheduled support ending | Separate announcement and effective dates |
+| Maintenance | Contradictory sources | Retain uncertainty and request resolving evidence |
+| Functional | Same-function discussion | Do not infer package adoption |
+| Functional | Official feature documentation | Source-grounded capability insight |
+| Functional | Historical capability unclear | Request version/availability evidence |
+| Functional | Broad technology popularity | Do not assign package demand |
+| Alternatives | User recommendation | Do not claim completed migration |
+| Alternatives | Explicit migration account | Identify the reported source-to-destination move |
+| Alternatives | Similar function, unknown API | Retain compatibility gap |
+| Alternatives | Unverified replacement report | Do not assign official status |
+
 ## T-027 handoff
 
 Import `MultiAgentRunRequest`, `MultiAgentCoordinator`, `MultiAgentRunResult` from
