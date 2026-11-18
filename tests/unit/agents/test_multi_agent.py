@@ -21,12 +21,15 @@ from reposeer.agents.orchestrator import (
     MultiAgentRunResult,
 )
 from reposeer.agents.provider import (
+    AgentLLMSettings,
     OpenAISpecialistLLM,
+    OpenRouterSpecialistLLM,
     ProviderError,
     ReplayBundle,
     ReplaySpecialistLLM,
     ResearchDraft,
     ReviewDraft,
+    create_specialist_llm,
 )
 from reposeer.collectors.external.crawler.validation import validate_external_document_record
 from reposeer.contracts.identity import text_sha256
@@ -43,6 +46,20 @@ EXAMPLES = ROOT / 'examples/agents'
 CUTOFF = '2026-10-01T00:00:00.000Z'
 NOW = datetime(2026, 10, 1, 0, 10, tzinfo=UTC)
 RUN_ID = '00000000-0000-4000-8000-000000000026'
+
+
+@pytest.fixture
+def isolated_live_config(tmp_path, monkeypatch):
+    """Never load the developer's .env or use real credentials in live-adapter tests."""
+    monkeypatch.chdir(tmp_path)
+    for name in (
+        'REPOSEER_AGENT_PROVIDER', 'REPOSEER_AGENT_MODEL', 'OPENROUTER_API_KEY',
+        'OPENAI_API_KEY', 'OPENROUTER_BASE_URL', 'OPENROUTER_HTTP_REFERER',
+        'OPENROUTER_APP_TITLE', 'REPOSEER_AGENT_TIMEOUT_SECONDS',
+        'REPOSEER_AGENT_MAX_OUTPUT_TOKENS',
+    ):
+        monkeypatch.delenv(name, raising=False)
+    return tmp_path
 
 
 def example(name):
@@ -483,7 +500,7 @@ def test_live_adapter_uses_content_only_schemas_bounded_sdk_and_safe_errors(monk
     assert captured['provided_options'] == {'timeout': 9, 'max_retries': 0}
 
 
-def test_missing_live_configuration_fails_clearly_without_output(tmp_path, monkeypatch, capsys):
+def test_missing_live_configuration_fails_clearly_without_output(tmp_path, monkeypatch, capsys, isolated_live_config):
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     monkeypatch.delenv('REPOSEER_AGENT_MODEL', raising=False)
     args = ['--mode', 'live', '--input', str(EXAMPLES / 'multi_agent_demo.json'),
@@ -491,14 +508,15 @@ def test_missing_live_configuration_fails_clearly_without_output(tmp_path, monke
     assert main(args) == 2
     assert 'missing_agent_model_configuration' in capsys.readouterr().out
     assert main([*args, '--model', 'explicit-test-model']) == 2
-    assert 'missing_openai_api_key' in capsys.readouterr().out
+    assert 'missing_openrouter_api_key' in capsys.readouterr().out
     assert not (tmp_path / 'live.json').exists()
 
 
-def test_cli_replay_is_offline_and_refuses_overwrite(tmp_path, monkeypatch):
+def test_cli_replay_is_offline_and_refuses_overwrite(tmp_path, monkeypatch, isolated_live_config):
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     monkeypatch.delenv('REPOSEER_AGENT_MODEL', raising=False)
     monkeypatch.setitem(sys.modules, 'openai', None)
+    (tmp_path / '.env').write_text('REPOSEER_AGENT_PROVIDER=invalid\nREPOSEER_AGENT_TIMEOUT_SECONDS=bad\n')
     output = tmp_path / 'run.json'
     args = ['--mode', 'replay', '--input', str(EXAMPLES / 'multi_agent_demo.json'),
             '--responses', str(EXAMPLES / 'multi_agent_replay.json'), '--output', str(output)]
@@ -526,3 +544,94 @@ def test_cli_can_read_canonical_raw_documents_and_preserve_dataset(tmp_path):
     assert len(result.research_grounding) == 3 and len(result.research_insights) == 1
     assert result.coverage_summary.intake.accepted_candidates == 1
     assert raw.read_bytes() == before
+
+
+
+def test_openrouter_dotenv_wires_url_headers_budgets_and_structured_outputs(
+    tmp_path, monkeypatch, isolated_live_config,
+):
+    (tmp_path / '.env').write_text(
+        'GITHUB_TOKEN=unrelated-setting\n'
+        'REPOSEER_AGENT_PROVIDER=openrouter\n'
+        'REPOSEER_AGENT_MODEL=vendor/dotenv-model\n'
+        'OPENROUTER_API_KEY=or-fake-secret\n'
+        'OPENROUTER_BASE_URL=https://openrouter.ai/api/v1\n'
+        'OPENROUTER_HTTP_REFERER=https://example.test/reposeer\n'
+        'OPENROUTER_APP_TITLE=RepoSeer Tests\n'
+        'REPOSEER_AGENT_TIMEOUT_SECONDS=35\n'
+        'REPOSEER_AGENT_MAX_OUTPUT_TOKENS=4096\n', encoding='utf-8',
+    )
+    monkeypatch.setenv('REPOSEER_AGENT_MODEL', 'vendor/environment-model')
+    captured = {'calls': []}
+    stored = {entry['agent_kind']: entry['output'] for entry in example('multi_agent_replay')['research']}
+    def parse(**kwargs):
+        captured['calls'].append(kwargs)
+        child = json.loads(kwargs['input'][1]['content'])
+        return SimpleNamespace(status='completed', output=[],
+            output_parsed=ResearchDraft.model_validate(stored[child['agent_kind']]))
+    def create(**kwargs):
+        captured['client'] = kwargs
+        return SimpleNamespace(responses=SimpleNamespace(parse=parse), close=lambda: None)
+    monkeypatch.setitem(sys.modules, 'openai', SimpleNamespace(OpenAI=create))
+    settings = AgentLLMSettings()
+    assert settings.model == 'vendor/environment-model'  # Environment wins over .env.
+    assert 'or-fake-secret' not in repr(settings)
+    provider = create_specialist_llm(model='vendor/cli-model', settings=settings)
+    assert isinstance(provider, OpenRouterSpecialistLLM)
+    assert provider.model_id == 'vendor/cli-model'
+    assert captured['client'] == dict(
+        api_key='or-fake-secret', timeout=35, max_retries=0,
+        base_url='https://openrouter.ai/api/v1',
+        default_headers={'HTTP-Referer': 'https://example.test/reposeer',
+                         'X-OpenRouter-Title': 'RepoSeer Tests'},
+    )
+    assert provider.research(demo().research_requests[0]).insights
+    call = captured['calls'][0]
+    assert call['model'] == 'vendor/cli-model'
+    assert call['max_output_tokens'] == 4096 and call['timeout'] == 35
+    assert call['store'] is False and call['text_format'] is ResearchDraft
+    assert call['extra_body'] == {'provider': {'require_parameters': True}}
+    provider.close()
+    output = tmp_path / 'openrouter-fake-run.json'
+    assert main(['--mode', 'live', '--input', str(EXAMPLES / 'multi_agent_demo.json'),
+                 '--model', 'vendor/cli-model', '--output', str(output)]) == 0
+    result = MultiAgentRunResult.model_validate_json(output.read_bytes())
+    assert result.overall_status == 'complete' and result.provider_calls == 3
+    assert result.model_version == 'vendor/cli-model'
+    assert 'or-fake-secret' not in output.read_text(encoding='utf-8')
+
+
+def test_dotenv_can_select_direct_openai_without_openrouter_credentials(
+    tmp_path, monkeypatch, isolated_live_config,
+):
+    (tmp_path / '.env').write_text(
+        'REPOSEER_AGENT_PROVIDER=openai\nREPOSEER_AGENT_MODEL=explicit-openai-model\n'
+        'OPENAI_API_KEY=direct-fake-secret\n', encoding='utf-8',
+    )
+    captured = {}
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(close=lambda: None)
+    monkeypatch.setitem(sys.modules, 'openai', SimpleNamespace(OpenAI=create))
+    provider = create_specialist_llm()
+    assert type(provider) is OpenAISpecialistLLM
+    assert captured['api_key'] == 'direct-fake-secret'
+    assert 'base_url' not in captured and 'default_headers' not in captured
+    provider.close()
+
+
+def test_invalid_live_dotenv_limits_fail_before_client_creation(tmp_path, monkeypatch, isolated_live_config):
+    def fail(**kwargs):
+        pytest.fail('Invalid configuration must not initialize an SDK client')
+    monkeypatch.setitem(sys.modules, 'openai', SimpleNamespace(OpenAI=fail))
+    for name, value in (
+        ('REPOSEER_AGENT_TIMEOUT_SECONDS', 'nan'),
+        ('REPOSEER_AGENT_MAX_OUTPUT_TOKENS', '8001'),
+        ('REPOSEER_AGENT_PROVIDER', 'unsupported'),
+    ):
+        (tmp_path / '.env').write_text(
+            f'REPOSEER_AGENT_MODEL=vendor/test\nOPENROUTER_API_KEY=fake-secret\n{name}={value}\n',
+            encoding='utf-8',
+        )
+        with pytest.raises(ValidationError):
+            create_specialist_llm()

@@ -5,9 +5,17 @@ import math
 import os
 from typing import Annotated, Literal, Protocol
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from reposeer.contracts.models import ContractModel, NonEmpty, UtcTimestamp, UuidText, unique
+from reposeer.contracts.models import (
+    ContractModel,
+    HttpUrl,
+    NonEmpty,
+    UtcTimestamp,
+    UuidText,
+    unique,
+)
 from reposeer.contracts.specialist_agents import (
     AgentRequest,
     AllowedUse,
@@ -110,9 +118,32 @@ class SpecialistLLM(Protocol):
     def review(self, conflict: ReviewInput) -> ReviewDraft: ...
 
 
+class AgentLLMSettings(BaseSettings):
+    """Live-only configuration. Environment overrides .env; keys stay redacted."""
+
+    model_config = SettingsConfigDict(
+        env_file='.env', env_file_encoding='utf-8', extra='ignore',
+        populate_by_name=True, allow_inf_nan=False,
+    )
+    provider: Literal['openrouter', 'openai'] = Field(
+        default='openrouter', validation_alias='REPOSEER_AGENT_PROVIDER')
+    model: str = Field(default='', validation_alias='REPOSEER_AGENT_MODEL')
+    openrouter_api_key: SecretStr = Field(default='', validation_alias='OPENROUTER_API_KEY')
+    openai_api_key: SecretStr = Field(default='', validation_alias='OPENAI_API_KEY')
+    openrouter_base_url: HttpUrl = Field(
+        default='https://openrouter.ai/api/v1', validation_alias='OPENROUTER_BASE_URL')
+    openrouter_http_referer: str = Field(default='', validation_alias='OPENROUTER_HTTP_REFERER')
+    openrouter_app_title: str = Field(default='RepoSeer', validation_alias='OPENROUTER_APP_TITLE')
+    timeout_seconds: float = Field(default=20, gt=0, le=120,
+                                 validation_alias='REPOSEER_AGENT_TIMEOUT_SECONDS')
+    max_output_tokens: int = Field(default=3200, ge=256, le=8000,
+                                   validation_alias='REPOSEER_AGENT_MAX_OUTPUT_TOKENS')
+
+
 class OpenAISpecialistLLM:
     def __init__(self, *, model: str | None = None, api_key: str | None = None,
-                 client=None, timeout: float = 20, max_output_tokens: int = 3200):
+                 client=None, timeout: float = 20, max_output_tokens: int = 3200,
+                 base_url: str | None = None, default_headers: dict[str, str] | None = None):
         model = model or os.getenv('REPOSEER_AGENT_MODEL', '')
         if not model.strip():
             raise ValueError('missing_agent_model_configuration')
@@ -122,6 +153,7 @@ class OpenAISpecialistLLM:
             raise ValueError('output token budget must be between 256 and 8000')
         self.model_id, self.max_output_tokens, self.timeout = model, max_output_tokens, timeout
         self._owns_client = client is None
+        self._extra_body = None
         if client is None:
             key = api_key or os.getenv('OPENAI_API_KEY', '')
             if not key.strip():
@@ -131,12 +163,16 @@ class OpenAISpecialistLLM:
             except ImportError:
                 raise ValueError('optional_functional_sdk_unavailable') from None
             try:
-                client = OpenAI(api_key=key, timeout=timeout, max_retries=0)
+                client = OpenAI(api_key=key, timeout=timeout, max_retries=0,
+                                **({'base_url': base_url} if base_url is not None else {}),
+                                **({'default_headers': default_headers} if default_headers else {}))
             except Exception:
                 raise ValueError('llm_client_initialization_failed') from None
         elif hasattr(client, 'with_options'):
             try:
-                client = client.with_options(timeout=timeout, max_retries=0)
+                client = client.with_options(timeout=timeout, max_retries=0,
+                    **({'base_url': base_url} if base_url is not None else {}),
+                    **({'default_headers': default_headers} if default_headers else {}))
             except Exception:
                 raise ValueError('llm_client_initialization_failed') from None
         self.client = client
@@ -150,6 +186,7 @@ class OpenAISpecialistLLM:
                     {'role': 'system', 'content': COMMON_PROMPT + instruction},
                     {'role': 'user', 'content': json.dumps(data.model_dump(mode='json'))},
                 ],
+                **({'extra_body': self._extra_body} if self._extra_body is not None else {}),
             )
             if any(getattr(content, 'type', None) == 'refusal'
                    for output in getattr(response, 'output', [])
@@ -189,6 +226,48 @@ class OpenAISpecialistLLM:
     def close(self):
         if self._owns_client:
             self.client.close()
+
+
+class OpenRouterSpecialistLLM(OpenAISpecialistLLM):
+    """OpenRouter Responses transport; reuse all prompts, drafts and validators."""
+
+    def __init__(self, *, model: str, api_key: str | None = None, client=None,
+                 base_url: str = 'https://openrouter.ai/api/v1',
+                 http_referer: str = '', app_title: str = 'RepoSeer',
+                 timeout: float = 20, max_output_tokens: int = 3200):
+        if not model.strip():
+            raise ValueError('missing_agent_model_configuration')
+        key = api_key or os.getenv('OPENROUTER_API_KEY', '')
+        if client is None and not key.strip():
+            raise ValueError('missing_openrouter_api_key')
+        headers = {}
+        if http_referer.strip():
+            headers['HTTP-Referer'] = http_referer.strip()
+        if app_title.strip():
+            headers['X-OpenRouter-Title'] = app_title.strip()
+        super().__init__(model=model, api_key=key, client=client, base_url=base_url,
+                         default_headers=headers, timeout=timeout,
+                         max_output_tokens=max_output_tokens)
+        # Fail if routing cannot preserve the requested structured-output parameters.
+        self._extra_body = {'provider': {'require_parameters': True}}
+
+
+def create_specialist_llm(*, model: str | None = None, client=None,
+                          settings: AgentLLMSettings | None = None) -> OpenAISpecialistLLM:
+    """Construct live transport only on demand; never called by offline replay."""
+    settings = settings if settings is not None else AgentLLMSettings()
+    model_id = settings.model if model is None else model
+    if not model_id.strip():
+        raise ValueError('missing_agent_model_configuration')
+    common = dict(model=model_id.strip(), client=client, timeout=settings.timeout_seconds,
+                  max_output_tokens=settings.max_output_tokens)
+    if settings.provider == 'openrouter':
+        return OpenRouterSpecialistLLM(
+            **common, api_key=settings.openrouter_api_key.get_secret_value(),
+            base_url=settings.openrouter_base_url, http_referer=settings.openrouter_http_referer,
+            app_title=settings.openrouter_app_title,
+        )
+    return OpenAISpecialistLLM(**common, api_key=settings.openai_api_key.get_secret_value())
 
 
 class ResearchReplay(ContractModel):

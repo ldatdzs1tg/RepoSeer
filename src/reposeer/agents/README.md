@@ -42,24 +42,47 @@ must not be committed. The CLI reads only explicitly supplied paths and leaves r
 files unchanged. Invalid input/configuration exits 2; a failed run exits 1 after
 writing its structured failure result; partial runs exit 0 with explicit audit gaps.
 
-## Live provider
+## Live provider: OpenRouter and .env
+
+Add the LLM section from [`.env.example`](../../../.env.example) to your existing
+`.env` at the repository root; preserve its other keys. OpenRouter is the default:
+
+```dotenv
+REPOSEER_AGENT_PROVIDER=openrouter
+OPENROUTER_API_KEY=<your-openrouter-key>
+REPOSEER_AGENT_MODEL=<provider>/<model-id>
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+REPOSEER_AGENT_TIMEOUT_SECONDS=20
+REPOSEER_AGENT_MAX_OUTPUT_TOKENS=3200
+OPENROUTER_HTTP_REFERER=
+OPENROUTER_APP_TITLE=RepoSeer
+```
 
 ```powershell
-$env:OPENAI_API_KEY = "<your-api-key>"
-$env:REPOSEER_AGENT_MODEL = "<supported-model-id>"
 uv run --frozen python -m reposeer.agents.cli `
   --mode live --input examples/agents/multi_agent_demo.json `
   --output data/agent_runs/live.json
 ```
 
-`--model` overrides the environment model. There is no default model ID.
-`OpenAISpecialistLLM` uses the existing optional SDK's
-[`responses.parse` structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs),
-content-only Pydantic drafts, `store=False`, a 20-second timeout, `max_retries=0`
-and a default 3,200-token response budget. Missing configuration and provider failures
-are sanitized; credentials and raw API error responses are not printed or persisted.
-The coordinator owns identity, generation time, signal IDs and agent/model/prompt versions.
-Live behavior is tested with injected clients; no real API call is part of the demo/tests.
+The model ID must explicitly identify a model supporting structured outputs; no model
+is selected automatically. Process environment overrides `.env`, and `--model` overrides
+both. Timeout must be finite in `(0, 120]` seconds; output tokens must be in `[256, 8000]`.
+The referer and app-title headers are optional attribution, not source verification.
+
+`create_specialist_llm()` reads live settings on demand and creates an
+`OpenRouterSpecialistLLM`. It reuses the optional OpenAI SDK and the existing content-only
+Pydantic drafts via OpenRouter's [Responses endpoint](https://openrouter.ai/docs/api/api-reference/responses/create-responses),
+with `store=False`, SDK retries fixed at zero, bounded timeout/tokens, and
+`provider.require_parameters=true`. Unsupported structured-output routing fails rather
+than silently relaxing validation. SDK errors and configuration failures are sanitized;
+API keys are redacted in settings and never persisted in results. Coordinator-owned
+metadata, quote grounding and T-024 checks remain unchanged.
+
+For direct OpenAI access, set `REPOSEER_AGENT_PROVIDER=openai`, `OPENAI_API_KEY` and an
+explicit `REPOSEER_AGENT_MODEL`. `OpenAISpecialistLLM` remains available to Python callers.
+Both transports support injected fake clients; no real API call is part of tests/demo.
+Replay does not construct live settings or a client and works even with invalid live
+configuration. No additional dependency or lockfile change is required.
 
 ## Retained canonical raw documents
 

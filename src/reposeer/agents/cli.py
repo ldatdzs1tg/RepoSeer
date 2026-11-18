@@ -6,7 +6,12 @@ from uuid import uuid4
 
 from reposeer.agents.intake import IntakeSummary, build_research_requests_from_raw
 from reposeer.agents.orchestrator import MultiAgentCoordinator, MultiAgentRunRequest
-from reposeer.agents.provider import OpenAISpecialistLLM, ReplayBundle, ReplaySpecialistLLM
+from reposeer.agents.provider import (
+    OpenAISpecialistLLM,
+    ReplayBundle,
+    ReplaySpecialistLLM,
+    create_specialist_llm,
+)
 
 
 def _read(path, model):
@@ -66,7 +71,7 @@ def main(argv=None) -> int:
                 research_requests=requests, strict_requests=[], intake_summary=report,
             )
         provider = (ReplaySpecialistLLM(_read(args.responses, ReplayBundle)) if args.mode == 'replay'
-                    else OpenAISpecialistLLM(model=args.model))
+                    else create_specialist_llm(model=args.model))
         result = MultiAgentCoordinator(
             provider, execution_mode=args.mode, max_llm_calls=args.max_llm_calls,
             max_review_calls=args.max_review_calls, max_candidates_per_agent=args.max_candidates,
@@ -89,7 +94,7 @@ def main(argv=None) -> int:
     except (OSError, ValueError, TypeError) as error:
         # Validation errors can contain entire input values; do not print them or provider details.
         allowed = {
-            'missing_agent_model_configuration', 'missing_openai_api_key',
+            'missing_agent_model_configuration', 'missing_openai_api_key', 'missing_openrouter_api_key',
             'optional_functional_sdk_unavailable', 'llm_client_initialization_failed',
         }
         code = str(error) if str(error) in allowed else 'invalid_input_output_or_configuration'
