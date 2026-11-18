@@ -209,6 +209,12 @@ class AgentResponse(ContractModel):
                 raise ValueError("signal context is outside this specialist's scope")
             if signal.proposed_use == "status_candidate" and self.agent_kind != "maintenance_lifecycle":
                 raise ValueError("only Agent 1 may propose a status candidate")
+            if (
+                signal.proposed_use == "status_candidate"
+                and signal.announced_at is not None
+                and signal.announced_at > self.cutoff_at
+            ):
+                raise ValueError("status candidate announcement must be known by cutoff")
             if signal.proposed_use == "feature_candidate" and signal.signal_type in {
                 "official_transition", "end_of_support_claim", "replacement_claim",
                 "official_replacement_claim",
@@ -259,9 +265,102 @@ class ConflictReviewRecord(ContractModel):
         return self
 
 
+class ResearchCandidate(ContractModel):
+    """Unverified upstream reference for research, never a D06 receipt."""
+
+    candidate_id: NonEmpty
+    source_ref: NonEmpty
+    source_url: HttpUrl | None
+    source_kind: Literal["official", "external", "unknown"]
+    relevance_status: Literal["relevant", "unresolved", "not_assessed"]
+    topic_hint: Literal["maintenance", "functional", "alternatives"] | None
+    text_excerpt: Annotated[str, Field(max_length=10000)] | None
+    published_at: UtcTimestamp | None
+    available_at: UtcTimestamp | None
+    fetched_at: UtcTimestamp | None
+
+
+class ResearchHandoffRequest(ContractModel):
+    schema_version: Literal["0.1.0"]
+    record_type: Literal["specialist_research_request"]
+    analysis_run_id: UuidText
+    request_id: UuidText
+    agent_kind: Specialist
+    package_id: PackageId
+    repo_id: RepoId | None
+    cutoff_at: UtcTimestamp
+    package_description: Annotated[str, Field(max_length=5000)] | None
+    description_source_refs: list[NonEmpty]
+    candidates: Annotated[list[ResearchCandidate], Field(max_length=50)]
+    research_questions: Annotated[list[NonEmpty], Field(max_length=10)]
+
+    @model_validator(mode="after")
+    def check(self):
+        unique([item.candidate_id for item in self.candidates], "research candidate IDs")
+        if self.package_description is not None and not self.description_source_refs:
+            raise ValueError("package description requires source references")
+        return self
+
+
+class ResearchInsight(ContractModel):
+    """A source-backed research interpretation with explicit limitations."""
+
+    insight_id: NonEmpty
+    statement: NonEmpty
+    source_refs: Annotated[list[NonEmpty], Field(min_length=1)]
+    limitation: NonEmpty
+
+
+class InformationGap(ContractModel):
+    gap_id: NonEmpty
+    missing_information: NonEmpty
+    related_source_refs: list[NonEmpty]
+    suggested_question: NonEmpty
+
+
+class EnrichmentSuggestion(ContractModel):
+    suggestion_id: NonEmpty
+    target_stage: Literal["D03", "D04", "D05"]
+    objective: NonEmpty
+    rationale: NonEmpty
+    related_source_refs: list[NonEmpty]
+    query_hint: NonEmpty | None
+
+
+class ResearchHandoffResponse(ContractModel):
+    schema_version: Literal["0.1.0"]
+    record_type: Literal["specialist_research_response"]
+    analysis_run_id: UuidText
+    request_id: UuidText
+    agent_kind: Specialist
+    package_id: PackageId
+    cutoff_at: UtcTimestamp
+    generated_at: UtcTimestamp
+    status: Literal["complete", "partial", "failed"]
+    insights: list[ResearchInsight]
+    information_gaps: list[InformationGap]
+    enrichment_suggestions: list[EnrichmentSuggestion]
+    error_code: NonEmpty | None
+
+    @model_validator(mode="after")
+    def check(self):
+        unique([item.insight_id for item in self.insights], "research insight IDs")
+        unique([item.gap_id for item in self.information_gaps], "information gap IDs")
+        unique([item.suggestion_id for item in self.enrichment_suggestions], "enrichment suggestion IDs")
+        if (self.status == "complete") != (self.error_code is None):
+            raise ValueError("partial/failed research responses require an error code")
+        if self.status == "failed" and self.insights:
+            raise ValueError("failed research response cannot contain insights")
+        if self.generated_at < self.cutoff_at:
+            raise ValueError("research response cannot precede cutoff")
+        return self
+
+
 REQUEST_ADAPTER = TypeAdapter(AgentRequest)
 RESPONSE_ADAPTER = TypeAdapter(AgentResponse)
 REVIEW_ADAPTER = TypeAdapter(ConflictReviewRecord)
+RESEARCH_REQUEST_ADAPTER = TypeAdapter(ResearchHandoffRequest)
+RESEARCH_RESPONSE_ADAPTER = TypeAdapter(ResearchHandoffResponse)
 
 
 def validate_conflict_reviews(
@@ -316,4 +415,68 @@ def validate_agent_pair(request: AgentRequest | dict, response: AgentResponse | 
                 raise ValueError("D09 event leads require as-of official status-candidate input")
         if signal.event_at is not None and signal.event_at > response.cutoff_at:
             raise ValueError("signal event is after cutoff")
+    return response
+
+
+def validate_review_references(
+    records: list[ConflictReviewRecord | dict],
+    responses: list[AgentResponse | dict],
+) -> list[ConflictReviewRecord]:
+    """Bind review lineage to responses already checked with validate_agent_pair.
+
+    This cannot authenticate coordinator receipts, semantic truth or E2 eligibility.
+    """
+    reviewed = validate_conflict_reviews(records)
+    signals = {}
+    for response in responses:
+        response = RESPONSE_ADAPTER.validate_python(
+            response.model_dump() if isinstance(response, AgentResponse) else response
+        )
+        for signal in response.signals:
+            key = (response.analysis_run_id, signal.signal_id)
+            if key in signals:
+                raise ValueError("duplicate signal IDs across responses in an analysis run")
+            signals[key] = signal
+    for record in reviewed:
+        cited_sources = set()
+        for signal_id in record.signal_ids:
+            signal = signals.get((record.analysis_run_id, signal_id))
+            if signal is None:
+                raise ValueError("review signal ID is absent from responses in this analysis run")
+            if signal.subject_id != record.subject_id:
+                raise ValueError("review subject does not match referenced signals")
+            cited_sources.update(citation.source_id for citation in signal.citations)
+        if set(record.source_ids) != cited_sources:
+            raise ValueError("review source IDs must exactly match referenced signal citations")
+    return reviewed
+
+
+def validate_research_handoff_pair(
+    request: ResearchHandoffRequest | dict,
+    response: ResearchHandoffResponse | dict,
+) -> ResearchHandoffResponse:
+    """Check research identity/references only; never certify or promote evidence."""
+    request = RESEARCH_REQUEST_ADAPTER.validate_python(
+        request.model_dump() if isinstance(request, ResearchHandoffRequest) else request
+    )
+    response = RESEARCH_RESPONSE_ADAPTER.validate_python(
+        response.model_dump() if isinstance(response, ResearchHandoffResponse) else response
+    )
+    if any(getattr(request, field) != getattr(response, field) for field in (
+        "analysis_run_id", "request_id", "agent_kind", "package_id", "cutoff_at"
+    )):
+        raise ValueError("research request/response identity mismatch")
+    source_refs = set(request.description_source_refs) | {
+        item.source_ref for item in request.candidates
+    }
+    references = [item.source_refs for item in response.insights]
+    references.extend(item.related_source_refs for item in response.information_gaps)
+    references.extend(item.related_source_refs for item in response.enrichment_suggestions)
+    if any(not set(refs) <= source_refs for refs in references):
+        raise ValueError("research source reference is absent from request")
+    if not request.candidates and request.package_description is None:
+        if response.insights:
+            raise ValueError("research without candidates or description cannot produce insights")
+        if not response.information_gaps and not response.enrichment_suggestions:
+            raise ValueError("research without candidates or description requires a gap or suggestion")
     return response

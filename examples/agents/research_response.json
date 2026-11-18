@@ -1,0 +1,45 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "specialist_research_response",
+  "analysis_run_id": "00000000-0000-4000-8000-000000000010",
+  "request_id": "00000000-0000-4000-8000-000000000004",
+  "agent_kind": "functional_trend_demand",
+  "package_id": "pypi:synthetic-demo",
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "generated_at": "2026-10-01T00:03:00.000Z",
+  "status": "complete",
+  "insights": [
+    {
+      "insight_id": "insight:functional:1",
+      "statement": "The supplied description suggests an offline-first use case; the discussion is a lead for investigating that need.",
+      "source_refs": [
+        "manifest:synthetic:pypi-description:1",
+        "manifest:synthetic:functional-discussion:1"
+      ],
+      "limitation": "Relevance and historical availability are unresolved; this is neither a verified D03 profile nor measured demand."
+    }
+  ],
+  "information_gaps": [
+    {
+      "gap_id": "gap:functional:1",
+      "missing_information": "Publication time, revision availability and the discussion relationship to this package are unknown.",
+      "related_source_refs": [
+        "manifest:synthetic:functional-discussion:1"
+      ],
+      "suggested_question": "Can an archived revision and its context establish when this discussion was available and what package it concerns?"
+    }
+  ],
+  "enrichment_suggestions": [
+    {
+      "suggestion_id": "suggestion:functional:1",
+      "target_stage": "D03",
+      "objective": "Retrieve versioned official documentation to establish package capabilities.",
+      "rationale": "A short description and unresolved discussion do not establish a verified functional profile.",
+      "related_source_refs": [
+        "manifest:synthetic:pypi-description:1"
+      ],
+      "query_hint": "synthetic-demo official documentation offline-first use cases"
+    }
+  ],
+  "error_code": null
+}

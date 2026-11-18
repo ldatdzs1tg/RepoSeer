@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "specialist_research_request",
+  "analysis_run_id": "00000000-0000-4000-8000-000000000010",
+  "request_id": "00000000-0000-4000-8000-000000000004",
+  "agent_kind": "functional_trend_demand",
+  "package_id": "pypi:synthetic-demo",
+  "repo_id": null,
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "package_description": "Synthetic demo package for building offline-first Python tools.",
+  "description_source_refs": [
+    "manifest:synthetic:pypi-description:1"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "candidate:functional:1",
+      "source_ref": "manifest:synthetic:functional-discussion:1",
+      "source_url": "https://example.test/synthetic-demo/research",
+      "source_kind": "external",
+      "relevance_status": "unresolved",
+      "topic_hint": "functional",
+      "text_excerpt": "We need Python tools that keep working offline when network access is unreliable.",
+      "published_at": null,
+      "available_at": null,
+      "fetched_at": null
+    }
+  ],
+  "research_questions": [
+    "Which package functions are supported by its description, and what evidence is still missing to assess this use case?"
+  ]
+}

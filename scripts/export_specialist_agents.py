@@ -7,6 +7,8 @@ from pathlib import Path
 from reposeer.contracts.specialist_agents import (
     AGENT_SCHEMA_VERSION,
     REQUEST_ADAPTER,
+    RESEARCH_REQUEST_ADAPTER,
+    RESEARCH_RESPONSE_ADAPTER,
     RESPONSE_ADAPTER,
     REVIEW_ADAPTER,
 )
@@ -19,6 +21,8 @@ def generate_artifacts() -> dict[str, bytes]:
         "specialist_agent_input.schema.json": REQUEST_ADAPTER,
         "specialist_agent_output.schema.json": RESPONSE_ADAPTER,
         "specialist_conflict_review.schema.json": REVIEW_ADAPTER,
+        "specialist_research_request.schema.json": RESEARCH_REQUEST_ADAPTER,
+        "specialist_research_response.schema.json": RESEARCH_RESPONSE_ADAPTER,
     }
     result = {}
     for filename, adapter in adapters.items():
@@ -55,7 +59,7 @@ def main() -> int:
     else:
         for name, content in artifacts.items():
             (directory / name).write_bytes(content)
-        print("Generated specialist agent input/output/review schemas")
+        print("Generated specialist agent input/output/review and research schemas")
     return 0
 
 

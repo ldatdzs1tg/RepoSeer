@@ -1,17 +1,22 @@
-# Sprint 3: Multi-Agent Handoff Interface
+# Specialist agent boundary (T-024)
 
-## Overview
-According to the Sprint 2 architectural boundaries, the core data collection, normalization, storage, and profiling layers are fully decoupled from any downstream agent framework.
+RepoSeer v3 defines exactly three specialist roles:
 
-Sprint 2 produces structured evidence in Parquet and DuckDB tables:
-- `data/processed/repositories/`
-- `data/processed/github_activity/`
-- `data/processed/technologies/`
-- `data/processed/external_documents/`
-- `data/features/repository_package_snapshots/`
+- **Maintenance & Lifecycle** (`maintenance_lifecycle`): maintenance context,
+  missing notices/history and provisional lifecycle claims.
+- **Functional Trend & Demand** (`functional_trend_demand`): package purpose,
+  use cases and technical needs, without inferring package user counts.
+- **Alternatives & Migration** (`alternatives_migration`): source-backed
+  alternatives, compatibility gaps and explicit migration evidence.
 
-In Sprint 3, specialized AI agents (e.g. LangGraph, CrewAI, PydanticAI) can query this structured evidence to perform qualitative and predictive reasoning:
-- **Agent 1 (Repository Health)**: Analyzes commit cadence, issue response velocity, and maintainer continuity.
-- **Agent 2 (Technology Trend)**: Evaluates ecosystem vitality, deprecation risks, and technology migrations.
-- **Agent 3 (Community / News Sentiment)**: Analyzes community sentiment and external article mentions.
-- **Synthesizer Agent**: Merges agent signals into repository risk and viability scores.
+The same specialists can receive incomplete research candidates or strict
+D06-eligible evidence: **soft intake, evidence enrichment, hard promotion**.
+Research produces leads, information gaps and suggestions; it does not bypass
+D06/D08, assign labels/official status or change Model A/B probabilities.
+
+Contracts and pure validators live in `reposeer.contracts.specialist_agents`.
+T-024 supplies no LLM client, crawler or multi-agent runtime. Execution,
+bounded feedback and conflict-review enforcement belong to T-026.
+
+See the [specialist contracts](../../../docs/contracts/specialist_agents.md)
+for both lanes, schemas, examples and promotion/verification requirements.
