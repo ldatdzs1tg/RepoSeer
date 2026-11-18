@@ -35,6 +35,7 @@ from reposeer.agents.provider import (
     ResearchInsightDraft,
     ReviewDraft,
     ReviewInput,
+    _provider_error_code,
     create_specialist_llm,
 )
 from reposeer.collectors.external.crawler.validation import validate_external_document_record
@@ -314,8 +315,11 @@ def test_raw_intake_preserves_missing_text_and_dates_and_reports_scope_and_budge
     assert all(r.candidates[0].source_ref == first.raw_record_id for r in requests)
     assert all(r.candidates[0].text_excerpt is None and r.candidates[0].available_at is None
                and r.candidates[0].published_at is None for r in requests)
-    assert summary.accepted_candidates == 2 and summary.omitted_candidates == 1
-    assert summary.rejected_records == 2 and summary.duplicate_records == 1
+    assert summary.accepted_candidates == 3 and summary.omitted_candidates == 2
+    assert summary.unverified_scope_candidates == 1
+    assert summary.accepted_candidates == summary.retained_candidates + summary.omitted_candidates
+    assert summary.rejected_records == 1 and summary.duplicate_records == 1
+    assert all(r.candidates[0].relevance_status == 'not_assessed' for r in requests)
     assert path.read_bytes() == before
     request = MultiAgentRunRequest(schema_version='0.1.0', record_type='multi_agent_run_request',
         analysis_run_id=RUN_ID, package_id='pypi:synthetic-demo', cutoff_at=CUTOFF,
@@ -323,7 +327,9 @@ def test_raw_intake_preserves_missing_text_and_dates_and_reports_scope_and_budge
     provider = FakeProvider()
     result = run(request, provider)
     assert not provider.research_calls and result.research_insights == []
-    assert result.coverage_summary.candidates_unprocessed == 2
+    assert result.coverage_summary.candidates_unprocessed == 3
+    assert result.coverage_summary.intake.unverified_scope_candidates == 1
+    assert any('unverified discovery associations' in item for item in result.limitations)
     JsonlStorage().write(path, reversed(records))
     again = build_research_requests_from_raw(path, analysis_run_id=RUN_ID,
         package_id='pypi:synthetic-demo', cutoff_at=CUTOFF, max_candidates=1)
@@ -453,6 +459,16 @@ def test_conflict_review_is_bounded_rechecked_and_cannot_certify_semantics():
     for signal in (second, second_conflict):
         signal['citations'][0]['evidence_id'] = second_source.evidence_id
     bundle['strict'][0]['output']['signals'] = [first, conflict, second, second_conflict]
+    default_provider = FakeProvider(ReplayBundle.model_validate(bundle))
+    default_result = run(request, default_provider)
+    assert not default_provider.review_calls
+    assert len(default_result.conflict_reviews) == 2
+    assert all(r.review_calls == 0 and r.status == 'unresolved' and r.final_use == 'report_only'
+               for r in default_result.conflict_reviews)
+    assert all(c.disposition == 'report_only' and not c.e2_eligible
+               for c in default_result.validated_signal_candidates)
+    assert validate_review_references(default_result.conflict_reviews,
+                                     default_result.strict_responses) == default_result.conflict_reviews
     provider = FakeProvider(ReplayBundle.model_validate(bundle))
     coordinator = MultiAgentCoordinator(provider, execution_mode='replay', clock=lambda: NOW,
                                          max_review_calls=1)
@@ -531,12 +547,19 @@ def test_cli_replay_is_offline_and_refuses_overwrite(tmp_path, monkeypatch, isol
     monkeypatch.delenv('REPOSEER_AGENT_MODEL', raising=False)
     monkeypatch.setitem(sys.modules, 'openai', None)
     (tmp_path / '.env').write_text('REPOSEER_AGENT_PROVIDER=invalid\nREPOSEER_AGENT_TIMEOUT_SECONDS=bad\n')
+    captured = {}
+    def coordinator(*args, **kwargs):
+        captured.update(kwargs)
+        return MultiAgentCoordinator(*args, **kwargs)
+    monkeypatch.setattr('reposeer.agents.cli.MultiAgentCoordinator', coordinator)
     output = tmp_path / 'run.json'
     args = ['--mode', 'replay', '--input', str(EXAMPLES / 'multi_agent_demo.json'),
             '--responses', str(EXAMPLES / 'multi_agent_replay.json'), '--output', str(output)]
     assert main(args) == 0
     result = MultiAgentRunResult.model_validate_json(output.read_bytes())
     assert result.execution_mode == 'replay' and len(result.research_responses) == 3
+    assert result.provider_call_diagnostics == []
+    assert captured['max_review_calls'] == 0
     before = output.read_bytes()
     assert main(args) == 2 and output.read_bytes() == before
     completed = subprocess.run([sys.executable, '-m', 'reposeer.agents.cli', *args[:-1],
@@ -593,6 +616,8 @@ def test_openrouter_dotenv_wires_url_headers_budgets_and_structured_outputs(
     provider = create_specialist_llm(model='vendor/cli-model', settings=settings)
     assert isinstance(provider, OpenRouterSpecialistLLM)
     assert provider.model_id == 'vendor/cli-model'
+    assert isinstance(captured['client']['base_url'], str)
+    assert captured['client']['base_url'] == 'https://openrouter.ai/api/v1'
     assert captured['client'] == dict(
         api_key='or-fake-secret', timeout=35, max_retries=0,
         base_url='https://openrouter.ai/api/v1',
@@ -740,6 +765,11 @@ def test_both_live_transports_send_v2_prompts_and_keep_structured_data_in_user_m
                 assert call['extra_body'] == {'provider': {'require_parameters': True}}
     conflict = ReviewInput(cluster_id='cluster:synthetic', signals=[], passages=request.evidence)
     assert isinstance(provider.review(conflict), ReviewDraft)
+    assert [item.operation for item in provider.call_diagnostics] == ['research', 'extract'] * 3 + ['review']
+    assert provider.call_diagnostics[-1].request_ref == conflict.cluster_id
+    assert all(item.success and item.error_code is None and item.duration_ms >= 0
+               and item.input_tokens is item.output_tokens is item.total_tokens is None
+               for item in provider.call_diagnostics)
     review = calls[-1]
     assert review['text_format'] is ReviewDraft
     assert json.loads(review['input'][1]['content']) == conflict.model_dump(mode='json')
@@ -782,3 +812,191 @@ def test_scheduled_support_replay_retains_future_plan_as_provisional_status_lead
     assert result.validated_signal_candidates[0].disposition == 'report_only'
     assert result.validated_signal_candidates[0].e2_eligible is False
     assert 'official_status' not in result.model_dump()
+
+
+
+def test_raw_intake_accepts_explicit_and_projected_associations_without_verifying_history(tmp_path):
+    explicit = raw_capture(10, scoped=False)
+    projected = raw_capture(11, scoped=False)
+    projected.package_id = None
+    projected.payload.update(discovery_lineage_complete=True, discovery_references=[{
+        'search_target_package_id': 'pypi:synthetic-demo',
+        'search_target_repo_id': projected.repo_id, 'projection_verified': True,
+    }])
+    no_text = raw_capture(12, None, scoped=False)
+    late = raw_capture(13, scoped=False)
+    late.retrieved_at = late.payload['fetched_at'] = '2026-10-01T00:01:00.000Z'
+    records = [late, projected, no_text, explicit, projected]
+    path = tmp_path / 'associated.jsonl'
+    JsonlStorage().write(path, records)
+    summary = IntakeSummary()
+    requests = build_research_requests_from_raw(path, analysis_run_id=RUN_ID,
+        package_id=explicit.package_id, repo_id=explicit.repo_id, cutoff_at=CUTOFF, summary=summary)
+    assert summary.accepted_candidates == summary.retained_candidates == summary.unverified_scope_candidates == 4
+    assert summary.rejected_records == summary.omitted_candidates == 0 and summary.duplicate_records == 1
+    for candidate, raw in zip(requests[0].candidates, (explicit, projected, no_text, late), strict=True):
+        assert candidate.candidate_id == candidate.source_ref == raw.raw_record_id
+        assert candidate.source_url == raw.source_url and candidate.source_kind == 'external'
+        assert candidate.text_excerpt == raw.payload['content']
+        assert candidate.fetched_at == raw.payload['fetched_at']
+        assert candidate.published_at is None and candidate.available_at is None
+        assert candidate.relevance_status == 'unresolved'
+    request = MultiAgentRunRequest(schema_version='0.1.0', record_type='multi_agent_run_request',
+        analysis_run_id=RUN_ID, package_id=explicit.package_id, cutoff_at=CUTOFF,
+        research_requests=requests, strict_requests=[], intake_summary=summary)
+    result = run(request, FakeProvider(replay_for_requests(requests)))
+    assert result.strict_responses == [] and result.validated_signal_candidates == []
+    assert result.coverage_summary.source_coverage == 'unknown'
+    assert result.coverage_summary.historical_validity == 'unverified'
+    assert result.coverage_summary.intake.unverified_scope_candidates == 4
+    assert all(item.temporal_state == 'unknown_availability' for item in result.research_grounding)
+    JsonlStorage().write(path, reversed(records))
+    other_summary = IntakeSummary()
+    assert requests == build_research_requests_from_raw(path, analysis_run_id=RUN_ID,
+        package_id=explicit.package_id, repo_id=explicit.repo_id, cutoff_at=CUTOFF, summary=other_summary)
+    assert other_summary == summary
+    assert IntakeSummary.model_validate({}).unverified_scope_candidates == 0
+
+
+def test_raw_intake_rejects_foreign_conflicting_and_missing_associations(tmp_path):
+    foreign = raw_capture(20, scoped=False)
+    foreign.package_id = 'pypi:other'
+    bad_scope = raw_capture(21)
+    bad_scope.payload['repository_scope']['package_id'] = 'pypi:other'
+    malformed_scope = raw_capture(22)
+    malformed_scope.payload['repository_scope'] = {'status': 'verified_current'}
+    missing = raw_capture(23, scoped=False)
+    missing.package_id = None
+    missing.payload['title'] = 'pypi:synthetic-demo is only a title substring'
+    incomplete_projection = raw_capture(24, scoped=False)
+    incomplete_projection.package_id = None
+    incomplete_projection.payload['discovery_references'] = [{
+        'search_target_package_id': 'pypi:synthetic-demo', 'projection_verified': True,
+    }]
+    wrong_repo = raw_capture(25, scoped=False)
+    wrong_repo.repo_id = 'github:repository:900000002'
+    projected_conflict = raw_capture(26, scoped=False)
+    projected_conflict.package_id = None
+    projected_conflict.payload.update(discovery_lineage_complete=True, discovery_references=[{
+        'search_target_package_id': 'pypi:synthetic-demo',
+        'search_target_repo_id': 'github:repository:900000002', 'projection_verified': True,
+    }])
+    invalid = raw_capture(27, scoped=False)
+    invalid.raw_body_sha256 = '0' * 64
+    path = tmp_path / 'rejected.jsonl'
+    JsonlStorage().write(path, [foreign, bad_scope, malformed_scope, missing,
+                               incomplete_projection, wrong_repo, projected_conflict, invalid])
+    summary = IntakeSummary()
+    requests = build_research_requests_from_raw(path, analysis_run_id=RUN_ID,
+        package_id='pypi:synthetic-demo', repo_id='github:repository:900000001',
+        cutoff_at=CUTOFF, summary=summary)
+    assert all(not request.candidates for request in requests)
+    assert summary.accepted_candidates == summary.unverified_scope_candidates == 0
+    assert summary.rejected_records == 8
+    assert {r.reason_code: r.count for r in summary.rejections} == {
+        'package_identity_conflict': 1, 'scope_receipt_invalid_or_conflicting': 2,
+        'target_association_missing': 2, 'repository_identity_conflict': 2,
+        'invalid_external_document': 1,
+    }
+
+
+def test_provider_classifies_typed_sdk_errors_without_exposing_messages(monkeypatch):
+    class APIError(Exception):
+        pass
+    class APIConnectionError(APIError):
+        pass
+    class APITimeoutError(APIConnectionError):
+        pass
+    class AuthenticationError(APIError):
+        pass
+    class RateLimitError(APIError):
+        pass
+    class APIStatusError(APIError):
+        def __init__(self, status_code):
+            self.status_code = status_code
+            super().__init__('private-provider-body-and-key')
+    monkeypatch.setitem(sys.modules, 'openai', SimpleNamespace(
+        APIError=APIError, APIConnectionError=APIConnectionError, APITimeoutError=APITimeoutError,
+        AuthenticationError=AuthenticationError, RateLimitError=RateLimitError,
+        APIStatusError=APIStatusError,
+    ))
+    assert _provider_error_code(APITimeoutError('private')) == 'provider_timeout'
+    assert _provider_error_code(APIConnectionError('private')) == 'provider_connection_error'
+    assert _provider_error_code(AuthenticationError('private')) == 'provider_auth_failed'
+    assert _provider_error_code(RateLimitError('private')) == 'provider_rate_limited'
+    assert _provider_error_code(APIStatusError(400)) == 'provider_bad_request'
+    assert _provider_error_code(APIStatusError(503)) == 'provider_api_error'
+    assert _provider_error_code(RuntimeError('private')) == 'llm_request_or_output_failed'
+
+
+def test_live_adapter_distinguishes_refusal_incomplete_and_invalid_outputs():
+    response = SimpleNamespace(status='completed', output=[], output_parsed=None)
+    client = SimpleNamespace(responses=SimpleNamespace(parse=lambda **kwargs: response))
+    provider = OpenAISpecialistLLM(model='synthetic-model', client=client)
+    request = demo().research_requests[0]
+    with pytest.raises(ProviderError, match='^invalid_structured_output$'):
+        provider.research(request)
+    response.output_parsed = {'insights': [{'private': 'private-provider-body'}]}
+    with pytest.raises(ProviderError, match='^invalid_structured_output$'):
+        provider.research(request)
+    response.status = 'incomplete'
+    with pytest.raises(ProviderError, match='^llm_incomplete_output$'):
+        provider.research(request)
+    response.status = 'completed'
+    response.output = [SimpleNamespace(content=[SimpleNamespace(type='refusal')])]
+    with pytest.raises(ProviderError, match='^llm_refusal$'):
+        provider.research(request)
+    assert [item.error_code for item in provider.call_diagnostics] == [
+        'invalid_structured_output', 'invalid_structured_output', 'llm_incomplete_output', 'llm_refusal',
+    ]
+    assert all(not item.success and item.duration_ms >= 0 and item.total_tokens is None
+               for item in provider.call_diagnostics)
+    assert 'private-provider-body' not in str(provider.call_diagnostics)
+
+
+def test_provider_diagnostics_preserve_partial_results_and_are_isolated_per_run():
+    stored = {entry['agent_kind']: entry['output'] for entry in example('multi_agent_replay')['research']}
+    attempts = 0
+    def parse(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        child = json.loads(kwargs['input'][1]['content'])
+        if child['agent_kind'] == SPECIALISTS[0]:
+            raise TimeoutError('private-provider-body-and-key')
+        usage = {'input_tokens': 100, 'output_tokens': 50, 'total_tokens': 150}
+        return SimpleNamespace(status='completed', output=[],
+            output_parsed=ResearchDraft.model_validate(stored[child['agent_kind']]),
+            usage=usage if attempts % 2 else SimpleNamespace(**usage))
+    provider = OpenAISpecialistLLM(model='synthetic-model',
+        client=SimpleNamespace(responses=SimpleNamespace(parse=parse)))
+    # Calls outside a coordinator run must not leak into that run's result.
+    provider.research(demo().research_requests[1])
+    coordinator = MultiAgentCoordinator(provider, execution_mode='live', clock=lambda: NOW)
+    result = coordinator.analyze(demo())
+    first_snapshot = result.model_dump_json()
+    again = coordinator.analyze(demo())
+    assert result.model_dump_json() == first_snapshot
+    assert len(provider.call_diagnostics) == 7
+    for output in (result, again):
+        assert output.overall_status == 'partial' and output.provider_calls == 3
+        statuses = [s for s in output.agent_execution_statuses if s.lane == 'research']
+        assert [s.status for s in statuses] == ['failed', 'complete', 'complete']
+        assert statuses[0].error_code == 'provider_timeout'
+        assert output.research_responses[0].error_code == 'provider_timeout'
+        assert any(item.reason_code == 'provider_timeout' for item in output.excluded_or_rejected_items)
+        assert len(output.research_insights) == 2
+        diagnostics = output.provider_call_diagnostics
+        assert len(diagnostics) == 3
+        assert [d.request_ref for d in diagnostics] == [r.request_id for r in demo().research_requests]
+        assert all(d.operation == 'research' and type(d.duration_ms) is int and d.duration_ms >= 0
+                   for d in diagnostics)
+        assert not diagnostics[0].success and diagnostics[0].error_code == 'provider_timeout'
+        assert diagnostics[0].input_tokens is diagnostics[0].output_tokens is diagnostics[0].total_tokens is None
+        assert all(d.success and d.error_code is None and
+                   (d.input_tokens, d.output_tokens, d.total_tokens) == (100, 50, 150)
+                   for d in diagnostics[1:])
+        assert 'private-provider-body-and-key' not in output.model_dump_json()
+    replay = run()
+    assert replay.provider_call_diagnostics == []
+    legacy = replay.model_dump(exclude={'provider_call_diagnostics'})
+    assert MultiAgentRunResult.model_validate(legacy).provider_call_diagnostics == []

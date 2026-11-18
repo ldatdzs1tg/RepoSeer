@@ -39,7 +39,7 @@ def main(argv=None) -> int:
     parser.add_argument('--max-candidates', type=int, default=12)
     parser.add_argument('--max-excerpt-chars', type=int, default=5000)
     parser.add_argument('--max-llm-calls', type=int, default=7)
-    parser.add_argument('--max-review-calls', type=int, default=1)
+    parser.add_argument('--max-review-calls', type=int, default=0)
     args = parser.parse_args(argv)
     if args.mode == 'replay' and args.responses is None:
         parser.error('replay requires --responses')

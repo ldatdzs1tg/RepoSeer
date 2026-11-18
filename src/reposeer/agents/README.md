@@ -70,8 +70,9 @@ both. Timeout must be finite in `(0, 120]` seconds; output tokens must be in `[2
 The referer and app-title headers are optional attribution, not source verification.
 
 `create_specialist_llm()` reads live settings on demand and creates an
-`OpenRouterSpecialistLLM`. It reuses the optional OpenAI SDK and the existing content-only
-Pydantic drafts via OpenRouter's [Responses endpoint](https://openrouter.ai/docs/api/api-reference/responses/create-responses),
+`OpenRouterSpecialistLLM`. Pydantic validates `OPENROUTER_BASE_URL`; the adapter
+converts it to an SDK-compatible Python string at the provider boundary. It reuses
+the optional OpenAI SDK and the existing content-only Pydantic drafts via OpenRouter's [Responses endpoint](https://openrouter.ai/docs/api/api-reference/responses/create-responses),
 with `store=False`, SDK retries fixed at zero, bounded timeout/tokens, and
 `provider.require_parameters=true`. Unsupported structured-output routing fails rather
 than silently relaxing validation. SDK errors and configuration failures are sanitized;
@@ -100,19 +101,25 @@ IDs when recording/replaying the same raw intake. Raw replay also accepts
 `--responses` containing matching stored provider drafts; the raw CLI path is tested
 offline with canonical synthetic captures, not hard-coded production observations.
 
-`build_research_requests_from_raw` streams `JsonlStorage.iter_records`, validates
-`RawRecord` and `ExternalDocumentPayload`/retained response bytes, and requires the
-existing upstream `repository_scope` receipt to match the envelope and exact package.
-It checks the current-discovery receipt, repository binding and mapping evidence
-references. It does **not** independently authenticate a submitted receipt or establish
-historical mapping/document relevance; producers must use trusted retained storage.
-A package field, title or URL substring alone is insufficient. Unbound/mismatched
-records are counted as rejected rather than treated as target observations.
+`build_research_requests_from_raw` streams `JsonlStorage.iter_records` and validates
+`RawRecord` and `ExternalDocumentPayload`/retained response bytes. Valid existing
+`repository_scope` receipts must match the exact package/repository and mapping references;
+these candidates retain `relevance_status="not_assessed"`. Without a receipt, explicit
+`raw.package_id` association is accepted with `relevance_status="unresolved"`. If the raw
+package is null, complete discovery lineage with a projection-verified reference to the
+target package also qualifies. Repository identities must agree with the requested mapping.
+Conflicting/invalid supplied receipts are rejected without fallback; foreign packages,
+missing associations and title/URL substring matches do not qualify.
+
+`coverage_summary.intake.unverified_scope_candidates` counts unique accepted discovery-only
+observations before budget truncation, rather than counting specialist assignments.
+Association never verifies document relevance, historical mapping or availability;
+producers must use trusted retained storage. Coverage remains `unknown`/`unverified`,
+with an explicit limitation when unverified associations are included.
 
 Source references are original raw IDs; candidate text/dates are copied, never invented.
-Missing text is kept as null; relevance stays `not_assessed`. Candidates without a
-reliable topic go to all three specialists; explicit hints get priority when bounding
-per-specialist inputs. Stable source-reference order makes intake reproducible.
+Missing text is kept as null. Candidates without a reliable topic go to all three
+specialists; explicit hints get priority when bounding per-specialist inputs. Stable source-reference order makes intake reproducible.
 Defaults are 12 candidates per agent and 5,000 characters per excerpt; truncation,
 omitted candidates and rejected records are audited. No usable text/description means
 three deterministic planning gaps and **zero provider calls**, not fabricated insights.
@@ -143,13 +150,36 @@ Its recommendation is advisory: this runtime conservatively leaves conflicts unr
 without independent semantic resolution. Original pairs and review lineage are rechecked
 with T-024 validators. The reviewer is not a fourth specialist.
 
-Defaults allow seven provider invocations total, at most one review invocation globally
-and at most one attempt per conflicting cluster. SDK retries are disabled; no coordinator
-retries occur. `--max-llm-calls` and `--max-review-calls` can reduce those budgets.
+Defaults allow seven provider invocations total; reviewer calls are disabled by default
+(`--max-review-calls 0`). Opt in with `--max-review-calls 1` only when an advisory
+recommendation is useful. Conflict records still retain unresolved/report-only status
+and source references without a reviewer call. Each conflicting cluster gets at most one
+attempt. SDK retries are disabled; no coordinator retries occur. `--max-llm-calls` bounds
+the total, including any opted-in reviews.
 Strict contexts above 60,000 passage characters are rejected explicitly. Content lists
 are capped at 20 items per response category with recorded truncation. Per-agent failures,
 call counts and unprocessed candidate assignments remain visible. Task completion never
 claims a complete source census, historical coverage or E2 eligibility.
+
+## Provider errors and diagnostics
+
+Provider failures use sanitized codes: `provider_timeout`, `provider_connection_error`,
+`provider_auth_failed`, `provider_permission_denied`, `provider_rate_limited`,
+`provider_model_or_endpoint_not_found`, `provider_bad_request` and `provider_api_error`.
+A generic HTTP 400/422 does not prove structured-output incompatibility. Missing or
+schema-invalid parsed output uses `invalid_structured_output`; refusal and incomplete
+responses retain `llm_refusal` and `llm_incomplete_output`. Unknown exceptions use
+`llm_request_or_output_failed`. Agent status and rejection audits preserve these codes
+without exception bodies or credentials; other specialists keep their valid results.
+
+Read `provider_call_diagnostics` in the run JSON for each live adapter invocation's
+`operation`, coordinator request/cluster `request_ref`, nonnegative `duration_ms`,
+`success` and sanitized `error_code`. Token fields `input_tokens`, `output_tokens`
+and `total_tokens` come directly from provider usage when present and are otherwise
+null, including failures without a response. Diagnostics are isolated per run even
+when reusing a provider. Replay/fake providers need no telemetry and produce an empty
+list unless they supply it; no tokens or USD costs are estimated. Adapter success
+means schema parsing succeeded; downstream grounding and semantic checks still apply.
 
 ## Prompt design v0.2.0
 

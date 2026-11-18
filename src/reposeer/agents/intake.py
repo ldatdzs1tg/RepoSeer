@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, TypeAdapter
 
 from reposeer.collectors.external.crawler.validation import (
     ExternalDocumentPayload,
@@ -41,6 +41,7 @@ class IntakeReason(ContractModel):
 class IntakeSummary(ContractModel):
     records_seen: Count = 0
     accepted_candidates: Count = 0
+    unverified_scope_candidates: Count = 0
     retained_candidates: Count = 0
     omitted_candidates: Count = 0
     duplicate_records: Count = 0
@@ -68,6 +69,50 @@ class _RetainedScope(ContractModel):
     evidence: list[_ScopeReference] = Field(min_length=2)
 
 
+def _package_association(raw, payload, package_id, repo_id):
+    """Distinguish retained verified scope from discovery-only association; fail on conflicts."""
+    if raw.package_id is not None and raw.package_id != package_id:
+        return None, 'package_identity_conflict'
+    if repo_id is not None and raw.repo_id is not None and raw.repo_id != repo_id:
+        return None, 'repository_identity_conflict'
+    if payload.repository_scope is not None:
+        try:
+            scope = _RetainedScope.model_validate(payload.repository_scope)
+        except (ValueError, TypeError):
+            return None, 'scope_receipt_invalid_or_conflicting'
+        if (
+            raw.package_id == package_id == scope.package_id
+            and raw.repo_id == scope.repo_id
+            and (repo_id is None or repo_id == scope.repo_id)
+            and scope.status == 'verified_current'
+            and scope.basis == 'verified_current_discovery_scope'
+            and scope.observed_at <= payload.fetched_at
+            and len({ref.raw_record_id for ref in scope.evidence}) == len(scope.evidence)
+            and all(ref.retrieved_at <= scope.observed_at for ref in scope.evidence)
+        ):
+            return 'verified', None
+        # A supplied bad receipt cannot be bypassed by falling back to raw/package metadata.
+        return None, 'scope_receipt_invalid_or_conflicting'
+    matching = [ref for ref in payload.discovery_references
+                if ref.get('search_target_package_id') == package_id]
+    repo_ids = {value for value in (repo_id, raw.repo_id) if value is not None}
+    for ref in matching:
+        ref_repo = ref.get('search_target_repo_id')
+        if ref_repo is not None:
+            try:
+                repo_ids.add(TypeAdapter(RepoId).validate_python(ref_repo, strict=True))
+            except ValueError:
+                return None, 'invalid_discovery_association'
+    if len(repo_ids) > 1:
+        return None, 'repository_identity_conflict'
+    if raw.package_id == package_id or (
+        payload.discovery_lineage_complete
+        and any(ref.get('projection_verified') is True for ref in matching)
+    ):
+        return 'unverified', None
+    return None, 'target_association_missing'
+
+
 def build_research_requests_from_raw(
     raw_documents_path: Path, *, analysis_run_id: str, package_id: str, cutoff_at: str,
     repo_id: str | None = None, package_description: str | None = None,
@@ -76,8 +121,8 @@ def build_research_requests_from_raw(
 ) -> list[ResearchHandoffRequest]:
     """Return exactly three requests; optionally fill bounded intake audit counters.
 
-    Trust only retained upstream package-scope receipts, never title/URL matching.
-    Receipt consistency is not proof of document relevance or historical validity.
+    Retain verified scope or explicit discovery association, never title/URL matching.
+    Association is not proof of document relevance, mapping history or availability.
     JSONL is streamed; at most max_candidates excerpts are retained in memory.
     """
     if type(max_candidates) is not int or not 1 <= max_candidates <= 50:
@@ -115,21 +160,10 @@ def build_research_requests_from_raw(
                 report.duplicate_records += 1
                 continue
             fingerprints[raw.raw_record_id] = fingerprint
-            try:
-                scope = _RetainedScope.model_validate(payload.repository_scope)
-                valid_scope = (
-                    raw.package_id == package_id == scope.package_id
-                    and raw.repo_id == scope.repo_id
-                    and (repo_id is None or repo_id == scope.repo_id)
-                    and scope.status == 'verified_current'
-                    and scope.basis == 'verified_current_discovery_scope'
-                    and scope.observed_at <= payload.fetched_at
-                    and len({ref.raw_record_id for ref in scope.evidence}) == len(scope.evidence)
-                    and all(ref.retrieved_at <= scope.observed_at for ref in scope.evidence)
-                )
-            except (ValueError, TypeError):
-                valid_scope = False
-            if valid_scope:
+            association, reason = _package_association(raw, payload, package_id, repo_id)
+            if association is not None:
+                if association == 'unverified':
+                    report.unverified_scope_candidates += 1
                 report.accepted_candidates += 1
                 excerpt = payload.content
                 if excerpt is not None and len(excerpt) > max_excerpt_chars:
@@ -138,7 +172,8 @@ def build_research_requests_from_raw(
                 candidate = ResearchCandidate(
                     candidate_id=raw.raw_record_id, source_ref=raw.raw_record_id,
                     source_url=raw.source_url, source_kind='external',
-                    relevance_status='not_assessed', topic_hint=None, text_excerpt=excerpt,
+                    relevance_status='unresolved' if association == 'unverified' else 'not_assessed',
+                    topic_hint=None, text_excerpt=excerpt,
                     published_at=payload.published_at, available_at=payload.content_available_at,
                     fetched_at=payload.fetched_at,
                 )
@@ -146,7 +181,6 @@ def build_research_requests_from_raw(
                 if len(retained) > max_candidates:
                     del retained[max(retained)]
                 continue
-            reason = 'target_scope_unverified_or_mismatched'
         report.rejected_records += 1
         reasons[reason] = reasons.get(reason, 0) + 1
     report.retained_candidates = len(retained)

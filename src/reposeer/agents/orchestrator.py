@@ -11,7 +11,9 @@ from pydantic import Field, ValidationError, model_validator
 from reposeer.agents.intake import SPECIALISTS, IntakeSummary, request_id_for
 from reposeer.agents.provider import (
     PROMPT_VERSION,
+    PROVIDER_ERROR_CODES,
     ExtractionDraft,
+    ProviderCallDiagnostic,
     ProviderError,
     ResearchDraft,
     ReviewDraft,
@@ -189,6 +191,7 @@ class MultiAgentRunResult(ContractModel):
     excluded_or_rejected_items: list[RejectedItem]
     coverage_summary: CoverageSummary
     limitations: list[NonEmpty]
+    provider_call_diagnostics: list[ProviderCallDiagnostic] = Field(default_factory=list)
 
 
 def _canonical(value) -> str:
@@ -202,8 +205,7 @@ def _key(value) -> str:
 
 
 def _reason(error: Exception) -> str:
-    allowed = {
-        'llm_refusal', 'llm_incomplete_output', 'llm_request_or_output_failed',
+    allowed = PROVIDER_ERROR_CODES | {
         'replay_response_missing', 'replay_review_missing', 'llm_call_budget_exhausted',
         'missing_llm_provider',
     }
@@ -244,7 +246,7 @@ class MultiAgentCoordinator:
     def __init__(self, llm: SpecialistLLM | None, *, execution_mode: Literal['live', 'replay'],
                  d06_verifier: D06ReceiptVerifier | None = None,
                  clock: Callable[[], datetime] | None = None, max_llm_calls: int = 7,
-                 max_review_calls: int = 1, max_candidates_per_agent: int = 12,
+                 max_review_calls: int = 0, max_candidates_per_agent: int = 12,
                  max_excerpt_chars: int = 5000, max_output_items: int = 20):
         if execution_mode not in {'live', 'replay'}:
             raise ValueError('execution_mode must be live or replay')
@@ -274,6 +276,7 @@ class MultiAgentCoordinator:
         calls, reviews_used = 0, 0
         rejected, statuses, research, receipts, strict = [], [], [], [], []
         trusted, strict_by_id, processed_refs = {}, {}, set()
+        diagnostics = []
 
         def reject(lane, kind, item_id, reason, count=1):
             rejected.append(RejectedItem(lane=lane, agent_kind=kind, item_id=item_id,
@@ -286,7 +289,17 @@ class MultiAgentCoordinator:
             if calls >= self.max_llm_calls:
                 raise ProviderError('llm_call_budget_exhausted')
             calls += 1
-            return getattr(self.llm, method)(data.model_copy(deep=True))
+            existing = getattr(self.llm, 'call_diagnostics', None)
+            offset = len(existing) if isinstance(existing, list) else None
+            try:
+                return getattr(self.llm, method)(data.model_copy(deep=True))
+            finally:
+                latest = getattr(self.llm, 'call_diagnostics', None)
+                if offset is not None and isinstance(latest, list):
+                    request_ref = data.cluster_id if isinstance(data, ReviewInput) else data.request_id
+                    diagnostics.extend(item.model_copy(deep=True) for item in latest[offset:]
+                        if isinstance(item, ProviderCallDiagnostic)
+                        and item.operation == method and item.request_ref == request_ref)
 
         research_by_kind = {r.agent_kind: r for r in request.research_requests}
         strict_by_kind = {r.agent_kind: r for r in request.strict_requests}
@@ -469,8 +482,8 @@ class MultiAgentCoordinator:
                             validate_agent_pair(strict_by_id[response.request_id], response)
                         recommendations.append(ReviewRecommendation(cluster_id=cluster_id, recommendation=decision))
                         reason = 'semantic_resolution_not_independently_verified'
-                    except Exception:
-                        reason = 'review_failed_or_invalid'
+                    except Exception as error:
+                        reason = _reason(error) if isinstance(error, ProviderError) else 'review_failed_or_invalid'
                         reject('review', None, cluster_id, reason)
                 review_calls = calls - calls_before
                 reviews.append(ConflictReviewRecord(
@@ -516,6 +529,7 @@ class MultiAgentCoordinator:
             research_insights=findings, information_gaps=gaps, enrichment_suggestions=suggestions,
             validated_signal_candidates=candidates, conflict_reviews=reviews,
             review_recommendations=recommendations, excluded_or_rejected_items=rejected,
+            provider_call_diagnostics=diagnostics,
             coverage_summary=CoverageSummary(
                 candidates_received=received, candidates_processed=processed,
                 candidates_unprocessed=received - processed, assignments_received=assignments,
@@ -530,7 +544,9 @@ class MultiAgentCoordinator:
                 'Enrichment suggestions are plans only; no source retrieval or feedback loop is executed.',
                 'Replay uses stored provider content and is not a new live LLM analysis.' if self.execution_mode == 'replay'
                 else 'Live provider output remains provisional after structural and textual validation.',
-            ],
+            ] + ([
+                'Intake includes unverified discovery associations; processing does not verify package relevance or mapping history.'
+            ] if request.intake_summary and request.intake_summary.unverified_scope_candidates else []),
         )
 
     @staticmethod
