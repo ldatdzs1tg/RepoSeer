@@ -1,0 +1,118 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "multi_agent_replay",
+  "provenance": "synthetic",
+  "model_id": "synthetic-replay-only",
+  "research": [
+    {
+      "request_id": "9eca50ac-42ca-482d-96ca-b2c451ef5248",
+      "agent_kind": "maintenance_lifecycle",
+      "output": {
+        "insights": [
+          {
+            "source_ref": "manifest:synthetic:maintenance:1",
+            "supporting_quote": "The maintainer says release work is limited while a new volunteer is sought.",
+            "statement": "A maintainer reports limited release capacity; this is a research lead, not confirmed cessation.",
+            "limitation": "The notice has no verified revision availability or independent maintenance history."
+          }
+        ],
+        "information_gaps": [
+          {
+            "gap_id": "gap:synthetic:maintenance",
+            "missing_information": "Maintainer continuity and release/issue-response history are not available.",
+            "related_source_refs": [
+              "manifest:synthetic:maintenance:1"
+            ],
+            "suggested_question": "Which official maintainer notices and release history explain the reduced capacity?"
+          }
+        ],
+        "enrichment_suggestions": [
+          {
+            "suggestion_id": "suggestion:synthetic:maintenance",
+            "target_stage": "D03",
+            "objective": "Retrieve versioned official maintainer documentation and release history.",
+            "rationale": "The notice has no verified revision availability or independent maintenance history.",
+            "related_source_refs": [
+              "manifest:synthetic:maintenance:1"
+            ],
+            "query_hint": "synthetic-demo maintenance official evidence"
+          }
+        ]
+      }
+    },
+    {
+      "request_id": "cf31e348-3e16-4d23-bb70-4c00fa74300b",
+      "agent_kind": "functional_trend_demand",
+      "output": {
+        "insights": [
+          {
+            "source_ref": "manifest:synthetic:functional:1",
+            "supporting_quote": "We need offline Python workflows where a network connection is unreliable.",
+            "statement": "The discussion identifies an offline workflow use case worth comparing with the package capabilities.",
+            "limitation": "An undated discussion does not verify a historical functional profile or package adoption."
+          }
+        ],
+        "information_gaps": [
+          {
+            "gap_id": "gap:synthetic:functional",
+            "missing_information": "The discussion historical availability and exact package capabilities remain unverified.",
+            "related_source_refs": [
+              "manifest:synthetic:functional:1"
+            ],
+            "suggested_question": "Which official documentation and archived revisions support the offline workflow use case?"
+          }
+        ],
+        "enrichment_suggestions": [
+          {
+            "suggestion_id": "suggestion:synthetic:functional",
+            "target_stage": "D03",
+            "objective": "Establish a source-grounded functional profile from official documentation.",
+            "rationale": "An undated discussion does not verify a historical functional profile or package adoption.",
+            "related_source_refs": [
+              "manifest:synthetic:functional:1"
+            ],
+            "query_hint": "synthetic-demo functional official evidence"
+          }
+        ]
+      }
+    },
+    {
+      "request_id": "be3a173d-84e5-4c01-ab63-f9fa88553273",
+      "agent_kind": "alternatives_migration",
+      "output": {
+        "insights": [
+          {
+            "source_ref": "manifest:synthetic:alternatives:1",
+            "supporting_quote": "A user recommends synthetic-other and says a migration may be worth investigating.",
+            "statement": "synthetic-other is an alternative candidate; the user recommendation is not confirmed migration.",
+            "limitation": "No compatibility or completed migration evidence has been independently checked."
+          }
+        ],
+        "information_gaps": [
+          {
+            "gap_id": "gap:synthetic:alternatives",
+            "missing_information": "Compatibility and whether any actual migration occurred are unknown.",
+            "related_source_refs": [
+              "manifest:synthetic:alternatives:1"
+            ],
+            "suggested_question": "Are there source-backed compatibility comparisons or explicit migration accounts?"
+          }
+        ],
+        "enrichment_suggestions": [
+          {
+            "suggestion_id": "suggestion:synthetic:alternatives",
+            "target_stage": "D05",
+            "objective": "Retrieve comparison and migration evidence for synthetic-other.",
+            "rationale": "No compatibility or completed migration evidence has been independently checked.",
+            "related_source_refs": [
+              "manifest:synthetic:alternatives:1"
+            ],
+            "query_hint": "synthetic-demo alternatives official evidence"
+          }
+        ]
+      }
+    }
+  ],
+  "strict": [],
+  "reviews": []
+}

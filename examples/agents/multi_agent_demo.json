@@ -1,0 +1,103 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "multi_agent_run_request",
+  "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+  "package_id": "pypi:synthetic-demo",
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "research_requests": [
+    {
+      "schema_version": "0.1.0",
+      "record_type": "specialist_research_request",
+      "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+      "request_id": "9eca50ac-42ca-482d-96ca-b2c451ef5248",
+      "agent_kind": "maintenance_lifecycle",
+      "package_id": "pypi:synthetic-demo",
+      "repo_id": null,
+      "cutoff_at": "2026-10-01T00:00:00.000Z",
+      "package_description": "Synthetic demo processes tabular data offline.",
+      "description_source_refs": [
+        "manifest:synthetic:description:1"
+      ],
+      "candidates": [
+        {
+          "candidate_id": "candidate:maintenance:1",
+          "source_ref": "manifest:synthetic:maintenance:1",
+          "source_url": "https://example.test/synthetic-demo/maintenance",
+          "source_kind": "external",
+          "relevance_status": "unresolved",
+          "topic_hint": "maintenance",
+          "text_excerpt": "The maintainer says release work is limited while a new volunteer is sought.",
+          "published_at": null,
+          "available_at": null,
+          "fetched_at": null
+        }
+      ],
+      "research_questions": [
+        "Which official maintainer notices and release history explain the reduced capacity?"
+      ]
+    },
+    {
+      "schema_version": "0.1.0",
+      "record_type": "specialist_research_request",
+      "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+      "request_id": "cf31e348-3e16-4d23-bb70-4c00fa74300b",
+      "agent_kind": "functional_trend_demand",
+      "package_id": "pypi:synthetic-demo",
+      "repo_id": null,
+      "cutoff_at": "2026-10-01T00:00:00.000Z",
+      "package_description": "Synthetic demo processes tabular data offline.",
+      "description_source_refs": [
+        "manifest:synthetic:description:1"
+      ],
+      "candidates": [
+        {
+          "candidate_id": "candidate:functional:1",
+          "source_ref": "manifest:synthetic:functional:1",
+          "source_url": "https://example.test/synthetic-demo/functional",
+          "source_kind": "external",
+          "relevance_status": "unresolved",
+          "topic_hint": "functional",
+          "text_excerpt": "We need offline Python workflows where a network connection is unreliable.",
+          "published_at": null,
+          "available_at": null,
+          "fetched_at": null
+        }
+      ],
+      "research_questions": [
+        "Which official documentation and archived revisions support the offline workflow use case?"
+      ]
+    },
+    {
+      "schema_version": "0.1.0",
+      "record_type": "specialist_research_request",
+      "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+      "request_id": "be3a173d-84e5-4c01-ab63-f9fa88553273",
+      "agent_kind": "alternatives_migration",
+      "package_id": "pypi:synthetic-demo",
+      "repo_id": null,
+      "cutoff_at": "2026-10-01T00:00:00.000Z",
+      "package_description": "Synthetic demo processes tabular data offline.",
+      "description_source_refs": [
+        "manifest:synthetic:description:1"
+      ],
+      "candidates": [
+        {
+          "candidate_id": "candidate:alternatives:1",
+          "source_ref": "manifest:synthetic:alternatives:1",
+          "source_url": "https://example.test/synthetic-demo/alternatives",
+          "source_kind": "external",
+          "relevance_status": "unresolved",
+          "topic_hint": "alternatives",
+          "text_excerpt": "A user recommends synthetic-other and says a migration may be worth investigating.",
+          "published_at": null,
+          "available_at": null,
+          "fetched_at": null
+        }
+      ],
+      "research_questions": [
+        "Are there source-backed compatibility comparisons or explicit migration accounts?"
+      ]
+    }
+  ],
+  "strict_requests": []
+}
