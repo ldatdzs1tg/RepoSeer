@@ -1,8 +1,11 @@
 """Bounded structured generation and explicit offline replay; SDK is live-only."""
 
+import hashlib
 import json
 import math
 import os
+from pathlib import Path
+from tempfile import TemporaryFile
 from time import perf_counter
 from typing import Annotated, Literal, Protocol, get_args
 
@@ -108,6 +111,103 @@ class ProviderCallDiagnostic(ContractModel):
         'sdk_parse_failed', 'unknown_parse_failure',
     ] | None = None
     validation_errors: list[ProviderValidationIssue] = Field(default_factory=list)
+    trace_file: str | None = None
+    trace_status: Literal['disabled', 'stored', 'truncated', 'unavailable', 'write_failed'] = 'disabled'
+
+
+AGENT_RUNS_ROOT = Path(__file__).resolve().parents[3] / 'data/agent_runs'
+RAW_OUTPUT_BUDGET = 128 * 1024
+
+
+def prepare_trace_directory(directory: Path) -> Path:
+    """Resolve the local-only boundary and check writability before any API call."""
+    try:
+        root = AGENT_RUNS_ROOT.resolve()
+        target = Path(directory).resolve()
+        if not target.is_relative_to(root) or (target / '.env').exists():
+            raise ValueError('invalid_trace_directory')
+        target.mkdir(parents=True, exist_ok=True)
+        with TemporaryFile(dir=target):
+            pass
+        return target
+    except (OSError, ValueError, RuntimeError):
+        raise ValueError('invalid_trace_directory') from None
+
+
+def _capture_raw_output(raw_response) -> dict:
+    """Inspect only the outer JSON; retain visible assistant text, never the envelope."""
+    captured = {}
+    try:
+        document = json.loads(raw_response.text)
+        if not isinstance(document, dict):
+            return captured
+        for key in ('id', 'status'):
+            value = document.get(key)
+            if isinstance(value, str):
+                captured['response_id' if key == 'id' else 'response_status'] = value
+        incomplete = document.get('incomplete_details')
+        if isinstance(incomplete, dict) and isinstance(incomplete.get('reason'), str):
+            captured['incomplete_reason'] = incomplete['reason']
+        captured['usage'] = document.get('usage')
+        segments = [part['text']
+                    for output in document.get('output', []) if isinstance(output, dict)
+                    and output.get('type') == 'message' and output.get('role') == 'assistant'
+                    for part in output.get('content', []) if isinstance(part, dict)
+                    and part.get('type') == 'output_text' and isinstance(part.get('text'), str)]
+        digest, original_bytes, remaining = hashlib.sha256(), 0, RAW_OUTPUT_BUDGET
+        retained = []
+        for segment in segments:
+            encoded = segment.encode('utf-8')
+            digest.update(encoded)
+            original_bytes += len(encoded)
+            if remaining:
+                prefix = encoded[:remaining].decode('utf-8', errors='ignore')
+                retained.append(prefix)
+                remaining -= len(prefix.encode('utf-8'))
+                # Stop retaining after a partial segment, even at a Unicode boundary.
+                if len(encoded) > len(prefix.encode('utf-8')):
+                    remaining = 0
+        captured.update(raw_output_available=bool(segments), raw_output_text=retained,
+                        raw_output_sha256=digest.hexdigest() if segments else None,
+                        raw_output_original_bytes=original_bytes if segments else None,
+                        raw_output_truncated=original_bytes > RAW_OUTPUT_BUDGET)
+    except Exception:
+        # Tracing cannot alter SDK parsing, including malformed outer responses.
+        pass
+    return captured
+
+
+def _write_trace(directory, diagnostic, captured, *, model, schema, request_json, system_prompt):
+    """Exclusive local write; failures never discard a successfully parsed draft."""
+    try:
+        directory = prepare_trace_directory(directory)
+        filename = f'{diagnostic.operation}-{hashlib.sha256(diagnostic.request_ref.encode()).hexdigest()}.json'
+        target = directory / filename
+        payload = dict(
+            trace_version='0.1.0', operation=diagnostic.operation, request_ref=diagnostic.request_ref,
+            model_id=model, prompt_version=PROMPT_VERSION, schema_name=schema.__name__,
+            request_sha256=hashlib.sha256(request_json.encode('utf-8')).hexdigest(),
+            system_prompt_sha256=hashlib.sha256(system_prompt.encode('utf-8')).hexdigest(),
+            response_id=captured.get('response_id'), response_status=captured.get('response_status'),
+            incomplete_reason=captured.get('incomplete_reason'),
+            raw_output_available=captured.get('raw_output_available', False),
+            raw_output_text=captured.get('raw_output_text', []),
+            raw_output_sha256=captured.get('raw_output_sha256'),
+            raw_output_original_bytes=captured.get('raw_output_original_bytes'),
+            raw_output_truncated=captured.get('raw_output_truncated', False),
+            parse_success=diagnostic.success, error_code=diagnostic.error_code,
+            parse_failure=diagnostic.parse_failure,
+            validation_errors=[v.model_dump() for v in diagnostic.validation_errors],
+            duration_ms=diagnostic.duration_ms, input_tokens=diagnostic.input_tokens,
+            output_tokens=diagnostic.output_tokens, total_tokens=diagnostic.total_tokens,
+        )
+        with target.open('x', encoding='utf-8', newline='\n') as stream:
+            stream.write(json.dumps(payload, ensure_ascii=False, indent=2) + '\n')
+        diagnostic.trace_file = str(target)
+        diagnostic.trace_status = ('truncated' if payload['raw_output_truncated'] else
+                                   'stored' if payload['raw_output_available'] else 'unavailable')
+    except Exception:
+        diagnostic.trace_status = 'write_failed'
 
 
 def _parse_failure_details(error: Exception, schema) -> tuple[str, list[ProviderValidationIssue]]:
@@ -142,7 +242,7 @@ def _parse_failure_details(error: Exception, schema) -> tuple[str, list[Provider
 
 
 def _usage_count(response, name: str) -> int | None:
-    usage = getattr(response, 'usage', None)
+    usage = response.get('usage') if isinstance(response, dict) else getattr(response, 'usage', None)
     value = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
     return value if type(value) is int and 0 <= value <= 9007199254740991 else None
 
@@ -225,7 +325,8 @@ class AgentLLMSettings(BaseSettings):
 class OpenAISpecialistLLM:
     def __init__(self, *, model: str | None = None, api_key: str | None = None,
                  client=None, timeout: float = 20, max_output_tokens: int = 3200,
-                 base_url: str | None = None, default_headers: dict[str, str] | None = None):
+                 base_url: str | None = None, default_headers: dict[str, str] | None = None,
+                 trace_dir: Path | None = None):
         model = model or os.getenv('REPOSEER_AGENT_MODEL', '')
         if not model.strip():
             raise ValueError('missing_agent_model_configuration')
@@ -233,6 +334,7 @@ class OpenAISpecialistLLM:
             raise ValueError('timeout must be finite and between 0 and 120 seconds')
         if type(max_output_tokens) is not int or not 256 <= max_output_tokens <= 8000:
             raise ValueError('output token budget must be between 256 and 8000')
+        self.trace_dir = prepare_trace_directory(trace_dir) if trace_dir is not None else None
         self.model_id, self.max_output_tokens, self.timeout = model, max_output_tokens, timeout
         self._owns_client = client is None
         self._extra_body = None
@@ -259,6 +361,15 @@ class OpenAISpecialistLLM:
             except Exception:
                 raise ValueError('llm_client_initialization_failed') from None
         self.client = client
+        if self.trace_dir is not None and not callable(
+            getattr(getattr(getattr(client, 'responses', None), 'with_raw_response', None), 'parse', None)
+        ):
+            if self._owns_client:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            raise ValueError('raw_response_tracing_unsupported')
 
     def _parse(self, data: ContractModel, schema, system_prompt: str):
         operation = {ResearchDraft: 'research', ExtractionDraft: 'extract', ReviewDraft: 'review'}[schema]
@@ -266,16 +377,25 @@ class OpenAISpecialistLLM:
         started = perf_counter()
         response, success, error_code = None, False, None
         parse_failure, validation_errors = None, []
+        captured = {}
+        request_json = json.dumps(data.model_dump(mode='json'))
         try:
-            response = self.client.responses.parse(
+            parse = (self.client.responses.parse if self.trace_dir is None else
+                     self.client.responses.with_raw_response.parse)
+            received = parse(
                 model=self.model_id, store=False, max_output_tokens=self.max_output_tokens,
                 timeout=self.timeout,
                 text_format=schema, input=[
                     {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': json.dumps(data.model_dump(mode='json'))},
+                    {'role': 'user', 'content': request_json},
                 ],
                 **({'extra_body': self._extra_body} if self._extra_body is not None else {}),
             )
+            if self.trace_dir is None:
+                response = received
+            else:
+                captured = _capture_raw_output(received)
+                response = received.parse()
             if any(getattr(content, 'type', None) == 'refusal'
                    for output in getattr(response, 'output', [])
                    for content in getattr(output, 'content', [])):
@@ -295,15 +415,20 @@ class OpenAISpecialistLLM:
                 parse_failure, validation_errors = _parse_failure_details(error, schema)
             raise ProviderError(error_code) from None
         finally:
-            self.call_diagnostics.append(ProviderCallDiagnostic(
+            usage_response = response if getattr(response, 'usage', None) is not None else captured
+            diagnostic = ProviderCallDiagnostic(
                 operation=operation, request_ref=request_ref,
                 duration_ms=max(0, int((perf_counter() - started) * 1000)),
-                input_tokens=_usage_count(response, 'input_tokens'),
-                output_tokens=_usage_count(response, 'output_tokens'),
-                total_tokens=_usage_count(response, 'total_tokens'),
+                input_tokens=_usage_count(usage_response, 'input_tokens'),
+                output_tokens=_usage_count(usage_response, 'output_tokens'),
+                total_tokens=_usage_count(usage_response, 'total_tokens'),
                 success=success, error_code=error_code,
                 parse_failure=parse_failure, validation_errors=validation_errors,
-            ))
+            )
+            if self.trace_dir is not None:
+                _write_trace(self.trace_dir, diagnostic, captured, model=self.model_id, schema=schema,
+                             request_json=request_json, system_prompt=system_prompt)
+            self.call_diagnostics.append(diagnostic)
 
     def research(self, request: ResearchHandoffRequest) -> ResearchDraft:
         return self._parse(
@@ -334,7 +459,7 @@ class OpenRouterSpecialistLLM(OpenAISpecialistLLM):
     def __init__(self, *, model: str, api_key: str | None = None, client=None,
                  base_url: str = 'https://openrouter.ai/api/v1',
                  http_referer: str = '', app_title: str = 'RepoSeer',
-                 timeout: float = 20, max_output_tokens: int = 3200):
+                 timeout: float = 20, max_output_tokens: int = 3200, trace_dir: Path | None = None):
         if not model.strip():
             raise ValueError('missing_agent_model_configuration')
         key = api_key or os.getenv('OPENROUTER_API_KEY', '')
@@ -347,20 +472,21 @@ class OpenRouterSpecialistLLM(OpenAISpecialistLLM):
             headers['X-OpenRouter-Title'] = app_title.strip()
         super().__init__(model=model, api_key=key, client=client, base_url=base_url,
                          default_headers=headers, timeout=timeout,
-                         max_output_tokens=max_output_tokens)
+                         max_output_tokens=max_output_tokens, trace_dir=trace_dir)
         # Fail if routing cannot preserve the requested structured-output parameters.
         self._extra_body = {'provider': {'require_parameters': True}}
 
 
 def create_specialist_llm(*, model: str | None = None, client=None,
-                          settings: AgentLLMSettings | None = None) -> OpenAISpecialistLLM:
+                          settings: AgentLLMSettings | None = None,
+                          trace_dir: Path | None = None) -> OpenAISpecialistLLM:
     """Construct live transport only on demand; never called by offline replay."""
     settings = settings if settings is not None else AgentLLMSettings()
     model_id = settings.model if model is None else model
     if not model_id.strip():
         raise ValueError('missing_agent_model_configuration')
     common = dict(model=model_id.strip(), client=client, timeout=settings.timeout_seconds,
-                  max_output_tokens=settings.max_output_tokens)
+                  max_output_tokens=settings.max_output_tokens, trace_dir=trace_dir)
     if settings.provider == 'openrouter':
         return OpenRouterSpecialistLLM(
             **common, api_key=settings.openrouter_api_key.get_secret_value(),

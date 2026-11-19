@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from reposeer.agents import prompts
+from reposeer.agents import provider as provider_module
 from reposeer.agents.cli import main
 from reposeer.agents.intake import SPECIALISTS, IntakeSummary, build_research_requests_from_raw
 from reposeer.agents.orchestrator import (
@@ -1124,3 +1125,329 @@ def test_typed_sdk_parse_failure_and_opaque_failure_remain_distinct_and_sanitize
     assert provider.call_diagnostics[-1].parse_failure == 'unknown_parse_failure'
     assert len(calls) == 2 and all(not d.validation_errors for d in provider.call_diagnostics)
     assert 'synthetic-private-response-body' not in str(provider.call_diagnostics)
+
+
+@pytest.fixture
+def trace_directory(tmp_path, monkeypatch):
+    root = tmp_path / 'data/agent_runs'
+    monkeypatch.setattr(provider_module, 'AGENT_RUNS_ROOT', root)
+    return root / 'traces'
+
+
+def raw_trace_provider(trace_directory, text, *, failure=None, no_output=False):
+    """One fake HTTP response; parser is deliberately deferred until after capture."""
+    calls = []
+    draft = ResearchDraft.model_validate(example('multi_agent_replay')['research'][0]['output'])
+    body = dict(id='response-synthetic', status='completed',
+                usage=dict(input_tokens=100, output_tokens=25, total_tokens=125),
+                # Deliberate forbidden envelope fields must never reach the trace.
+                headers={'Authorization': 'synthetic-private-key'}, reasoning='private-hidden-reasoning',
+                output=[] if no_output else [dict(type='message', role='assistant', content=[
+                    dict(type='output_text', text=text), dict(type='reasoning', text='private-hidden-reasoning')])])
+    def deferred_parse():
+        calls.append('deferred_parse')
+        assert list(trace_directory.glob('*.json')) == []  # Final trace includes parse diagnostics.
+        if failure == 'invalid_json':
+            return ResearchDraft.model_validate_json(text)
+        if failure == 'schema':
+            return ResearchDraft.model_validate_json(text)
+        return SimpleNamespace(status='completed', output=[], output_parsed=None if failure == 'missing' else draft)
+    def receive(**kwargs):
+        calls.append(kwargs)
+        if failure == 'timeout':
+            raise TimeoutError('synthetic-private-key')
+        return SimpleNamespace(text=json.dumps(body), parse=deferred_parse)
+    def normal(**kwargs):
+        pytest.fail('Trace-enabled calls must use the raw wrapper only')
+    client = SimpleNamespace(responses=SimpleNamespace(parse=normal,
+        with_raw_response=SimpleNamespace(parse=receive)))
+    provider = OpenRouterSpecialistLLM(model='synthetic-model', client=client, trace_dir=trace_directory)
+    return provider, draft, calls
+
+
+def test_trace_disabled_uses_normal_parse_once_and_creates_no_files(tmp_path):
+    calls = []
+    draft = ResearchDraft.model_validate(example('multi_agent_replay')['research'][0]['output'])
+    def normal(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(status='completed', output=[], output_parsed=draft)
+    provider = OpenAISpecialistLLM(model='synthetic-model', client=SimpleNamespace(
+        responses=SimpleNamespace(parse=normal, with_raw_response=None)))
+    assert provider.research(demo().research_requests[0]) == draft
+    assert len(calls) == 1 and list(tmp_path.iterdir()) == []
+    assert provider.call_diagnostics[0].trace_file is None
+    assert provider.call_diagnostics[0].trace_status == 'disabled'
+
+
+@pytest.mark.parametrize('failure', [None, 'invalid_json', 'schema', 'missing', 'timeout', 'no_output'])
+def test_trace_retains_actual_visible_text_before_parsing_and_preserves_failures(trace_directory, failure, capsys):
+    text = ('{"insights": [' if failure == 'invalid_json' else
+            '{"insights": [], "information_gaps": []}' if failure == 'schema' else
+            ResearchDraft.model_validate(example('multi_agent_replay')['research'][0]['output']).model_dump_json())
+    provider, draft, calls = raw_trace_provider(trace_directory, text, failure=failure,
+                                              no_output=failure == 'no_output')
+    request = demo().research_requests[0]
+    if failure in {'invalid_json', 'schema', 'missing', 'timeout'}:
+        code = 'provider_timeout' if failure == 'timeout' else 'invalid_structured_output'
+        with pytest.raises(ProviderError, match='^' + code + '$'):
+            provider.research(request)
+    else:
+        assert provider.research(request) == draft
+    assert len([c for c in calls if isinstance(c, dict)]) == 1
+    call = calls[0]
+    assert call['store'] is False and call['text_format'] is ResearchDraft
+    assert call['timeout'] == 20 and call['max_output_tokens'] == 3200
+    assert call['extra_body'] == {'provider': {'require_parameters': True}}
+    diagnostic = provider.call_diagnostics[0]
+    trace = json.loads(Path(diagnostic.trace_file).read_bytes())
+    available = failure not in {'timeout', 'no_output'}
+    assert trace['raw_output_available'] == available
+    assert trace['raw_output_text'] == ([text] if available else [])
+    assert trace['parse_success'] == (failure in {None, 'no_output'})
+    assert trace['error_code'] == diagnostic.error_code
+    assert trace['parse_failure'] == {
+        'invalid_json': 'invalid_json', 'schema': 'schema_validation_failed',
+        'missing': 'missing_parsed_output',
+    }.get(failure)
+    assert trace['raw_output_sha256'] == (hashlib.sha256(text.encode()).hexdigest() if available else None)
+    assert not trace['raw_output_truncated']
+    assert trace['request_sha256'] == hashlib.sha256(call['input'][1]['content'].encode()).hexdigest()
+    assert trace['system_prompt_sha256'] == hashlib.sha256(call['input'][0]['content'].encode()).hexdigest()
+    assert trace['response_id'] == (None if failure == 'timeout' else 'response-synthetic')
+    assert trace['input_tokens'] == (None if failure == 'timeout' else 100)
+    assert trace['output_tokens'] == (None if failure == 'timeout' else 25)
+    assert trace['total_tokens'] == (None if failure == 'timeout' else 125)
+    assert diagnostic.trace_status == ('stored' if available else 'unavailable')
+    stored = Path(diagnostic.trace_file).read_text(encoding='utf-8')
+    assert 'synthetic-private-key' not in stored and 'private-hidden-reasoning' not in stored
+    assert 'Authorization' not in stored and 'headers' not in trace and 'usage' not in trace
+    assert text not in capsys.readouterr().out
+    if failure == 'timeout':
+        assert calls == [call]  # No response/parser/output is fabricated.
+    else:
+        assert calls == [call, 'deferred_parse']
+
+
+def test_trace_utf8_budget_original_hash_and_no_overwrite(trace_directory):
+    text = 'x' + '\u00e9' * (128 * 1024)
+    provider, draft, calls = raw_trace_provider(trace_directory, text)
+    request = demo().research_requests[0]
+    assert provider.research(request) == draft
+    diagnostic = provider.call_diagnostics[-1]
+    path = Path(diagnostic.trace_file)
+    original = path.read_bytes()
+    trace = json.loads(original)
+    prefix = ''.join(trace['raw_output_text'])
+    assert text.startswith(prefix) and len(prefix.encode('utf-8')) <= 128 * 1024
+    assert trace['raw_output_original_bytes'] == len(text.encode('utf-8'))
+    assert trace['raw_output_sha256'] == hashlib.sha256(text.encode('utf-8')).hexdigest()
+    assert trace['raw_output_truncated'] and diagnostic.trace_status == 'truncated'
+    # A colliding filename does not discard an otherwise valid parsed response.
+    # Replace the fake's assertion about a yet-unwritten first trace.
+    provider.client.responses.with_raw_response.parse = lambda **kw: SimpleNamespace(
+        text='{}', parse=lambda: SimpleNamespace(status='completed', output=[], output_parsed=draft))
+    assert provider.research(request) == draft
+    assert path.read_bytes() == original
+    assert provider.call_diagnostics[-1].trace_status == 'write_failed'
+    assert provider.call_diagnostics[-1].trace_file is None
+
+
+def test_trace_write_failure_preserves_parsed_response(trace_directory, monkeypatch, capsys):
+    provider, draft, _ = raw_trace_provider(trace_directory, '{}')
+    request = demo().research_requests[0]
+    def fail(*args, **kwargs):
+        raise PermissionError('synthetic-private-key')
+    monkeypatch.setattr(Path, 'open', fail)
+    assert provider.research(request) == draft
+    assert provider.call_diagnostics[-1].trace_status == 'write_failed'
+    assert capsys.readouterr().out == ''
+
+
+def test_trace_rejects_unsafe_paths_replay_and_unsupported_sdk(trace_directory, tmp_path, monkeypatch):
+    from reposeer.agents.provider import prepare_trace_directory
+    for unsafe in (tmp_path / 'outside', trace_directory / '../../../outside'):
+        with pytest.raises(ValueError, match='^invalid_trace_directory$'):
+            prepare_trace_directory(unsafe)
+        assert not unsafe.exists()
+    trace_directory.mkdir(parents=True)
+    (trace_directory / '.env').write_text('synthetic-secret')
+    with pytest.raises(ValueError, match='^invalid_trace_directory$'):
+        prepare_trace_directory(trace_directory)
+    (trace_directory / '.env').unlink()
+    with pytest.raises(ValueError, match='^raw_response_tracing_unsupported$'):
+        OpenAISpecialistLLM(model='synthetic-model', trace_dir=trace_directory,
+            client=SimpleNamespace(responses=SimpleNamespace(parse=lambda: pytest.fail('No API allowed'))))
+    monkeypatch.setattr('reposeer.agents.cli.create_specialist_llm',
+                        lambda **kw: pytest.fail('Invalid trace path must not call API'))
+    with pytest.raises(SystemExit) as error:
+        main(['--mode', 'replay', '--input', str(EXAMPLES / 'multi_agent_demo.json'),
+              '--responses', str(EXAMPLES / 'multi_agent_replay.json'),
+              '--trace-dir', str(trace_directory), '--output', str(tmp_path / 'run.json')])
+    assert error.value.code == 2
+
+
+def test_locked_sdk_raw_wrapper_defers_pydantic_parsing(trace_directory):
+    """Exercise the installed SDK against fake HTTP, without network or actual settings."""
+    import httpx
+    from openai import OpenAI
+    text, calls = '{"insights": [', []
+    def transport(request):
+        calls.append(request)
+        return httpx.Response(200, json=dict(id='resp_fake', object='response', created_at=0,
+            model='synthetic-model', status='completed', output=[dict(id='msg_fake', type='message',
+            role='assistant', status='completed', content=[dict(type='output_text', text=text, annotations=[])])]))
+    with OpenAI(api_key='synthetic-key', http_client=httpx.Client(transport=httpx.MockTransport(transport))) as client:
+        provider = OpenAISpecialistLLM(model='synthetic-model', client=client, trace_dir=trace_directory)
+        with pytest.raises(ProviderError, match='^invalid_structured_output$'):
+            provider.research(demo().research_requests[0])
+    assert len(calls) == 1
+    diagnostic = provider.call_diagnostics[0]
+    trace = json.loads(Path(diagnostic.trace_file).read_bytes())
+    assert trace['raw_output_text'] == [text] and trace['parse_failure'] == 'invalid_json'
+
+
+def compact_case(tmp_path):
+    request = demo()
+    for child in request.research_requests:
+        base = child.candidates[0]
+        child.candidates = [base.model_copy(update={
+            'candidate_id': f'candidate:{i}', 'source_ref': f'raw:synthetic-{i}',
+            'text_excerpt': ('Caf\u00e9  source text. ' * 200) if i != 4 else None,
+        }) for i in range(5)]
+    request.intake_summary = IntakeSummary(accepted_candidates=5, retained_candidates=5)
+    input_path, selection, output = [tmp_path / name for name in ('input.json', 'selection.json', 'compact.json')]
+    input_path.write_text(request.model_dump_json(), encoding='utf-8')
+    plan = {kind: [f'raw:synthetic-{i}' for i in indices]
+            for kind, indices in zip(SPECIALISTS, ([0, 1], [1, 2, 3], [4]), strict=True)}
+    selection.write_text(json.dumps(plan), encoding='utf-8')
+    return request, input_path, selection, output, plan
+
+
+def test_compact_explicit_selection_preserves_identity_and_audits_actual_bytes(tmp_path):
+    from scripts.prepare_compact_research import prepare_compact
+    request, source, selection, output, plan = compact_case(tmp_path)
+    before = source.read_bytes()
+    _, audit_path = prepare_compact(source, selection, output)
+    compact = MultiAgentRunRequest.model_validate_json(output.read_bytes())
+    audit = json.loads(audit_path.read_bytes())
+    assert source.read_bytes() == before
+    assert compact.intake_summary is None and compact.strict_requests == []
+    original = request.model_dump(exclude={'research_requests', 'intake_summary'})
+    assert compact.model_dump(exclude={'research_requests', 'intake_summary'}) == original
+    for old, new in zip(request.research_requests, compact.research_requests, strict=True):
+        refs = plan[old.agent_kind]
+        assert new.model_dump(exclude={'candidates'}) == old.model_dump(exclude={'candidates'})
+        assert [c.source_ref for c in new.candidates] == refs
+        for candidate in new.candidates:
+            previous = next(c for c in old.candidates if c.source_ref == candidate.source_ref)
+            assert candidate.model_dump(exclude={'text_excerpt'}) == previous.model_dump(exclude={'text_excerpt'})
+            assert candidate.text_excerpt == (previous.text_excerpt[:2000] if previous.text_excerpt is not None else None)
+        counts = audit['per_specialist'][new.agent_kind]
+        assert counts['original_candidate_count'] == 5
+        assert counts['selected_candidate_count'] == len(refs)
+        assert counts['omitted_candidate_count'] == 5 - len(refs)
+        assert counts['selected_source_refs'] == refs
+        assert counts['omitted_source_refs'] == [c.source_ref for c in old.candidates if c.source_ref not in refs]
+        assert counts['truncated_candidate_count'] == (0 if refs == ['raw:synthetic-4'] else len(refs))
+    assert audit['original_source_count'] == 5
+    assert audit['original_intake_summary'] == request.intake_summary.model_dump()
+    assert audit['source_input_sha256'] == hashlib.sha256(before).hexdigest()
+    assert audit['compact_input_sha256'] == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert 'Caf' not in audit_path.read_text()
+    with pytest.raises(ValueError, match='compact_output_already_exists'):
+        prepare_compact(source, selection, output)
+
+
+@pytest.mark.parametrize('invalid', ['missing_ref', 'duplicate_ref', 'empty', 'too_many', 'extra_key',
+                                    'missing_key', 'wrong_type', 'strict', 'zero_budget', 'large_budget'])
+def test_compact_invalid_selection_writes_nothing(tmp_path, invalid):
+    from scripts.prepare_compact_research import main as compact_main
+    request, source, selection, output, plan = compact_case(tmp_path)
+    budget = 2000
+    if invalid == 'missing_ref':
+        plan[SPECIALISTS[0]] = ['raw:absent']
+    elif invalid == 'duplicate_ref':
+        plan[SPECIALISTS[0]] = ['raw:synthetic-0'] * 2
+    elif invalid == 'empty':
+        plan[SPECIALISTS[0]] = []
+    elif invalid == 'too_many':
+        plan[SPECIALISTS[0]] = [f'raw:synthetic-{i}' for i in range(4)]
+    elif invalid == 'extra_key':
+        plan['unknown'] = []
+    elif invalid == 'missing_key':
+        del plan[SPECIALISTS[0]]
+    elif invalid == 'wrong_type':
+        plan[SPECIALISTS[0]] = [123]
+    elif invalid == 'strict':
+        strict, _ = strict_case()
+        request.strict_requests = strict.strict_requests
+        source.write_text(request.model_dump_json(), encoding='utf-8')
+    elif invalid == 'zero_budget':
+        budget = 0
+    elif invalid == 'large_budget':
+        budget = 10001
+    selection.write_text(json.dumps(plan), encoding='utf-8')
+    before = source.read_bytes()
+    assert compact_main(['--input', str(source), '--selection', str(selection), '--output', str(output),
+                         '--max-excerpt-chars', str(budget)]) == 2
+    assert not output.exists() and not output.with_suffix('.selection.json').exists()
+    assert source.read_bytes() == before
+
+
+
+def test_trace_multiple_segments_excludes_nonassistant_and_retains_incomplete_metadata():
+    from reposeer.agents.provider import _capture_raw_output
+    body = dict(id='resp_synthetic', status='incomplete', incomplete_details={'reason': 'max_output_tokens'},
+        output=[dict(type='reasoning', summary=[dict(text='hidden')]),
+                dict(type='message', role='user', content=[dict(type='output_text', text='private-user')]),
+                dict(type='message', role='assistant', content=[dict(type='output_text', text='Caf\u00e9  '),
+                     dict(type='refusal', refusal='not-visible-output'), dict(type='output_text', text='{}')])])
+    captured = _capture_raw_output(SimpleNamespace(text=json.dumps(body)))
+    assert captured['raw_output_text'] == ['Caf\u00e9  ', '{}']
+    assert captured['raw_output_sha256'] == hashlib.sha256('Caf\u00e9  {}'.encode()).hexdigest()
+    assert captured['response_status'] == 'incomplete' and captured['incomplete_reason'] == 'max_output_tokens'
+    assert captured['usage'] is None
+    for malformed in ('not-json', '[]', '{"output": null}'):
+        captured = _capture_raw_output(SimpleNamespace(text=malformed))
+        assert not captured.get('raw_output_available', False)
+
+
+def test_cli_trace_metadata_flows_through_existing_diagnostics_only(trace_directory, tmp_path, monkeypatch):
+    attempts = []
+    def receive(**kwargs):
+        attempts.append(kwargs)
+        child = json.loads(kwargs['input'][1]['content'])
+        entry = next(e for e in example('multi_agent_replay')['research'] if e['agent_kind'] == child['agent_kind'])
+        text = json.dumps(entry['output'])
+        body = dict(status='completed', output=[dict(type='message', role='assistant',
+                    content=[dict(type='output_text', text=text)])])
+        return SimpleNamespace(text=json.dumps(body), parse=lambda: SimpleNamespace(status='completed',
+                               output=[], output_parsed=ResearchDraft.model_validate(entry['output'])))
+    def factory(**kwargs):
+        return OpenAISpecialistLLM(model='synthetic-model', trace_dir=kwargs['trace_dir'],
+            client=SimpleNamespace(responses=SimpleNamespace(with_raw_response=SimpleNamespace(parse=receive))))
+    monkeypatch.setattr('reposeer.agents.cli.create_specialist_llm', factory)
+    output = tmp_path / 'run.json'
+    assert main(['--mode', 'live', '--input', str(EXAMPLES / 'multi_agent_demo.json'),
+                 '--trace-dir', str(trace_directory), '--output', str(output), '--max-llm-calls', '3']) == 0
+    result = MultiAgentRunResult.model_validate_json(output.read_bytes())
+    assert len(attempts) == result.provider_calls == len(list(trace_directory.glob('*.json'))) == 3
+    assert len(result.research_grounding) == 3
+    assert all(d.trace_status == 'stored' and Path(d.trace_file).exists() for d in result.provider_call_diagnostics)
+    assert 'raw_output_text' not in result.model_dump_json()
+    assert result.prompt_version == '0.2.1' and result.schema_version == '0.1.0'
+
+
+def test_compact_refuses_existing_audit_and_duplicate_plan_keys(tmp_path):
+    from scripts.prepare_compact_research import prepare_compact
+    _, source, selection, output, plan = compact_case(tmp_path)
+    audit = output.with_suffix('.selection.json')
+    audit.write_bytes(b'existing-audit')
+    with pytest.raises(ValueError, match='compact_output_already_exists'):
+        prepare_compact(source, selection, output)
+    assert audit.read_bytes() == b'existing-audit' and not output.exists()
+    audit.unlink()
+    selection.write_text(json.dumps(plan)[:-1] + ', "maintenance_lifecycle": []}', encoding='utf-8')
+    with pytest.raises(ValueError, match='duplicate_selection_key'):
+        prepare_compact(source, selection, output)
+    assert not audit.exists() and not output.exists()

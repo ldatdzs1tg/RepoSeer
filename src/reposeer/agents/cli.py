@@ -30,6 +30,7 @@ def main(argv=None) -> int:
     parser.add_argument('--responses', type=Path)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--model')
+    parser.add_argument('--trace-dir', type=Path)
     parser.add_argument('--analysis-run-id')
     parser.add_argument('--package-id')
     parser.add_argument('--repo-id')
@@ -41,6 +42,8 @@ def main(argv=None) -> int:
     parser.add_argument('--max-llm-calls', type=int, default=7)
     parser.add_argument('--max-review-calls', type=int, default=0)
     args = parser.parse_args(argv)
+    if args.trace_dir is not None and args.mode != 'live':
+        parser.error('--trace-dir applies only to live')
     if args.mode == 'replay' and args.responses is None:
         parser.error('replay requires --responses')
     if args.mode == 'live' and args.responses is not None:
@@ -71,7 +74,7 @@ def main(argv=None) -> int:
                 research_requests=requests, strict_requests=[], intake_summary=report,
             )
         provider = (ReplaySpecialistLLM(_read(args.responses, ReplayBundle)) if args.mode == 'replay'
-                    else create_specialist_llm(model=args.model))
+                    else create_specialist_llm(model=args.model, trace_dir=args.trace_dir))
         result = MultiAgentCoordinator(
             provider, execution_mode=args.mode, max_llm_calls=args.max_llm_calls,
             max_review_calls=args.max_review_calls, max_candidates_per_agent=args.max_candidates,
@@ -96,6 +99,7 @@ def main(argv=None) -> int:
         allowed = {
             'missing_agent_model_configuration', 'missing_openai_api_key', 'missing_openrouter_api_key',
             'optional_functional_sdk_unavailable', 'llm_client_initialization_failed',
+            'invalid_trace_directory', 'raw_response_tracing_unsupported',
         }
         code = str(error) if str(error) in allowed else 'invalid_input_output_or_configuration'
         print(f'Agent run error: {code}; check explicit paths, schemas and live configuration')

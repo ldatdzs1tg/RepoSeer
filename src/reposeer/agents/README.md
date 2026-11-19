@@ -85,6 +85,65 @@ Both transports support injected fake clients; no real API call is part of tests
 Replay does not construct live settings or a client and works even with invalid live
 configuration. No additional dependency or lockfile change is required.
 
+## Compact research experiments and local output tracing
+
+Prepare a derived request from an existing validated research-only input. The selection
+JSON must contain exactly the three specialist names, each listing 1–3 unique source
+references already present for that specialist. Selection is explicit and reproducible;
+there is no URL/title relevance inference or automatic source fallback.
+
+```powershell
+uv run --frozen python -m scripts.prepare_compact_research `
+  --input data/agent_runs/experiment/original.json `
+  --selection data/agent_runs/experiment/source-selection.json `
+  --max-excerpt-chars 2000 `
+  --output data/agent_runs/experiment/compact.json
+uv run --frozen python -m reposeer.agents.cli `
+  --mode live --input data/agent_runs/experiment/compact.json `
+  --max-llm-calls 3 --max-review-calls 0 `
+  --trace-dir data/agent_runs/experiment/traces `
+  --output data/agent_runs/experiment/live.json
+```
+
+The helper preserves run/request IDs, package/repository identity, descriptions,
+questions and candidate metadata. Only selected excerpts are shortened by Python
+substring (default 2,000; allowed 1–10,000 characters). Strict requests are rejected.
+The original file stays unchanged. The derived request has `intake_summary=null`;
+`compact.selection.json` retains the original summary, actual-byte SHA-256 hashes,
+original source count and each specialist's selected/omitted/truncated counts and refs.
+Both output files use exclusive creation. Compact selection is **not a complete source
+census** and does not establish relevance, historical availability or Flask coverage.
+
+Tracing is disabled unless `--trace-dir` is explicitly supplied in live mode. Resolved
+paths must stay under the repository's `data/agent_runs/`, which is Git-ignored. Replay
+remains offline and rejects the option. Traces are local experiment artifacts: do not
+commit or upload them. Visible output may copy sensitive source text.
+
+The live adapter uses `responses.with_raw_response.parse()` instead of ordinary
+`responses.parse()` when tracing. Both issue one HTTP request with the same model,
+structured schema, prompts, token/timeout limits, `store=False` and zero retries.
+The adapter reads visible assistant message `output_text` segments before invoking
+`raw_response.parse()`. It preserves that text even if SDK/Pydantic parsing fails;
+parsers and exact quote validators remain unchanged. Unsupported SDK wrappers or
+unusable trace directories fail configuration before API calls.
+
+Traces exclude hidden reasoning, prompts, headers, credentials and the full API envelope.
+They retain input/system hashes, permitted response metadata, actual usage when available,
+parse diagnostics and visible output only. `raw_output_sha256` hashes the original UTF-8
+segments concatenated in API order, without separators. The stored segment prefixes total
+at most 128 KiB of valid UTF-8. Oversized output explicitly records truncation, original
+byte length and the full-output hash. Missing response/output is marked unavailable;
+no output or usage is fabricated. A trace write failure preserves the provider result
+and sets diagnostic `trace_status="write_failed"`, without a fallback directory or logs.
+
+For `invalid_json`, find the diagnostic's `trace_file` using its coordinator `request_ref`.
+Filenames are `<operation>-<sha256-of-request-ref>.json`, safe on Windows. Inspect
+`raw_output_text` locally alongside `response_status`, `incomplete_reason`, `parse_failure`
+and downstream grounding rejections. Never treat a matching quote as proof that an
+insight's interpretation is supported. Trace content stays outside `MultiAgentRunResult`;
+only `trace_file` and `trace_status` metadata enter existing diagnostics. Existing trace
+files are never overwritten; collisions report `write_failed` without retrying the API.
+
 ## Retained canonical raw documents
 
 ```powershell
