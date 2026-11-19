@@ -4,9 +4,10 @@ import json
 import math
 import os
 from time import perf_counter
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Literal, Protocol, get_args
 
 from pydantic import Field, SecretStr, ValidationError, model_validator
+from pydantic_core import ErrorType
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from reposeer.agents.prompts import PROMPT_VERSION as PROMPT_VERSION
@@ -67,6 +68,7 @@ def _provider_error_code(error: Exception) -> str:
             ('UnprocessableEntityError', 'provider_bad_request'),
             ('LengthFinishReasonError', 'llm_incomplete_output'),
             ('ContentFilterFinishReasonError', 'llm_refusal'),
+            ('APIResponseValidationError', 'invalid_structured_output'),
         ):
             exception_type = getattr(openai, name, None)
             if isinstance(exception_type, type) and isinstance(error, exception_type):
@@ -87,6 +89,11 @@ def _provider_error_code(error: Exception) -> str:
     return 'llm_request_or_output_failed'
 
 
+class ProviderValidationIssue(ContractModel):
+    field_path: NonEmpty
+    error_type: NonEmpty
+
+
 class ProviderCallDiagnostic(ContractModel):
     operation: Literal['research', 'extract', 'review']
     request_ref: NonEmpty
@@ -96,6 +103,42 @@ class ProviderCallDiagnostic(ContractModel):
     total_tokens: Count | None = None
     success: bool
     error_code: NonEmpty | None
+    parse_failure: Literal[
+        'invalid_json', 'schema_validation_failed', 'missing_parsed_output',
+        'sdk_parse_failed', 'unknown_parse_failure',
+    ] | None = None
+    validation_errors: list[ProviderValidationIssue] = Field(default_factory=list)
+
+
+def _parse_failure_details(error: Exception, schema) -> tuple[str, list[ProviderValidationIssue]]:
+    """Expose bounded error types and schema-owned paths, never messages, inputs or bodies."""
+    if isinstance(error, json.JSONDecodeError):
+        return 'invalid_json', []
+    if isinstance(error, ValidationError):
+        errors = error.errors(include_input=False, include_context=False, include_url=False)
+        document = schema.model_json_schema()
+        known_fields = set(document.get('properties', {}))
+        for definition in document.get('$defs', {}).values():
+            known_fields.update(definition.get('properties', {}))
+        issues = []
+        for item in errors[:10]:
+            parts = [str(part) if type(part) is int and 0 <= part <= 9007199254740991 else
+                     part if isinstance(part, str) and part in known_fields else '<unknown_field>'
+                     for part in item['loc'][:12]]
+            issues.append(ProviderValidationIssue(
+                field_path='.'.join(parts) or '$',
+                error_type=item['type'] if item['type'] in get_args(ErrorType) else 'unknown_validation_error',
+            ))
+        return ('invalid_json' if any(item['type'] == 'json_invalid' for item in errors)
+                else 'schema_validation_failed'), issues
+    try:
+        import openai
+    except ImportError:
+        openai = None
+    sdk_error = getattr(openai, 'APIResponseValidationError', None)
+    if isinstance(sdk_error, type) and isinstance(error, sdk_error):
+        return 'sdk_parse_failed', []
+    return 'unknown_parse_failure', []
 
 
 def _usage_count(response, name: str) -> int | None:
@@ -222,6 +265,7 @@ class OpenAISpecialistLLM:
         request_ref = data.cluster_id if isinstance(data, ReviewInput) else data.request_id
         started = perf_counter()
         response, success, error_code = None, False, None
+        parse_failure, validation_errors = None, []
         try:
             response = self.client.responses.parse(
                 model=self.model_id, store=False, max_output_tokens=self.max_output_tokens,
@@ -240,12 +284,15 @@ class OpenAISpecialistLLM:
                 raise ProviderError('llm_incomplete_output')
             value = getattr(response, 'output_parsed', None)
             if value is None:
+                parse_failure = 'missing_parsed_output'
                 raise ProviderError('invalid_structured_output')
             parsed = schema.model_validate(value.model_dump() if isinstance(value, schema) else value)
             success = True
             return parsed
         except Exception as error:
             error_code = _provider_error_code(error)
+            if parse_failure is None and error_code in {'invalid_structured_output', 'llm_request_or_output_failed'}:
+                parse_failure, validation_errors = _parse_failure_details(error, schema)
             raise ProviderError(error_code) from None
         finally:
             self.call_diagnostics.append(ProviderCallDiagnostic(
@@ -255,6 +302,7 @@ class OpenAISpecialistLLM:
                 output_tokens=_usage_count(response, 'output_tokens'),
                 total_tokens=_usage_count(response, 'total_tokens'),
                 success=success, error_code=error_code,
+                parse_failure=parse_failure, validation_errors=validation_errors,
             ))
 
     def research(self, request: ResearchHandoffRequest) -> ResearchDraft:

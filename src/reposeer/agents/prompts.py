@@ -4,7 +4,7 @@ from typing import Literal
 
 from reposeer.contracts.specialist_agents import Specialist
 
-PROMPT_VERSION = "0.2.0"
+PROMPT_VERSION = "0.2.1"
 
 
 COMMON_PROMPT = """
@@ -650,6 +650,54 @@ Preserve uncertainty about relevance, timestamps,
 source availability, and package identity.
 
 Do not introduce additional output fields.
+<exact_quote_requirements>
+A supporting_quote is an exact, contiguous substring
+of one supplied source's text_excerpt or an explicitly
+referenced package_description.
+
+Copy the quote verbatim. Preserve original wording,
+capitalization, punctuation, Unicode, and whitespace.
+
+Do not paraphrase, normalize, reconstruct, combine
+non-adjacent spans, or insert ellipses.
+
+Use only the text actually included in this request.
+Do not quote from the original full article if that text
+is absent from the supplied excerpt.
+
+Before returning an insight, verify:
+1. The source_ref exists in the current request.
+2. The quote appears exactly in that source.
+3. The statement is semantically supported by the quote.
+
+If a valid exact quote cannot be found, omit that insight
+and report an information gap if useful.
+
+Never invent a quote to fill the output.
+</exact_quote_requirements>
+
+<structured_output_requirements>
+Return exactly one ResearchDraft object.
+
+Always include all three top-level fields:
+- insights
+- information_gaps
+- enrichment_suggestions
+
+Use [] for an empty list.
+
+Every object must include all required schema fields.
+Use null only for fields explicitly allowing null.
+
+Do not add explanatory prose outside the structured output.
+Do not add Markdown fences or extra fields.
+
+Prefer a small number of distinct, well-supported insights
+and targeted enrichment suggestions over verbose repetition.
+
+Use concise statements and limitations.
+Never sacrifice schema correctness for output quantity.
+</structured_output_requirements>
 </task>
 """
 

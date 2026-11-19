@@ -181,13 +181,24 @@ when reusing a provider. Replay/fake providers need no telemetry and produce an 
 list unless they supply it; no tokens or USD costs are estimated. Adapter success
 means schema parsing succeeded; downstream grounding and semantic checks still apply.
 
-## Prompt design v0.2.0
+Optional `parse_failure` distinguishes `invalid_json`, `schema_validation_failed`,
+`missing_parsed_output`, typed `sdk_parse_failed`, and `unknown_parse_failure`.
+`validation_errors` contains bounded, sanitized field paths and Pydantic error types;
+unknown field names are redacted. Messages, inputs and response bodies are never stored.
+The general `invalid_structured_output` code remains compatible with earlier results.
+
+## Prompt design v0.2.1
 
 [`prompts.py`](prompts.py) combines common evidence-analysis, temporal, authority and
 injection-resistance instructions with one of the three specialist rubrics and a
 separate research or strict-extraction task. The bounded reviewer gets common/review
 instructions only, without a fourth specialist role. Both live transports use the
 same pure builder; package/source JSON stays in the user message.
+
+Research v0.2.1 explicitly requires verbatim contiguous quotes from the supplied excerpt,
+including Unicode and whitespace, and one concise ResearchDraft with all required fields.
+Exact substring/schema validators remain authoritative; the prompt cannot guarantee
+model compliance, and no automatic repair or retry is performed.
 
 Observations are stated from supplied text; interpretations explain their limited
 meaning; hypotheses retain uncertainty rather than becoming independently verified
@@ -197,7 +208,7 @@ identify the precise gap, why it matters, and a focused D03/D04/D05 enrichment a
 Strict instructions cover the allowed signal types, exact quotes, null unknown dates,
 and provisional use without bypassing D06 gates. They do not replace code validation.
 
-`prompt_version="0.2.0"` identifies the runtime instruction revision. Contract and replay
+`prompt_version="0.2.1"` identifies the runtime instruction revision. Contract and replay
 schemas stay `0.1.0`. Replay keeps stored content and does not regenerate responses or
 prove they were produced by v2. Fake-client/replay tests check composition, schema,
 grounding and promotion behavior, **not live model quality or improvement over v1**.

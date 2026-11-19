@@ -28,6 +28,7 @@ from reposeer.agents.provider import (
     ExtractionDraft,
     OpenAISpecialistLLM,
     OpenRouterSpecialistLLM,
+    ProviderCallDiagnostic,
     ProviderError,
     ReplayBundle,
     ReplaySpecialistLLM,
@@ -186,7 +187,7 @@ def test_three_specialists_grounded_replay_is_deterministic_and_preserves_inputs
     assert request.model_dump_json() == before
     assert result.execution_mode == 'replay' and result.overall_status == 'complete'
     assert result.provider_calls == 3 and result.model_version == 'synthetic-replay-only'
-    assert result.prompt_version == PROMPT_VERSION == '0.2.0'
+    assert result.prompt_version == PROMPT_VERSION == '0.2.1'
     assert result.schema_version == '0.1.0'
     assert result.strict_responses == result.validated_signal_candidates == []
     assert [r.agent_kind for r in result.research_responses] == list(SPECIALISTS)
@@ -380,7 +381,7 @@ def test_strict_offsets_are_built_from_sources_and_untrusted_receipts_stay_repor
     result = run(request, FakeProvider(ReplayBundle.model_validate(bundle)))
     response = result.strict_responses[0]
     assert validate_agent_pair(request.strict_requests[0], response) == response
-    assert response.prompt_version == '0.2.0' and response.schema_version == '0.1.0'
+    assert response.prompt_version == '0.2.1' and response.schema_version == '0.1.0'
     citation = response.signals[0].citations[0]
     assert citation.start_offset == 254 and citation.end_offset == 254 + len(citation.quote)
     candidate = result.validated_signal_candidates[0]
@@ -683,8 +684,18 @@ def test_prompt_v2_composes_common_role_and_distinct_tasks_for_exactly_three_spe
         'functional_trend_demand': 'Functional Trend & Demand',
         'alternatives_migration': 'Alternatives & Migration',
     }
-    assert PROMPT_VERSION == prompts.PROMPT_VERSION == '0.2.0'
+    assert PROMPT_VERSION == prompts.PROMPT_VERSION == '0.2.1'
     assert set(prompts.ROLE_PROMPTS) == set(SPECIALISTS) == set(SIGNAL_TYPES)
+    research = ' '.join(prompts.RESEARCH_TASK_PROMPT.split())
+    assert '<exact_quote_requirements>' in research
+    assert 'Preserve original wording, capitalization, punctuation, Unicode, and whitespace.' in research
+    assert 'Do not paraphrase, normalize, reconstruct, combine non-adjacent spans, or insert ellipses.' in research
+    assert '<structured_output_requirements>' in research
+    assert 'Always include all three top-level fields:' in research
+    assert 'Use [] for an empty list.' in research
+    assert 'Use null only for fields explicitly allowing null.' in research
+    assert '<exact_quote_requirements>' not in prompts.STRICT_TASK_PROMPT
+    assert '<structured_output_requirements>' not in prompts.STRICT_TASK_PROMPT
     for kind, role in roles.items():
         rubric = prompts.ROLE_PROMPTS[kind]
         assert all(f'{signal_type}:' in rubric for signal_type in SIGNAL_TYPES[kind])
@@ -808,7 +819,7 @@ def test_scheduled_support_replay_retains_future_plan_as_provisional_status_lead
     signal = response.signals[0]
     assert signal.announced_at <= response.cutoff_at < signal.effective_at
     assert signal.proposed_use == 'status_candidate'
-    assert response.prompt_version == '0.2.0' and response.schema_version == '0.1.0'
+    assert response.prompt_version == '0.2.1' and response.schema_version == '0.1.0'
     assert result.validated_signal_candidates[0].disposition == 'report_only'
     assert result.validated_signal_candidates[0].e2_eligible is False
     assert 'official_status' not in result.model_dump()
@@ -949,6 +960,9 @@ def test_live_adapter_distinguishes_refusal_incomplete_and_invalid_outputs():
     assert [item.error_code for item in provider.call_diagnostics] == [
         'invalid_structured_output', 'invalid_structured_output', 'llm_incomplete_output', 'llm_refusal',
     ]
+    assert [item.parse_failure for item in provider.call_diagnostics] == [
+        'missing_parsed_output', 'schema_validation_failed', None, None,
+    ]
     assert all(not item.success and item.duration_ms >= 0 and item.total_tokens is None
                for item in provider.call_diagnostics)
     assert 'private-provider-body' not in str(provider.call_diagnostics)
@@ -1000,3 +1014,113 @@ def test_provider_diagnostics_preserve_partial_results_and_are_isolated_per_run(
     assert replay.provider_call_diagnostics == []
     legacy = replay.model_dump(exclude={'provider_call_diagnostics'})
     assert MultiAgentRunResult.model_validate(legacy).provider_call_diagnostics == []
+
+
+
+@pytest.mark.parametrize('quote_kind', ['exact', 'paraphrase', 'ellipsis', 'outside_excerpt'])
+def test_research_quotes_must_match_the_supplied_bounded_excerpt(quote_kind):
+    request, bundle = demo(), example('multi_agent_replay')
+    text = 'Café maintainers preserve Unicode.  Release work remains limited.'
+    outside = 'This sentence exists only beyond the supplied excerpt.'
+    child = request.research_requests[0]
+    request.research_requests = [child]
+    child.candidates[0].text_excerpt = text + ' ' + outside
+    quotes = {
+        'exact': text,
+        'paraphrase': 'Cafe maintainers preserve unicode. Release capacity is limited.',
+        'ellipsis': 'Café maintainers ... Release work remains limited.',
+        'outside_excerpt': outside,
+    }
+    insight = bundle['research'][0]['output']['insights'][0]
+    insight.update(supporting_quote=quotes[quote_kind], statement='The source describes limited release work.')
+    result = run(request, FakeProvider(ReplayBundle.model_validate(bundle)), max_excerpt_chars=len(text))
+    response = result.research_responses[0]
+    if quote_kind == 'exact':
+        assert len(response.insights) == 1
+        receipt = next(g for g in result.research_grounding if g.agent_kind == child.agent_kind)
+        assert receipt.supporting_quote == text
+        assert not any(r.reason_code == 'supporting_quote_not_found' for r in result.excluded_or_rejected_items)
+    else:
+        assert response.insights == [] and response.status == 'partial'
+        assert any(r.reason_code == 'supporting_quote_not_found' for r in result.excluded_or_rejected_items)
+    assert any(r.reason_code == 'excerpt_truncated' for r in result.excluded_or_rejected_items)
+
+
+def test_schema_failure_diagnostics_keep_only_safe_paths_and_types_and_never_retry():
+    secret = 'synthetic-private-provider-key-and-response'
+    stored = {e['agent_kind']: e['output'] for e in example('multi_agent_replay')['research']}
+    attempts = []
+    def parse(**kwargs):
+        child = json.loads(kwargs['input'][1]['content'])
+        attempts.append(child['agent_kind'])
+        if child['agent_kind'] == SPECIALISTS[0]:
+            bad = copy.deepcopy(stored[child['agent_kind']])
+            bad['insights'][0]['statement'] = {'private': secret}
+            bad['insights'][0][secret] = secret
+            # This is raised inside SDK parsing, before response assignment in the adapter.
+            ResearchDraft.model_validate(bad)
+        return SimpleNamespace(status='completed', output=[],
+            output_parsed=ResearchDraft.model_validate(stored[child['agent_kind']]))
+    provider = OpenAISpecialistLLM(model='synthetic-model',
+        client=SimpleNamespace(responses=SimpleNamespace(parse=parse)))
+    result = MultiAgentCoordinator(provider, execution_mode='live', clock=lambda: NOW).analyze(demo())
+    assert attempts == list(SPECIALISTS) and result.provider_calls == 3
+    assert result.overall_status == 'partial' and len(result.research_insights) == 2
+    diagnostic = result.provider_call_diagnostics[0]
+    assert diagnostic.error_code == 'invalid_structured_output'
+    assert diagnostic.parse_failure == 'schema_validation_failed'
+    assert [(issue.field_path, issue.error_type) for issue in diagnostic.validation_errors] == [
+        ('insights.0.statement', 'string_type'), ('insights.0.<unknown_field>', 'extra_forbidden'),
+    ]
+    assert secret not in result.model_dump_json() and '"private"' not in result.model_dump_json()
+    assert all(d.parse_failure is None and d.validation_errors == [] for d in result.provider_call_diagnostics[1:])
+    legacy = diagnostic.model_dump(exclude={'parse_failure', 'validation_errors'})
+    restored = ProviderCallDiagnostic.model_validate(legacy)
+    assert restored.parse_failure is None and restored.validation_errors == []
+
+
+@pytest.mark.parametrize('error_kind', ['json_decoder', 'pydantic_json'])
+def test_invalid_json_diagnostics_do_not_persist_documents_or_error_messages(error_kind):
+    attempts = []
+    secret = 'synthetic-private-json-response'
+    def parse(**kwargs):
+        attempts.append(kwargs)
+        if error_kind == 'json_decoder':
+            raise json.JSONDecodeError(secret, secret, 0)
+        return ResearchDraft.model_validate_json(secret)
+    provider = OpenAISpecialistLLM(model='synthetic-model',
+        client=SimpleNamespace(responses=SimpleNamespace(parse=parse)))
+    with pytest.raises(ProviderError, match='^invalid_structured_output$'):
+        provider.research(demo().research_requests[0])
+    assert len(attempts) == 1
+    diagnostic = provider.call_diagnostics[0]
+    assert diagnostic.parse_failure == 'invalid_json' and not diagnostic.success
+    assert secret not in diagnostic.model_dump_json()
+    if error_kind == 'pydantic_json':
+        assert diagnostic.validation_errors[0].field_path == '$'
+        assert diagnostic.validation_errors[0].error_type == 'json_invalid'
+
+
+def test_typed_sdk_parse_failure_and_opaque_failure_remain_distinct_and_sanitized(monkeypatch):
+    class APIError(Exception):
+        pass
+    class APIResponseValidationError(APIError):
+        pass
+    monkeypatch.setitem(sys.modules, 'openai', SimpleNamespace(
+        APIError=APIError, APIResponseValidationError=APIResponseValidationError))
+    calls = []
+    failure = APIResponseValidationError('synthetic-private-response-body')
+    def parse(**kwargs):
+        calls.append(kwargs)
+        raise failure
+    provider = OpenAISpecialistLLM(model='synthetic-model',
+        client=SimpleNamespace(responses=SimpleNamespace(parse=parse)))
+    with pytest.raises(ProviderError, match='^invalid_structured_output$'):
+        provider.research(demo().research_requests[0])
+    assert provider.call_diagnostics[-1].parse_failure == 'sdk_parse_failed'
+    failure = RuntimeError('synthetic-private-response-body')
+    with pytest.raises(ProviderError, match='^llm_request_or_output_failed$'):
+        provider.research(demo().research_requests[0])
+    assert provider.call_diagnostics[-1].parse_failure == 'unknown_parse_failure'
+    assert len(calls) == 2 and all(not d.validation_errors for d in provider.call_diagnostics)
+    assert 'synthetic-private-response-body' not in str(provider.call_diagnostics)
