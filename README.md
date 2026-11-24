@@ -805,3 +805,13 @@ This fixture demonstrates wiring, not predictive quality. Live collection requir
 historical proof return no-score. The existing prepared-feature `analyze` command
 remains available. See [Python/UI integration, live collection, trust boundaries and
 failure behavior](docs/architecture/application_orchestrator.md).
+
+## Demo UI and HTTP API (T-028)
+
+The standalone [`frontend/`](frontend/README.md) runs separately from
+`reposeer demo-api`. It communicates only through HTTP, so its layout or framework
+can be replaced without changing the orchestrator. It supports package/GitHub
+input, job progress, six labelled synthetic report states, real T-027 analysis,
+explicit no-score/CORE fallback, evidence citations, cutoff/coverage and separate
+dependency impact. See the [two-terminal run guide](frontend/README.md) and
+[API contract for frontend developers](docs/architecture/demo_api.md).

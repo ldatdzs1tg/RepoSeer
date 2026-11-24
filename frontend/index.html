@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>RepoSeer · Repository intelligence</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="./"><span class="brand-mark">R</span> RepoSeer<span class="beta">LAB</span></a>
+    <div class="nav-label">WORKSPACE</div>
+    <a class="nav active" href="#workspace"><span>◈</span> Repository analysis</a>
+    <a class="nav" href="#report"><span>▤</span> Analysis report</a>
+    <div class="sidebar-note"><span class="status-dot"></span> Evidence before inference<p>Understand maintenance risk.<br>Keep uncertainty visible.</p></div>
+    <div class="sidebar-foot">REPOSITORY INTELLIGENCE<span>Research demo · v0.1</span></div>
+  </aside>
+  <main id="workspace">
+    <header class="topbar"><span>Workspace <b>/</b> Repository analysis</span><span class="connection" id="connection">Connecting to API…</span></header>
+    <div class="page">
+      <div class="page-heading"><div><div class="eyebrow">OPEN SOURCE, IN FOCUS</div><h1>Look beyond the last commit.</h1><p>Explore maintenance signals, trace the evidence, and understand what comes next.</p></div><span class="outline-tag">12-month horizon</span></div>
+      <section class="panel analysis-form" aria-labelledby="analyze-heading">
+        <div class="section-heading"><h2 id="analyze-heading">Analyze a repository</h2><span class="muted">PyPI package or verified GitHub mapping</span></div>
+        <form id="analysis-form">
+          <div class="input-line"><label class="search-field"><span aria-hidden="true">⌕</span><input id="identifier" name="identifier" value="synthetic-demo" placeholder="Package name or https://github.com/owner/repo" required aria-label="Package name or GitHub URL"></label><button id="analyze" type="submit" class="primary">Analyze repository</button></div>
+          <div class="options">
+            <label>Analysis mode<select id="mode"><option>CORE</option><option>ENHANCED</option></select></label>
+            <label>Purpose<select id="purpose"><option value="retrospective_analysis">Retrospective analysis</option><option value="current_inference">Current inference</option></select></label>
+            <label>Cutoff (UTC, optional)<input type="datetime-local" id="cutoff" step="1"></label>
+            <label>PyPI mapping (optional)<input id="package" placeholder="Select package for GitHub URL"></label>
+          </div>
+          <div class="form-footer"><div class="checks"><label><input type="checkbox" id="insights"> External insights</label><label><input type="checkbox" id="agents"> Specialist agents</label><label><input type="checkbox" id="impact"> Dependency impact</label></div><span class="muted">Data access is configured by the API server.</span></div>
+        </form>
+      </section>
+      <div class="demo-bar"><div><span class="demo-label">SYNTHETIC DEMO</span><span>Explore a report state</span></div><div class="demo-actions"><label class="sr-only" for="scenario">Example report</label><select id="scenario" disabled><option>Loading examples…</option></select><button id="load-demo" class="secondary" disabled>Load example</button></div></div>
+      <div id="progress" class="progress" role="status" aria-live="polite">Ready. Analyze a package or load a synthetic example.</div>
+      <section id="report" aria-label="Analysis report" hidden>
+        <div class="report-heading"><div><div class="eyebrow" id="report-context"></div><h2 id="report-package"></h2><p id="report-subtitle"></p></div><button id="download" class="secondary">Export JSON</button></div>
+        <div id="synthetic-notice" class="notice" hidden>Synthetic fixture · For interface demonstration only. These values are not estimates for a real package.</div>
+        <div class="summary-grid"><section class="panel outcome" id="outcome"></section><section class="panel metadata" id="metadata"></section><section class="panel impact" id="impact-card"></section></div>
+        <div class="tabs" role="tablist" aria-label="Report details"><button role="tab" id="tab-evidence" aria-selected="true" aria-controls="details" data-tab="evidence">Evidence <span id="evidence-count"></span></button><button role="tab" id="tab-coverage" aria-selected="false" aria-controls="details" data-tab="coverage" tabindex="-1">Coverage</button><button role="tab" id="tab-sources" aria-selected="false" aria-controls="details" data-tab="sources" tabindex="-1">Sources & cutoff</button><button role="tab" id="tab-model" aria-selected="false" aria-controls="details" data-tab="model" tabindex="-1">Model & limitations</button></div>
+        <section id="details" class="panel details" role="tabpanel" aria-labelledby="tab-evidence"></section>
+      </section>
+      <section id="empty" class="empty"><div class="empty-glyph">◈</div><h2>A clearer view starts with a package.</h2><p>Your report will bring together a result, its evidence,<br>and the limits of what the data can tell us.</p><div class="empty-steps"><span>01 &nbsp; Resolve package</span><span>02 &nbsp; Evaluate evidence</span><span>03 &nbsp; Explore report</span></div></section>
+      <footer>RepoSeer <span>Maintenance risk and ecosystem impact are separate assessments.</span></footer>
+    </div>
+  </main>
+</body>
+</html>

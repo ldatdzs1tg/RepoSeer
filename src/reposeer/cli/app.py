@@ -10,6 +10,7 @@ from reposeer.cli.collect import collect_app
 from reposeer.cli.collect_activity import collect_activity_app
 from reposeer.cli.collect_dataset import collect_dataset_app
 from reposeer.cli.crawl_external import crawl_external_app
+from reposeer.cli.demo_api import demo_api
 from reposeer.cli.detect_tech import detect_tech_app
 from reposeer.cli.discover_external import discover_external_app
 from reposeer.cli.discover_packages import discover_packages_app
@@ -56,6 +57,7 @@ app.add_typer(profile_app, name="profile")
 app.add_typer(build_features_app, name="build-features")
 app.command("analyze")(analyze)
 app.command("analyze-repository")(analyze_repository)
+app.command("demo-api")(demo_api)
 
 
 if __name__ == "__main__":
