@@ -138,11 +138,7 @@ function initTheme() {
 
   $('theme-toggle')?.addEventListener('change', (event) => {
     const next = event.target.checked ? 'dark' : 'light';
-    if (document.startViewTransition && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      document.startViewTransition(() => applyTheme(next));
-    } else {
-      applyTheme(next);
-    }
+    applyTheme(next);
   });
 }
 initTheme();
