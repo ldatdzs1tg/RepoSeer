@@ -410,7 +410,7 @@ class MultiAgentCoordinator:
                     reject('strict', kind, evidence.evidence_id, 'd06_receipt_unverified')
             trusted[strict_child.request_id] = verified
             before_calls, before_rejected = calls, len(rejected)
-            signals = []
+            signals, strict_processed = [], 0
             strict_base = {field: getattr(strict_child, field) for field in (
                 'schema_version', 'analysis_run_id', 'request_id', 'agent_kind', 'package_id', 'cutoff_at')}
             strict_base.update(record_type='specialist_agent_response', generated_at=generated_at,
@@ -435,6 +435,7 @@ class MultiAgentCoordinator:
                         reject('strict', kind, f'{strict_child.request_id}:signal:{index}', 'invalid_strict_signal_or_citation')
                 status = 'partial' if len(rejected) > before_rejected else 'complete'
                 error = 'strict_output_rejected' if status == 'partial' else None
+                strict_processed = len(strict_child.evidence)
             except Exception as exc:
                 signals = []
                 status, error = 'failed', _reason(exc)
@@ -445,7 +446,10 @@ class MultiAgentCoordinator:
                 **strict_base, status=status, signals=signals, error_code=error))
             strict.append(response)
             statuses.append(AgentExecutionStatus(agent_kind=kind, lane='strict', status=status,
-                llm_calls=calls - before_calls, error_code=error))
+                llm_calls=calls - before_calls, error_code=error,
+                received_candidates=len(strict_child.evidence),
+                processed_candidates=strict_processed,
+                unprocessed_candidates=len(strict_child.evidence) - strict_processed))
 
         candidates, reviews, recommendations = [], [], []
         clusters = self._signal_clusters(strict)

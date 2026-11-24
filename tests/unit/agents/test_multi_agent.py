@@ -1289,7 +1289,7 @@ def test_trace_rejects_unsafe_paths_replay_and_unsupported_sdk(trace_directory, 
 def test_locked_sdk_raw_wrapper_defers_pydantic_parsing(trace_directory):
     """Exercise the installed SDK against fake HTTP, without network or actual settings."""
     import httpx
-    from openai import OpenAI
+    OpenAI = pytest.importorskip('openai', reason='requires the optional functional extra').OpenAI
     text, calls = '{"insights": [', []
     def transport(request):
         calls.append(request)

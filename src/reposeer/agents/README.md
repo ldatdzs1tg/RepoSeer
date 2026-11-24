@@ -36,6 +36,23 @@ content drafts keyed by coordinator request ID and specialist, plus optional str
 and review drafts. It never synthesizes fake LLM responses from heuristics, requires
 no API key, and never imports/creates an OpenAI client. Every result says `replay`.
 
+To exercise strict signal extraction for all three specialists as well as research:
+
+```bash
+uv run --frozen python -m reposeer.agents.cli \
+  --mode replay --input examples/agents/multi_agent_strict_demo.json \
+  --responses examples/agents/multi_agent_strict_replay.json \
+  --output data/agent_runs/strict-demo.json
+```
+
+This synthetic example uses the T-024 D06 passages and stored content drafts. Six
+provider invocations produce three research analyses and three grounded strict
+signals, including an official future support-ending plan. CLI replay has no trusted
+D06 backend, so its overall status is `partial` and all three strict candidates stay
+`report_only` with `e2_eligible=false`. The plan remains a D09 verification lead.
+The integration tests also exercise injected synthetic verification, budget exhaustion
+and rejection of postcutoff evidence; no live source verification is implied.
+
 Output is exclusively created and must not already exist. Use a different filename
 for a second run. Runtime inputs/outputs under `data/agent_runs/` are ignored and
 must not be committed. The CLI reads only explicitly supplied paths and leaves raw
@@ -220,6 +237,13 @@ are capped at 20 items per response category with recorded truncation. Per-agent
 call counts and unprocessed candidate assignments remain visible. Task completion never
 claims a complete source census, historical coverage or E2 eligibility.
 
+Per-agent `received_candidates`, `processed_candidates` and `unprocessed_candidates`
+count candidate excerpts in research and evidence passages in strict extraction.
+`coverage_summary.assignments_*` includes both lanes, including strict work blocked by
+D06 verification or provider budgets. Unique `coverage_summary.candidates_*` counts
+continue to describe research source references and omitted intake candidates only.
+Processing a passage certifies neither semantic truth nor D08 feature eligibility.
+
 ## Provider errors and diagnostics
 
 Provider failures use sanitized codes: `provider_timeout`, `provider_connection_error`,
@@ -309,7 +333,7 @@ No upstream contract, T-025 verifier, model, label or collection workflow is cha
 
 ```powershell
 uv run --frozen ruff check src tests scripts
-uv run --frozen pytest -q tests/contracts/test_specialist_agents.py tests/unit/agents/test_multi_agent.py tests/unit/analysis/test_external_context.py
+uv run --frozen pytest -q tests/contracts/test_specialist_agents.py tests/unit/agents/test_multi_agent.py tests/unit/analysis/test_external_context.py tests/integration/test_multi_agent_flow.py
 uv run --frozen python -m scripts.export_specialist_agents --check
 uv run --frozen python -m scripts.validate_specialist_examples
 ```

@@ -1,0 +1,191 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "multi_agent_replay",
+  "provenance": "synthetic",
+  "model_id": "synthetic-replay-only",
+  "research": [
+    {
+      "request_id": "9eca50ac-42ca-482d-96ca-b2c451ef5248",
+      "agent_kind": "maintenance_lifecycle",
+      "output": {
+        "insights": [
+          {
+            "source_ref": "manifest:synthetic:maintenance:1",
+            "supporting_quote": "The maintainer says release work is limited while a new volunteer is sought.",
+            "statement": "A maintainer reports limited release capacity; this is a research lead, not confirmed cessation.",
+            "limitation": "The notice has no verified revision availability or independent maintenance history."
+          }
+        ],
+        "information_gaps": [
+          {
+            "gap_id": "gap:synthetic:maintenance",
+            "missing_information": "Maintainer continuity and release/issue-response history are not available.",
+            "related_source_refs": [
+              "manifest:synthetic:maintenance:1"
+            ],
+            "suggested_question": "Which official maintainer notices and release history explain the reduced capacity?"
+          }
+        ],
+        "enrichment_suggestions": [
+          {
+            "suggestion_id": "suggestion:synthetic:maintenance",
+            "target_stage": "D03",
+            "objective": "Retrieve versioned official maintainer documentation and release history.",
+            "rationale": "The notice has no verified revision availability or independent maintenance history.",
+            "related_source_refs": [
+              "manifest:synthetic:maintenance:1"
+            ],
+            "query_hint": "synthetic-demo maintenance official evidence"
+          }
+        ]
+      }
+    },
+    {
+      "request_id": "cf31e348-3e16-4d23-bb70-4c00fa74300b",
+      "agent_kind": "functional_trend_demand",
+      "output": {
+        "insights": [
+          {
+            "source_ref": "manifest:synthetic:functional:1",
+            "supporting_quote": "We need offline Python workflows where a network connection is unreliable.",
+            "statement": "The discussion identifies an offline workflow use case worth comparing with the package capabilities.",
+            "limitation": "An undated discussion does not verify a historical functional profile or package adoption."
+          }
+        ],
+        "information_gaps": [
+          {
+            "gap_id": "gap:synthetic:functional",
+            "missing_information": "The discussion historical availability and exact package capabilities remain unverified.",
+            "related_source_refs": [
+              "manifest:synthetic:functional:1"
+            ],
+            "suggested_question": "Which official documentation and archived revisions support the offline workflow use case?"
+          }
+        ],
+        "enrichment_suggestions": [
+          {
+            "suggestion_id": "suggestion:synthetic:functional",
+            "target_stage": "D03",
+            "objective": "Establish a source-grounded functional profile from official documentation.",
+            "rationale": "An undated discussion does not verify a historical functional profile or package adoption.",
+            "related_source_refs": [
+              "manifest:synthetic:functional:1"
+            ],
+            "query_hint": "synthetic-demo functional official evidence"
+          }
+        ]
+      }
+    },
+    {
+      "request_id": "be3a173d-84e5-4c01-ab63-f9fa88553273",
+      "agent_kind": "alternatives_migration",
+      "output": {
+        "insights": [
+          {
+            "source_ref": "manifest:synthetic:alternatives:1",
+            "supporting_quote": "A user recommends synthetic-other and says a migration may be worth investigating.",
+            "statement": "synthetic-other is an alternative candidate; the user recommendation is not confirmed migration.",
+            "limitation": "No compatibility or completed migration evidence has been independently checked."
+          }
+        ],
+        "information_gaps": [
+          {
+            "gap_id": "gap:synthetic:alternatives",
+            "missing_information": "Compatibility and whether any actual migration occurred are unknown.",
+            "related_source_refs": [
+              "manifest:synthetic:alternatives:1"
+            ],
+            "suggested_question": "Are there source-backed compatibility comparisons or explicit migration accounts?"
+          }
+        ],
+        "enrichment_suggestions": [
+          {
+            "suggestion_id": "suggestion:synthetic:alternatives",
+            "target_stage": "D05",
+            "objective": "Retrieve comparison and migration evidence for synthetic-other.",
+            "rationale": "No compatibility or completed migration evidence has been independently checked.",
+            "related_source_refs": [
+              "manifest:synthetic:alternatives:1"
+            ],
+            "query_hint": "synthetic-demo alternatives official evidence"
+          }
+        ]
+      }
+    }
+  ],
+  "strict": [
+    {
+      "request_id": "00000000-0000-4000-8000-000000000001",
+      "agent_kind": "maintenance_lifecycle",
+      "output": {
+        "signals": [
+          {
+            "signal_type": "end_of_support_claim",
+            "statement": "An official future end-of-support plan is stated.",
+            "subject_id": "pypi:synthetic-demo",
+            "event_at": "2026-10-01T00:00:00.000Z",
+            "announced_at": "2026-10-01T00:00:00.000Z",
+            "effective_at": "2027-01-01T00:00:00.000Z",
+            "proposed_use": "status_candidate",
+            "uncertainty": "An announcement is a plan, not a verified cessation event.",
+            "citations": [
+              {
+                "evidence_id": "evidence:maintenance:1",
+                "quote": "Maintenance of synthetic-demo will end on 2027-01-01."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "request_id": "00000000-0000-4000-8000-000000000002",
+      "agent_kind": "functional_trend_demand",
+      "output": {
+        "signals": [
+          {
+            "signal_type": "emerging_use_case",
+            "statement": "A discussion identifies an emerging offline-first use case; it does not measure package users.",
+            "subject_id": "function:offline-first-tools",
+            "event_at": "2026-09-28T00:00:00.000Z",
+            "announced_at": null,
+            "effective_at": null,
+            "proposed_use": "feature_candidate",
+            "uncertainty": "One cited discussion does not measure an ecosystem-wide rate.",
+            "citations": [
+              {
+                "evidence_id": "evidence:functional:1",
+                "quote": "A discussion describes growing interest in offline-first Python tools."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "request_id": "00000000-0000-4000-8000-000000000003",
+      "agent_kind": "alternatives_migration",
+      "output": {
+        "signals": [
+          {
+            "signal_type": "explicit_migration",
+            "statement": "One maintainer reports an explicit migration to an alternative; no population-wide adoption is inferred.",
+            "subject_id": "pypi:synthetic-demo",
+            "event_at": "2026-09-29T00:00:00.000Z",
+            "announced_at": null,
+            "effective_at": null,
+            "proposed_use": "feature_candidate",
+            "uncertainty": "One cited discussion does not measure an ecosystem-wide rate.",
+            "citations": [
+              {
+                "evidence_id": "evidence:alternatives:1",
+                "quote": "One maintainer reports migrating from synthetic-demo to alternate-demo."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "reviews": []
+}

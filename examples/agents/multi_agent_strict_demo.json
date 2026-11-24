@@ -1,0 +1,236 @@
+{
+  "schema_version": "0.1.0",
+  "record_type": "multi_agent_run_request",
+  "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+  "package_id": "pypi:synthetic-demo",
+  "cutoff_at": "2026-10-01T00:00:00.000Z",
+  "research_requests": [
+    {
+      "schema_version": "0.1.0",
+      "record_type": "specialist_research_request",
+      "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+      "request_id": "9eca50ac-42ca-482d-96ca-b2c451ef5248",
+      "agent_kind": "maintenance_lifecycle",
+      "package_id": "pypi:synthetic-demo",
+      "repo_id": null,
+      "cutoff_at": "2026-10-01T00:00:00.000Z",
+      "package_description": "Synthetic demo processes tabular data offline.",
+      "description_source_refs": [
+        "manifest:synthetic:description:1"
+      ],
+      "candidates": [
+        {
+          "candidate_id": "candidate:maintenance:1",
+          "source_ref": "manifest:synthetic:maintenance:1",
+          "source_url": "https://example.test/synthetic-demo/maintenance",
+          "source_kind": "external",
+          "relevance_status": "unresolved",
+          "topic_hint": "maintenance",
+          "text_excerpt": "The maintainer says release work is limited while a new volunteer is sought.",
+          "published_at": null,
+          "available_at": null,
+          "fetched_at": null
+        }
+      ],
+      "research_questions": [
+        "Which official maintainer notices and release history explain the reduced capacity?"
+      ]
+    },
+    {
+      "schema_version": "0.1.0",
+      "record_type": "specialist_research_request",
+      "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+      "request_id": "cf31e348-3e16-4d23-bb70-4c00fa74300b",
+      "agent_kind": "functional_trend_demand",
+      "package_id": "pypi:synthetic-demo",
+      "repo_id": null,
+      "cutoff_at": "2026-10-01T00:00:00.000Z",
+      "package_description": "Synthetic demo processes tabular data offline.",
+      "description_source_refs": [
+        "manifest:synthetic:description:1"
+      ],
+      "candidates": [
+        {
+          "candidate_id": "candidate:functional:1",
+          "source_ref": "manifest:synthetic:functional:1",
+          "source_url": "https://example.test/synthetic-demo/functional",
+          "source_kind": "external",
+          "relevance_status": "unresolved",
+          "topic_hint": "functional",
+          "text_excerpt": "We need offline Python workflows where a network connection is unreliable.",
+          "published_at": null,
+          "available_at": null,
+          "fetched_at": null
+        }
+      ],
+      "research_questions": [
+        "Which official documentation and archived revisions support the offline workflow use case?"
+      ]
+    },
+    {
+      "schema_version": "0.1.0",
+      "record_type": "specialist_research_request",
+      "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+      "request_id": "be3a173d-84e5-4c01-ab63-f9fa88553273",
+      "agent_kind": "alternatives_migration",
+      "package_id": "pypi:synthetic-demo",
+      "repo_id": null,
+      "cutoff_at": "2026-10-01T00:00:00.000Z",
+      "package_description": "Synthetic demo processes tabular data offline.",
+      "description_source_refs": [
+        "manifest:synthetic:description:1"
+      ],
+      "candidates": [
+        {
+          "candidate_id": "candidate:alternatives:1",
+          "source_ref": "manifest:synthetic:alternatives:1",
+          "source_url": "https://example.test/synthetic-demo/alternatives",
+          "source_kind": "external",
+          "relevance_status": "unresolved",
+          "topic_hint": "alternatives",
+          "text_excerpt": "A user recommends synthetic-other and says a migration may be worth investigating.",
+          "published_at": null,
+          "available_at": null,
+          "fetched_at": null
+        }
+      ],
+      "research_questions": [
+        "Are there source-backed compatibility comparisons or explicit migration accounts?"
+      ]
+    }
+  ],
+  "strict_requests": [
+    {
+      "schema_version": "0.1.0",
+      "record_type": "specialist_agent_request",
+      "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+      "request_id": "00000000-0000-4000-8000-000000000001",
+      "agent_kind": "maintenance_lifecycle",
+      "package_id": "pypi:synthetic-demo",
+      "repo_id": "github:repository:900000001",
+      "mapping_revision": "synthetic-mapping-1",
+      "package_scope": "packages/synthetic-demo",
+      "cutoff_at": "2026-10-01T00:00:00.000Z",
+      "routing_policy_version": "synthetic-router-1",
+      "evidence": [
+        {
+          "evidence_id": "evidence:maintenance:1",
+          "package_id": "pypi:synthetic-demo",
+          "subject_id": "pypi:synthetic-demo",
+          "context_level": "package_specific",
+          "topic": "maintenance",
+          "source_kind": "official",
+          "source_id": "source:maintenance:1",
+          "source_url": "https://example.test/synthetic-demo/maintenance",
+          "source_record_id": "synthetic-item-1",
+          "source_revision": "synthetic-maintenance-revision-1",
+          "source_content_sha256": "c68ab2edd6001c732d43c2535be57b9f2c519b754e282cafdce54a63827d63ab",
+          "original_event_id": "synthetic-original-event-maintenance-1",
+          "passage_text": "Maintenance of synthetic-demo will end on 2027-01-01.",
+          "passage_start_offset": 100,
+          "passage_sha256": "c68ab2edd6001c732d43c2535be57b9f2c519b754e282cafdce54a63827d63ab",
+          "event_at": "2026-10-01T00:00:00.000Z",
+          "available_at": "2026-10-01T00:00:00.000Z",
+          "valid_at": "2026-10-01T00:00:00.000Z",
+          "fetched_at": "2026-10-01T00:00:00.000Z",
+          "gate": {
+            "decision": "eligible",
+            "decision_id": "d06:synthetic:maintenance:1",
+            "policy_version": "synthetic-d06-policy-1",
+            "checked_at": "2026-10-01T00:01:00.000Z",
+            "availability_proof_ref": "raw:synthetic:maintenance:1",
+            "allowed_use": "status_candidate"
+          }
+        }
+      ]
+    },
+    {
+      "schema_version": "0.1.0",
+      "record_type": "specialist_agent_request",
+      "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+      "request_id": "00000000-0000-4000-8000-000000000002",
+      "agent_kind": "functional_trend_demand",
+      "package_id": "pypi:synthetic-demo",
+      "repo_id": "github:repository:900000001",
+      "mapping_revision": "synthetic-mapping-1",
+      "package_scope": "packages/synthetic-demo",
+      "cutoff_at": "2026-10-01T00:00:00.000Z",
+      "routing_policy_version": "synthetic-router-1",
+      "evidence": [
+        {
+          "evidence_id": "evidence:functional:1",
+          "package_id": "pypi:synthetic-demo",
+          "subject_id": "function:offline-first-tools",
+          "context_level": "function_level",
+          "topic": "functional",
+          "source_kind": "external",
+          "source_id": "source:functional:1",
+          "source_url": "https://example.test/synthetic-demo/functional",
+          "source_record_id": null,
+          "source_revision": "synthetic-functional-revision-1",
+          "source_content_sha256": "7babedc9b96b122ea7a3ff80e09a1701ca1819c9c3c88e7623bce6eef1dda87e",
+          "original_event_id": "synthetic-original-event-functional-1",
+          "passage_text": "A discussion describes growing interest in offline-first Python tools.",
+          "passage_start_offset": 250,
+          "passage_sha256": "7babedc9b96b122ea7a3ff80e09a1701ca1819c9c3c88e7623bce6eef1dda87e",
+          "event_at": "2026-09-28T00:00:00.000Z",
+          "available_at": "2026-10-01T00:00:00.000Z",
+          "valid_at": "2026-10-01T00:00:00.000Z",
+          "fetched_at": "2026-10-01T00:00:00.000Z",
+          "gate": {
+            "decision": "eligible",
+            "decision_id": "d06:synthetic:functional:1",
+            "policy_version": "synthetic-d06-policy-1",
+            "checked_at": "2026-10-01T00:01:00.000Z",
+            "availability_proof_ref": "raw:synthetic:functional:1",
+            "allowed_use": "feature_candidate"
+          }
+        }
+      ]
+    },
+    {
+      "schema_version": "0.1.0",
+      "record_type": "specialist_agent_request",
+      "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+      "request_id": "00000000-0000-4000-8000-000000000003",
+      "agent_kind": "alternatives_migration",
+      "package_id": "pypi:synthetic-demo",
+      "repo_id": "github:repository:900000001",
+      "mapping_revision": "synthetic-mapping-1",
+      "package_scope": "packages/synthetic-demo",
+      "cutoff_at": "2026-10-01T00:00:00.000Z",
+      "routing_policy_version": "synthetic-router-1",
+      "evidence": [
+        {
+          "evidence_id": "evidence:alternatives:1",
+          "package_id": "pypi:synthetic-demo",
+          "subject_id": "pypi:synthetic-demo",
+          "context_level": "alternative_level",
+          "topic": "alternatives",
+          "source_kind": "external",
+          "source_id": "source:alternatives:1",
+          "source_url": "https://example.test/synthetic-demo/alternatives",
+          "source_record_id": null,
+          "source_revision": "synthetic-alternatives-revision-1",
+          "source_content_sha256": "5d9a06fa425ca2af456ba4c2cf22e04e8ab31470c8020e66967553526390b526",
+          "original_event_id": "synthetic-original-event-alternatives-1",
+          "passage_text": "One maintainer reports migrating from synthetic-demo to alternate-demo.",
+          "passage_start_offset": 500,
+          "passage_sha256": "5d9a06fa425ca2af456ba4c2cf22e04e8ab31470c8020e66967553526390b526",
+          "event_at": "2026-09-29T00:00:00.000Z",
+          "available_at": "2026-10-01T00:00:00.000Z",
+          "valid_at": "2026-10-01T00:00:00.000Z",
+          "fetched_at": "2026-10-01T00:00:00.000Z",
+          "gate": {
+            "decision": "eligible",
+            "decision_id": "d06:synthetic:alternatives:1",
+            "policy_version": "synthetic-d06-policy-1",
+            "checked_at": "2026-10-01T00:01:00.000Z",
+            "availability_proof_ref": "raw:synthetic:alternatives:1",
+            "allowed_use": "feature_candidate"
+          }
+        }
+      ]
+    }
+  ]
+}

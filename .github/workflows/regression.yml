@@ -40,7 +40,7 @@ jobs:
           enable-cache: true
 
       - name: Install frozen dependencies
-        run: uv sync --extra dev --frozen
+        run: uv sync --extra dev --extra functional --frozen
 
       - name: Validate canonical contract
         run: uv run --frozen python scripts/export_contract.py --check
