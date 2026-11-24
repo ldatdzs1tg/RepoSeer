@@ -56,9 +56,42 @@ const sessionHistory = [];
 const scenarioLabels = new Map();
 
 // ============================================================================
-// Spotlight Mouse Glow on Cards
+// Ambient Floating Particles (Luminous sparks in dark, soft blue bokeh in light)
 // ============================================================================
+function initParticles() {
+  const container = $('ambient-particles');
+  if (!container) return;
+  const countDots = 28;
+  for (let i = 0; i < countDots; i++) {
+    const dot = node('span', null, i % 3 === 0 ? 'ambient-dot alt' : 'ambient-dot');
+    const x = ((i * 37.3 + 11) % 96) + 2;
+    const y = ((i * 53.7 + 7) % 92) + 4;
+    const size = 2.5 + (i % 5) * 1.1;
+    const dur = 7 + (i % 7) * 1.8;
+    const delay = -((i * 1.9) % dur);
+    const dx = ((i % 2 === 0 ? 1 : -1) * (14 + (i % 4) * 9));
+    const dy = -(18 + (i % 5) * 10);
+    dot.style.setProperty('--x', `${x.toFixed(1)}%`);
+    dot.style.setProperty('--y', `${y.toFixed(1)}%`);
+    dot.style.setProperty('--size', `${size.toFixed(1)}px`);
+    dot.style.setProperty('--dur', `${dur.toFixed(1)}s`);
+    dot.style.setProperty('--delay', `${delay.toFixed(1)}s`);
+    dot.style.setProperty('--dx', `${dx}px`);
+    dot.style.setProperty('--dy', `${dy}px`);
+    container.append(dot);
+  }
+}
+initParticles();
+
+// ============================================================================
+// Spotlight Mouse Glow (Global Cursor Aura + Card Spotlight)
+// ============================================================================
+const cursorGlow = $('cursor-glow');
 document.addEventListener('pointermove', (event) => {
+  if (cursorGlow && event.pointerType !== 'touch') {
+    cursorGlow.style.transform = `translate3d(${event.clientX}px, ${event.clientY}px, 0)`;
+    if (!cursorGlow.classList.contains('visible')) cursorGlow.classList.add('visible');
+  }
   const card = event.target.closest('.spotlight-card');
   if (!card) return;
   const rect = card.getBoundingClientRect();
@@ -66,40 +99,18 @@ document.addEventListener('pointermove', (event) => {
   card.style.setProperty('--my', `${event.clientY - rect.top}px`);
 });
 
-// ============================================================================
-// Theme Management (Single switch button: Auto (OS) -> Light -> Dark -> Auto)
-// ============================================================================
-const THEME_CYCLE = ['auto', 'light', 'dark'];
+document.addEventListener('pointerleave', () => {
+  cursorGlow?.classList.remove('visible');
+});
 
-function renderThemeButton(mode) {
-  const holder = $('theme-icon');
-  const label = $('theme-text');
-  if (!holder || !label) return;
-  holder.replaceChildren();
-  const svg = svgEl('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' });
-  if (mode === 'auto') {
-    svg.append(
-      svgEl('rect', { x: 2, y: 3, width: 20, height: 14, rx: 2 }),
-      svgEl('line', { x1: 8, y1: 21, x2: 16, y2: 21 }),
-      svgEl('line', { x1: 12, y1: 17, x2: 12, y2: 21 })
-    );
-    label.textContent = 'Auto';
-  } else if (mode === 'light') {
-    svg.append(
-      svgEl('circle', { cx: 12, cy: 12, r: 5 }),
-      svgEl('line', { x1: 12, y1: 1, x2: 12, y2: 3 }),
-      svgEl('line', { x1: 12, y1: 21, x2: 12, y2: 23 }),
-      svgEl('line', { x1: 4.22, y1: 4.22, x2: 5.64, y2: 5.64 }),
-      svgEl('line', { x1: 18.36, y1: 18.36, x2: 19.78, y2: 19.78 }),
-      svgEl('line', { x1: 1, y1: 12, x2: 3, y2: 12 }),
-      svgEl('line', { x1: 21, y1: 12, x2: 23, y2: 12 })
-    );
-    label.textContent = 'Light';
-  } else {
-    svg.append(svgEl('path', { d: 'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z' }));
-    label.textContent = 'Dark';
-  }
-  holder.append(svg);
+// ============================================================================
+// Theme Management (OS Auto on first load, Sun <-> Moon slide switch)
+// ============================================================================
+function getEffectiveDark() {
+  const attr = document.documentElement.getAttribute('data-theme');
+  if (attr === 'dark') return true;
+  if (attr === 'light') return false;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
 }
 
 function applyTheme(mode) {
@@ -109,19 +120,29 @@ function applyTheme(mode) {
   } else {
     localStorage.removeItem('reposeer_theme');
     document.documentElement.removeAttribute('data-theme');
-    mode = 'auto';
   }
-  renderThemeButton(mode);
+  const toggle = $('theme-toggle');
+  if (toggle) toggle.checked = getEffectiveDark();
 }
 
 function initTheme() {
   const stored = localStorage.getItem('reposeer_theme');
   applyTheme(stored === 'dark' || stored === 'light' ? stored : 'auto');
 
-  $('theme-toggle')?.addEventListener('click', () => {
-    const current = localStorage.getItem('reposeer_theme') || 'auto';
-    const next = THEME_CYCLE[(THEME_CYCLE.indexOf(current) + 1) % THEME_CYCLE.length];
-    applyTheme(next);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (!localStorage.getItem('reposeer_theme')) {
+      const toggle = $('theme-toggle');
+      if (toggle) toggle.checked = getEffectiveDark();
+    }
+  });
+
+  $('theme-toggle')?.addEventListener('change', (event) => {
+    const next = event.target.checked ? 'dark' : 'light';
+    if (document.startViewTransition && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      document.startViewTransition(() => applyTheme(next));
+    } else {
+      applyTheme(next);
+    }
   });
 }
 initTheme();
