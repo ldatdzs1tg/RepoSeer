@@ -754,9 +754,12 @@ version and verified evidence fingerprints; raw self-declared proof references a
 fingerprints. There is no new profile cache persistence layer. A `verified` profile means its
 claims are grounded in accepted text; current metadata alone does not authenticate Internet history.
 
-Full D01 historical mapping, historical external content reconstruction, D04-D08 semantic relevance and
-specialist evidence agents, D09 labels/features, D10/D11 training/inference, D12 graph and
-D13-D15 reports/orchestration/lineage remain planned. See [v3 pipeline](docs/architecture/pipeline.md).
+T-025 supplies external context, T-026 supplies the three-specialist runtime, and T-027
+now integrates reviewed CORE features/frozen inference with optional evidence and
+validated FinalReports. Historical mapping/archive verification, calibrated optional
+Model B registration and a D12 dependency corpus remain explicit deployment dependencies.
+See the [application orchestrator guide](docs/architecture/application_orchestrator.md)
+and [v3 pipeline](docs/architecture/pipeline.md).
 
 ## Distributed collection coordination
 
@@ -778,3 +781,27 @@ runs implicitly. See [interfaces, trust boundaries and examples](docs/architectu
 ```powershell
 uv run --frozen python -m scripts.analyze_external_context --input examples/external_context/current_capture_request.json
 ```
+
+## Application analysis (T-027)
+
+`reposeer analyze-repository` accepts a PyPI name/ID or a GitHub URL with verified
+package mapping. It returns one T-021 FinalReport, prioritizes official known status,
+runs frozen CORE inference and optional T-025/T-026 evidence, and records explicit
+no-score or ENHANCED fallback outcomes. Dependency impact is independent of risk.
+
+Run the synthetic offline example without API credentials:
+
+```bash
+uv run --frozen reposeer analyze-repository synthetic-demo \
+  --input-bundle examples/application/synthetic_bundle.json \
+  --model examples/application/synthetic_model_a.json \
+  --mode ENHANCED --insights --agents \
+  --agent-replay examples/application/synthetic_agent_replay.json \
+  --output data/reports/application-demo.json
+```
+
+This fixture demonstrates wiring, not predictive quality. Live collection requires
+`--live`; live LLM calls require `--agents --agent-live`. Current observations without
+historical proof return no-score. The existing prepared-feature `analyze` command
+remains available. See [Python/UI integration, live collection, trust boundaries and
+failure behavior](docs/architecture/application_orchestrator.md).

@@ -1,0 +1,118 @@
+{
+  "format": "reposeer.model-a.logistic.v1",
+  "model_version": "synthetic-application-a",
+  "feature_schema_version": "0.1.0",
+  "feature_set": "E0",
+  "purpose": "retrospective_analysis",
+  "features": [
+    "package_age_days",
+    "releases_total",
+    "days_since_latest_release",
+    "release_count_3m",
+    "release_count_6m",
+    "release_count_12m",
+    "commit_count_3m",
+    "commit_count_6m",
+    "commit_count_12m",
+    "contributor_count_12m",
+    "issue_opened_count_12m",
+    "issue_closed_count_12m",
+    "pr_opened_count_12m",
+    "pr_merged_count_12m"
+  ],
+  "impute": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "mean": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "scale": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "weights": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "intercept": 0.0,
+  "missing_indicator_columns": [],
+  "calibration": {
+    "status": "fitted",
+    "slope": 1.0,
+    "intercept": 0.0
+  },
+  "release_eligible": true,
+  "release_gates": {
+    "sample_and_group_checks": true,
+    "prospective_evaluation_completed": true,
+    "population_calibration_established": true
+  },
+  "frozen_at": "2026-09-01T00:00:00.000Z",
+  "training_population": "Synthetic fixtures only; not a deployable model.",
+  "analysis_policy": {
+    "preprocessing_version": "synthetic-1",
+    "calibration_version": "synthetic-1",
+    "calibration_population": "Synthetic fixtures only; no measured performance.",
+    "trained_through_at": "2026-01-01T00:00:00.000Z",
+    "risk_threshold_version": "synthetic-1",
+    "moderate_at": 0.3,
+    "high_at": 0.7,
+    "applicability_version": "synthetic-1",
+    "feature_ranges": {
+      "releases_total": {
+        "minimum": 1,
+        "maximum": 1
+      }
+    }
+  }
+}

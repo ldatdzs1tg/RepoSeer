@@ -1,0 +1,658 @@
+{
+  "core": {
+    "snapshot": {
+      "schema_version": "0.1.0",
+      "record_type": "package_snapshot",
+      "package_id": "pypi:synthetic-demo",
+      "repo_id": "github:repository:900000001",
+      "repo_group_id": "github:repository:900000001",
+      "cutoff_at": "2026-10-01T00:00:00.000Z",
+      "horizon_months": 12,
+      "horizon_end_at": "2027-10-01T00:00:00.000Z",
+      "features": {
+        "package_age_days": null,
+        "releases_total": 1,
+        "days_since_latest_release": null,
+        "release_count_3m": null,
+        "release_count_6m": null,
+        "release_count_12m": null,
+        "commit_count_3m": null,
+        "commit_count_6m": null,
+        "commit_count_12m": null,
+        "contributor_count_12m": null,
+        "issue_opened_count_12m": null,
+        "issue_closed_count_12m": null,
+        "pr_opened_count_12m": null,
+        "pr_merged_count_12m": null
+      },
+      "coverage": [
+        {
+          "data_group": "releases",
+          "status": "complete",
+          "time_range": {
+            "start_at": "2025-10-01T00:00:00.000Z",
+            "end_at": "2026-10-01T00:00:00.000Z"
+          },
+          "records_observed": 1,
+          "missing_reason": null
+        }
+      ],
+      "missing_fields": [
+        {
+          "field_path": "features.package_age_days",
+          "reason": "not_collected",
+          "detail": null
+        },
+        {
+          "field_path": "features.days_since_latest_release",
+          "reason": "not_collected",
+          "detail": null
+        },
+        {
+          "field_path": "features.release_count_3m",
+          "reason": "not_collected",
+          "detail": null
+        },
+        {
+          "field_path": "features.release_count_6m",
+          "reason": "not_collected",
+          "detail": null
+        },
+        {
+          "field_path": "features.release_count_12m",
+          "reason": "not_collected",
+          "detail": null
+        },
+        {
+          "field_path": "features.commit_count_3m",
+          "reason": "not_collected",
+          "detail": null
+        },
+        {
+          "field_path": "features.commit_count_6m",
+          "reason": "not_collected",
+          "detail": null
+        },
+        {
+          "field_path": "features.commit_count_12m",
+          "reason": "not_collected",
+          "detail": null
+        },
+        {
+          "field_path": "features.contributor_count_12m",
+          "reason": "not_collected",
+          "detail": null
+        },
+        {
+          "field_path": "features.issue_opened_count_12m",
+          "reason": "not_collected",
+          "detail": null
+        },
+        {
+          "field_path": "features.issue_closed_count_12m",
+          "reason": "not_collected",
+          "detail": null
+        },
+        {
+          "field_path": "features.pr_opened_count_12m",
+          "reason": "not_collected",
+          "detail": null
+        },
+        {
+          "field_path": "features.pr_merged_count_12m",
+          "reason": "not_collected",
+          "detail": null
+        }
+      ],
+      "raw_record_ids": [
+        "raw:00000000-0000-4000-8000-000000000001"
+      ]
+    },
+    "mapping": {
+      "repo_id": "github:repository:900000001",
+      "repo_group_id": "github:repository:900000001",
+      "mapping_revision": "synthetic-mapping-1",
+      "scope": "packages/synthetic-demo",
+      "scope_quality": "package_scoped",
+      "valid_from": "2026-10-01T00:00:00.000Z",
+      "valid_to": null,
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "source_ids": [
+        "source:core",
+        "source:mapping:pypi",
+        "source:mapping:github"
+      ]
+    },
+    "sources": [
+      {
+        "source": "pypi_json",
+        "source_url": "https://example.test/synthetic-demo/pypi.json",
+        "retrieved_at": "2026-10-01T00:00:00.000Z",
+        "valid_at": "2026-10-01T00:00:00.000Z",
+        "available_at": "2026-10-01T00:00:00.000Z",
+        "temporal_basis": "observation",
+        "raw_record_ids": [
+          "raw:00000000-0000-4000-8000-000000000001"
+        ],
+        "missing_fields": [],
+        "source_id": "source:core",
+        "source_record_id": "synthetic-demo",
+        "revision": "synthetic-core-v1",
+        "content_sha256": null,
+        "query_set_hash": null
+      },
+      {
+        "source": "pypi_json",
+        "source_url": "https://pypi.org/pypi/synthetic-demo/json",
+        "retrieved_at": "2026-10-01T00:00:00.000Z",
+        "valid_at": "2026-10-01T00:00:00.000Z",
+        "available_at": "2026-10-01T00:00:00.000Z",
+        "temporal_basis": "observation",
+        "raw_record_ids": [
+          "raw:00000000-0000-4000-8000-000000000020"
+        ],
+        "missing_fields": [],
+        "source_id": "source:mapping:pypi",
+        "source_record_id": "synthetic-demo",
+        "revision": "002de661d1803c277fc367d3b3aa5423005d32cbc34b7db6ca8d3c3e50353784",
+        "content_sha256": "002de661d1803c277fc367d3b3aa5423005d32cbc34b7db6ca8d3c3e50353784",
+        "query_set_hash": null
+      },
+      {
+        "source": "github_rest",
+        "source_url": "https://api.github.com/repos/Synthetic/Demo",
+        "retrieved_at": "2026-10-01T00:00:00.000Z",
+        "valid_at": "2026-10-01T00:00:00.000Z",
+        "available_at": "2026-10-01T00:00:00.000Z",
+        "temporal_basis": "observation",
+        "raw_record_ids": [
+          "raw:00000000-0000-4000-8000-000000000010"
+        ],
+        "missing_fields": [],
+        "source_id": "source:mapping:github",
+        "source_record_id": "900000001",
+        "revision": "aa341ba5af6e6030dab4f6026d6b541321348ebbc87c198466fbc3aa399ebd3f",
+        "content_sha256": "aa341ba5af6e6030dab4f6026d6b541321348ebbc87c198466fbc3aa399ebd3f",
+        "query_set_hash": null
+      }
+    ],
+    "core_coverage_sources": {
+      "releases": [
+        "source:core"
+      ]
+    },
+    "official_status": null,
+    "official_evidence": []
+  },
+  "mapping_evidence": [
+    {
+      "schema_version": "0.1.0",
+      "record_type": "raw_record",
+      "raw_record_id": "raw:00000000-0000-4000-8000-000000000020",
+      "run_id": "00000000-0000-4000-8000-000000000001",
+      "source": "pypi_json",
+      "source_record_type": "dependency_metadata",
+      "source_record_id": "synthetic-demo",
+      "repo_id": null,
+      "package_id": "pypi:synthetic-demo",
+      "source_url": "https://pypi.org/pypi/synthetic-demo/json",
+      "retrieved_at": "2026-10-01T00:00:00.000Z",
+      "event_at": null,
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "http_status": null,
+      "raw_body_sha256": null,
+      "payload": {
+        "info": {
+          "name": "synthetic-demo",
+          "project_urls": {
+            "Source": "https://github.com/synthetic/demo"
+          }
+        }
+      }
+    },
+    {
+      "schema_version": "0.1.0",
+      "record_type": "raw_record",
+      "raw_record_id": "raw:00000000-0000-4000-8000-000000000010",
+      "run_id": "00000000-0000-4000-8000-000000000001",
+      "source": "github_rest",
+      "source_record_type": "github_repository",
+      "source_record_id": "900000001",
+      "repo_id": "github:repository:900000001",
+      "package_id": null,
+      "source_url": "https://api.github.com/repos/Synthetic/Demo",
+      "retrieved_at": "2026-10-01T00:00:00.000Z",
+      "event_at": null,
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "http_status": null,
+      "raw_body_sha256": null,
+      "payload": {
+        "archived": false,
+        "created_at": "2020-01-01T00:00:00Z",
+        "description": "Synthetic repository fixture",
+        "fork": false,
+        "forks_count": 0,
+        "full_name": "Synthetic/Demo",
+        "id": 900000001,
+        "is_template": false,
+        "language": "Python",
+        "mirror_url": null,
+        "node_id": "R_SYNTHETIC",
+        "open_issues_count": 2,
+        "private": false,
+        "providerNativeKey": {
+          "list": [
+            null,
+            0,
+            false
+          ],
+          "preserveCase": true
+        },
+        "pushed_at": "2024-02-01T00:00:00Z",
+        "stargazers_count": 5,
+        "updated_at": "2024-02-01T01:00:00+01:00",
+        "visibility": "public"
+      }
+    }
+  ],
+  "external": {
+    "package_id": "pypi:synthetic-demo",
+    "cutoff_at": "2026-10-01T00:00:00.000Z",
+    "generated_at": "2026-10-01T00:10:00.000Z",
+    "documents": [
+      {
+        "article": {
+          "schema_version": "0.1.0",
+          "record_type": "article",
+          "article_id": "article:sha256:d9fdbb48a3fee005b4ad99023ec935efa1d9380768294ca63d6a6de9a6c7a474",
+          "original_url": "https://example.test/synthetic/1",
+          "canonical_url": "https://example.test/synthetic/1",
+          "title": "Synthetic context 1",
+          "article_kind": "announcement",
+          "authors": null,
+          "language_code": "en",
+          "published_at": "2026-09-20T00:00:00.000Z",
+          "published_date": "2026-09-20",
+          "published_precision": "timestamp",
+          "updated_at": null,
+          "content_status": "full",
+          "content_text": "Synthetic demo use case 1.",
+          "content_sha256": "799aa6d572c41282546f0a68d42697e17caebbc0ca8eb7d3cdd98b3f3162eac2",
+          "content_available_at": null,
+          "technology_mentions": [],
+          "repo_ids": [
+            "github:repository:900000001"
+          ],
+          "package_ids": [
+            "pypi:synthetic-demo"
+          ],
+          "provenance": {
+            "source": "web_article",
+            "source_url": "https://example.test/synthetic/1",
+            "retrieved_at": "2026-09-20T00:00:00.000Z",
+            "valid_at": "2026-09-20T00:00:00.000Z",
+            "available_at": null,
+            "temporal_basis": "observation",
+            "raw_record_ids": [
+              "raw:00000000-0000-4000-8000-000000000001"
+            ],
+            "missing_fields": []
+          }
+        },
+        "relevance": {
+          "article_id": "article:sha256:d9fdbb48a3fee005b4ad99023ec935efa1d9380768294ca63d6a6de9a6c7a474",
+          "target_package_id": "pypi:synthetic-demo",
+          "target_repo_id": "github:repository:900000001",
+          "content_sha256": "799aa6d572c41282546f0a68d42697e17caebbc0ca8eb7d3cdd98b3f3162eac2",
+          "context_level": "package_specific",
+          "decision": "relevant",
+          "match_method": "synthetic",
+          "reason_code": "synthetic_verified_link",
+          "evidence_spans": [
+            {
+              "text": "Synthetic demo use case 1.",
+              "start_offset": 0,
+              "end_offset": 26
+            }
+          ],
+          "evidence_urls": [],
+          "link_evidence": [],
+          "raw_record_ids": [
+            "raw:00000000-0000-4000-8000-000000000001"
+          ],
+          "rule_version": "0.1.0-conservative"
+        },
+        "provider": "synthetic",
+        "query_intent": "direct_package",
+        "query_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "origin_id": null,
+        "outcome_disclosure": false
+      }
+    ],
+    "censuses": [
+      {
+        "census_id": "recent",
+        "provider": "synthetic",
+        "context": "direct_package",
+        "query_intent": "direct_package",
+        "window": {
+          "start_at": "2026-09-01T00:00:00.000Z",
+          "end_at": "2026-10-01T00:00:00.000Z"
+        },
+        "source": {
+          "source": "source_archive",
+          "source_url": "https://example.test/census/recent",
+          "retrieved_at": "2026-10-01T00:00:00.000Z",
+          "valid_at": "2026-10-01T00:00:00.000Z",
+          "available_at": "2026-10-01T00:00:00.000Z",
+          "temporal_basis": "observation",
+          "raw_record_ids": [
+            "raw:00000000-0000-4000-8000-000000000099"
+          ],
+          "missing_fields": [],
+          "source_id": "census:recent",
+          "source_record_id": "recent",
+          "revision": "synthetic-v1",
+          "content_sha256": null,
+          "query_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "retrieval_policy_version": "synthetic-1",
+        "filters_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "complete",
+        "source_coverage": "complete",
+        "document_source_ids": [
+          "external:e20c3e6a3eaf93308a3f0cf0fa547eef49b8b739cbd4f1d956fc3419664d1252"
+        ],
+        "missing_reason": null
+      }
+    ],
+    "agent_events": [],
+    "agent_coverage": []
+  },
+  "agents": {
+    "schema_version": "0.1.0",
+    "record_type": "multi_agent_run_request",
+    "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+    "package_id": "pypi:synthetic-demo",
+    "cutoff_at": "2026-10-01T00:00:00.000Z",
+    "research_requests": [
+      {
+        "schema_version": "0.1.0",
+        "record_type": "specialist_research_request",
+        "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+        "request_id": "9eca50ac-42ca-482d-96ca-b2c451ef5248",
+        "agent_kind": "maintenance_lifecycle",
+        "package_id": "pypi:synthetic-demo",
+        "repo_id": null,
+        "cutoff_at": "2026-10-01T00:00:00.000Z",
+        "package_description": null,
+        "description_source_refs": [],
+        "candidates": [
+          {
+            "candidate_id": "candidate:maintenance:1",
+            "source_ref": "source:maintenance:1",
+            "source_url": "https://example.test/synthetic-demo/maintenance",
+            "source_kind": "external",
+            "relevance_status": "unresolved",
+            "topic_hint": "maintenance",
+            "text_excerpt": "Maintenance of synthetic-demo will end on 2027-01-01.",
+            "published_at": "2026-10-01T00:00:00.000Z",
+            "available_at": "2026-10-01T00:00:00.000Z",
+            "fetched_at": "2026-10-01T00:00:00.000Z"
+          }
+        ],
+        "research_questions": [
+          "Which official maintainer notices and release history explain the reduced capacity?"
+        ]
+      },
+      {
+        "schema_version": "0.1.0",
+        "record_type": "specialist_research_request",
+        "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+        "request_id": "cf31e348-3e16-4d23-bb70-4c00fa74300b",
+        "agent_kind": "functional_trend_demand",
+        "package_id": "pypi:synthetic-demo",
+        "repo_id": null,
+        "cutoff_at": "2026-10-01T00:00:00.000Z",
+        "package_description": null,
+        "description_source_refs": [],
+        "candidates": [
+          {
+            "candidate_id": "candidate:functional:1",
+            "source_ref": "source:functional:1",
+            "source_url": "https://example.test/synthetic-demo/functional",
+            "source_kind": "external",
+            "relevance_status": "unresolved",
+            "topic_hint": "functional",
+            "text_excerpt": "A discussion describes growing interest in offline-first Python tools.",
+            "published_at": "2026-09-28T00:00:00.000Z",
+            "available_at": "2026-10-01T00:00:00.000Z",
+            "fetched_at": "2026-10-01T00:00:00.000Z"
+          }
+        ],
+        "research_questions": [
+          "Which official documentation and archived revisions support the offline workflow use case?"
+        ]
+      },
+      {
+        "schema_version": "0.1.0",
+        "record_type": "specialist_research_request",
+        "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+        "request_id": "be3a173d-84e5-4c01-ab63-f9fa88553273",
+        "agent_kind": "alternatives_migration",
+        "package_id": "pypi:synthetic-demo",
+        "repo_id": null,
+        "cutoff_at": "2026-10-01T00:00:00.000Z",
+        "package_description": null,
+        "description_source_refs": [],
+        "candidates": [
+          {
+            "candidate_id": "candidate:alternatives:1",
+            "source_ref": "source:alternatives:1",
+            "source_url": "https://example.test/synthetic-demo/alternatives",
+            "source_kind": "external",
+            "relevance_status": "unresolved",
+            "topic_hint": "alternatives",
+            "text_excerpt": "One maintainer reports migrating from synthetic-demo to alternate-demo.",
+            "published_at": "2026-09-29T00:00:00.000Z",
+            "available_at": "2026-10-01T00:00:00.000Z",
+            "fetched_at": "2026-10-01T00:00:00.000Z"
+          }
+        ],
+        "research_questions": [
+          "Are there source-backed compatibility comparisons or explicit migration accounts?"
+        ]
+      }
+    ],
+    "strict_requests": [
+      {
+        "schema_version": "0.1.0",
+        "record_type": "specialist_agent_request",
+        "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+        "request_id": "00000000-0000-4000-8000-000000000001",
+        "agent_kind": "maintenance_lifecycle",
+        "package_id": "pypi:synthetic-demo",
+        "repo_id": "github:repository:900000001",
+        "mapping_revision": "synthetic-mapping-1",
+        "package_scope": "packages/synthetic-demo",
+        "cutoff_at": "2026-10-01T00:00:00.000Z",
+        "routing_policy_version": "synthetic-router-1",
+        "evidence": [
+          {
+            "evidence_id": "evidence:maintenance:1",
+            "package_id": "pypi:synthetic-demo",
+            "subject_id": "pypi:synthetic-demo",
+            "context_level": "package_specific",
+            "topic": "maintenance",
+            "source_kind": "official",
+            "source_id": "source:maintenance:1",
+            "source_url": "https://example.test/synthetic-demo/maintenance",
+            "source_record_id": "synthetic-item-1",
+            "source_revision": "synthetic-maintenance-revision-1",
+            "source_content_sha256": "c68ab2edd6001c732d43c2535be57b9f2c519b754e282cafdce54a63827d63ab",
+            "original_event_id": "synthetic-original-event-maintenance-1",
+            "passage_text": "Maintenance of synthetic-demo will end on 2027-01-01.",
+            "passage_start_offset": 100,
+            "passage_sha256": "c68ab2edd6001c732d43c2535be57b9f2c519b754e282cafdce54a63827d63ab",
+            "event_at": "2026-10-01T00:00:00.000Z",
+            "available_at": "2026-10-01T00:00:00.000Z",
+            "valid_at": "2026-10-01T00:00:00.000Z",
+            "fetched_at": "2026-10-01T00:00:00.000Z",
+            "gate": {
+              "decision": "eligible",
+              "decision_id": "d06:synthetic:maintenance:1",
+              "policy_version": "synthetic-d06-policy-1",
+              "checked_at": "2026-10-01T00:01:00.000Z",
+              "availability_proof_ref": "raw:synthetic:maintenance:1",
+              "allowed_use": "status_candidate"
+            }
+          }
+        ]
+      },
+      {
+        "schema_version": "0.1.0",
+        "record_type": "specialist_agent_request",
+        "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+        "request_id": "00000000-0000-4000-8000-000000000002",
+        "agent_kind": "functional_trend_demand",
+        "package_id": "pypi:synthetic-demo",
+        "repo_id": "github:repository:900000001",
+        "mapping_revision": "synthetic-mapping-1",
+        "package_scope": "packages/synthetic-demo",
+        "cutoff_at": "2026-10-01T00:00:00.000Z",
+        "routing_policy_version": "synthetic-router-1",
+        "evidence": [
+          {
+            "evidence_id": "evidence:functional:1",
+            "package_id": "pypi:synthetic-demo",
+            "subject_id": "function:offline-first-tools",
+            "context_level": "function_level",
+            "topic": "functional",
+            "source_kind": "external",
+            "source_id": "source:functional:1",
+            "source_url": "https://example.test/synthetic-demo/functional",
+            "source_record_id": null,
+            "source_revision": "synthetic-functional-revision-1",
+            "source_content_sha256": "7babedc9b96b122ea7a3ff80e09a1701ca1819c9c3c88e7623bce6eef1dda87e",
+            "original_event_id": "synthetic-original-event-functional-1",
+            "passage_text": "A discussion describes growing interest in offline-first Python tools.",
+            "passage_start_offset": 250,
+            "passage_sha256": "7babedc9b96b122ea7a3ff80e09a1701ca1819c9c3c88e7623bce6eef1dda87e",
+            "event_at": "2026-09-28T00:00:00.000Z",
+            "available_at": "2026-10-01T00:00:00.000Z",
+            "valid_at": "2026-10-01T00:00:00.000Z",
+            "fetched_at": "2026-10-01T00:00:00.000Z",
+            "gate": {
+              "decision": "eligible",
+              "decision_id": "d06:synthetic:functional:1",
+              "policy_version": "synthetic-d06-policy-1",
+              "checked_at": "2026-10-01T00:01:00.000Z",
+              "availability_proof_ref": "raw:synthetic:functional:1",
+              "allowed_use": "feature_candidate"
+            }
+          }
+        ]
+      },
+      {
+        "schema_version": "0.1.0",
+        "record_type": "specialist_agent_request",
+        "analysis_run_id": "00000000-0000-4000-8000-000000000026",
+        "request_id": "00000000-0000-4000-8000-000000000003",
+        "agent_kind": "alternatives_migration",
+        "package_id": "pypi:synthetic-demo",
+        "repo_id": "github:repository:900000001",
+        "mapping_revision": "synthetic-mapping-1",
+        "package_scope": "packages/synthetic-demo",
+        "cutoff_at": "2026-10-01T00:00:00.000Z",
+        "routing_policy_version": "synthetic-router-1",
+        "evidence": [
+          {
+            "evidence_id": "evidence:alternatives:1",
+            "package_id": "pypi:synthetic-demo",
+            "subject_id": "pypi:synthetic-demo",
+            "context_level": "alternative_level",
+            "topic": "alternatives",
+            "source_kind": "external",
+            "source_id": "source:alternatives:1",
+            "source_url": "https://example.test/synthetic-demo/alternatives",
+            "source_record_id": null,
+            "source_revision": "synthetic-alternatives-revision-1",
+            "source_content_sha256": "5d9a06fa425ca2af456ba4c2cf22e04e8ab31470c8020e66967553526390b526",
+            "original_event_id": "synthetic-original-event-alternatives-1",
+            "passage_text": "One maintainer reports migrating from synthetic-demo to alternate-demo.",
+            "passage_start_offset": 500,
+            "passage_sha256": "5d9a06fa425ca2af456ba4c2cf22e04e8ab31470c8020e66967553526390b526",
+            "event_at": "2026-09-29T00:00:00.000Z",
+            "available_at": "2026-10-01T00:00:00.000Z",
+            "valid_at": "2026-10-01T00:00:00.000Z",
+            "fetched_at": "2026-10-01T00:00:00.000Z",
+            "gate": {
+              "decision": "eligible",
+              "decision_id": "d06:synthetic:alternatives:1",
+              "policy_version": "synthetic-d06-policy-1",
+              "checked_at": "2026-10-01T00:01:00.000Z",
+              "availability_proof_ref": "raw:synthetic:alternatives:1",
+              "allowed_use": "feature_candidate"
+            }
+          }
+        ]
+      }
+    ],
+    "intake_summary": null
+  },
+  "agent_sources": [
+    {
+      "source": "project_docs",
+      "source_url": "https://example.test/synthetic-demo/maintenance",
+      "retrieved_at": "2026-10-01T00:00:00.000Z",
+      "valid_at": "2026-10-01T00:00:00.000Z",
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "temporal_basis": "observation",
+      "raw_record_ids": [
+        "raw:00000000-0000-4000-8000-000000000101"
+      ],
+      "missing_fields": [],
+      "source_id": "source:maintenance:1",
+      "source_record_id": "synthetic-item-1",
+      "revision": "synthetic-maintenance-revision-1",
+      "content_sha256": "c68ab2edd6001c732d43c2535be57b9f2c519b754e282cafdce54a63827d63ab",
+      "query_set_hash": null
+    },
+    {
+      "source": "web_article",
+      "source_url": "https://example.test/synthetic-demo/functional",
+      "retrieved_at": "2026-10-01T00:00:00.000Z",
+      "valid_at": "2026-10-01T00:00:00.000Z",
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "temporal_basis": "observation",
+      "raw_record_ids": [
+        "raw:00000000-0000-4000-8000-000000000102"
+      ],
+      "missing_fields": [],
+      "source_id": "source:functional:1",
+      "source_record_id": null,
+      "revision": "synthetic-functional-revision-1",
+      "content_sha256": "7babedc9b96b122ea7a3ff80e09a1701ca1819c9c3c88e7623bce6eef1dda87e",
+      "query_set_hash": null
+    },
+    {
+      "source": "web_article",
+      "source_url": "https://example.test/synthetic-demo/alternatives",
+      "retrieved_at": "2026-10-01T00:00:00.000Z",
+      "valid_at": "2026-10-01T00:00:00.000Z",
+      "available_at": "2026-10-01T00:00:00.000Z",
+      "temporal_basis": "observation",
+      "raw_record_ids": [
+        "raw:00000000-0000-4000-8000-000000000103"
+      ],
+      "missing_fields": [],
+      "source_id": "source:alternatives:1",
+      "source_record_id": null,
+      "revision": "synthetic-alternatives-revision-1",
+      "content_sha256": "5d9a06fa425ca2af456ba4c2cf22e04e8ab31470c8020e66967553526390b526",
+      "query_set_hash": null
+    }
+  ],
+  "dependency_impact": null,
+  "impact_sources": []
+}

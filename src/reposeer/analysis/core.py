@@ -1,5 +1,6 @@
 """Analyze one verified cutoff feature package with a frozen CORE Model A."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -32,6 +33,7 @@ from reposeer.contracts.models import (
     NonEmpty,
     PackageSnapshot,
     UtcTimestamp,
+    UuidText,
     unique,
 )
 from reposeer.contracts.validation import validate_snapshot_coverage
@@ -219,6 +221,8 @@ def analyze_core(
     *,
     mode_requested: AnalysisMode = "CORE",
     purpose: Literal["current_inference", "retrospective_analysis"] = "retrospective_analysis",
+    clock: Callable[[], datetime] | None = None,
+    analysis_run_id: UuidText | None = None,
 ) -> FinalReport:
     """Apply release and as-of gates and return a validated analysis result."""
     if purpose not in {"current_inference", "retrospective_analysis"}:
@@ -226,7 +230,7 @@ def analyze_core(
     package = CoreFeaturePackage.model_validate(package.model_dump())
     snapshot, mapping = package.snapshot, package.mapping
     cutoff = snapshot.cutoff_at
-    generated_at = format_utc_timestamp(datetime.now(UTC))
+    generated_at = format_utc_timestamp((clock or (lambda: datetime.now(UTC)))())
     sources = {row.source_id: row for row in package.sources}
     coverage = _core_coverage(package, sources)
     observed = {
@@ -235,7 +239,7 @@ def analyze_core(
     context = {
         "schema_version": ANALYSIS_SCHEMA_VERSION,
         "record_type": "final_report",
-        "analysis_run_id": str(uuid4()),
+        "analysis_run_id": analysis_run_id or str(uuid4()),
         "package_id": snapshot.package_id,
         "mapping": mapping,
         "cutoff_at": cutoff,
