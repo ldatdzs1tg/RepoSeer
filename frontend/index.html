@@ -1,50 +1,384 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>RepoSeer · Repository intelligence</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>RepoSeer · Repository Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
   <script type="module" src="app.js"></script>
 </head>
 <body>
+  <div class="ambient-bg" aria-hidden="true">
+    <div class="ambient-grid"></div>
+    <div class="ambient-orb orb-1"></div>
+    <div class="ambient-orb orb-2"></div>
+  </div>
+
   <aside class="sidebar">
-    <a class="brand" href="./"><span class="brand-mark">R</span> RepoSeer<span class="beta">LAB</span></a>
-    <div class="nav-label">WORKSPACE</div>
-    <a class="nav active" href="#workspace"><span>◈</span> Repository analysis</a>
-    <a class="nav" href="#report"><span>▤</span> Analysis report</a>
-    <div class="sidebar-note"><span class="status-dot"></span> Evidence before inference<p>Understand maintenance risk.<br>Keep uncertainty visible.</p></div>
-    <div class="sidebar-foot">REPOSITORY INTELLIGENCE<span>Research demo · v0.1</span></div>
+    <a class="brand" href="./">
+      <span class="brand-mark" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/>
+          <circle cx="12" cy="12" r="3"/>
+          <line x1="12" y1="2" x2="12" y2="9"/>
+          <line x1="12" y1="15" x2="12" y2="22"/>
+        </svg>
+      </span>
+      <span class="brand-text">RepoSeer</span>
+      <span class="beta">LAB</span>
+    </a>
+
+    <div class="nav-group">
+      <div class="nav-label">WORKSPACE</div>
+      <a class="nav active" href="#workspace" id="nav-workspace">
+        <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <span>Repository analysis</span>
+      </a>
+      <a class="nav" href="#report" id="sidebar-report-link">
+        <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        <span>Analysis report</span>
+        <span class="nav-pill" id="nav-report-status" hidden>Live</span>
+      </a>
+      <button class="nav nav-button" type="button" id="sidebar-json-btn" disabled>
+        <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        <span>Raw JSON inspector</span>
+      </button>
+    </div>
+
+    <div class="nav-group history-group" id="history-section" hidden>
+      <div class="nav-label-row">
+        <span class="nav-label">SESSION HISTORY</span>
+        <span class="history-count" id="history-count">0</span>
+      </div>
+      <div class="history-list" id="history-list"></div>
+    </div>
+
+    <div class="sidebar-bottom">
+      <div class="sidebar-note">
+        <div class="note-header">
+          <span class="status-dot"></span>
+          <span>Evidence before inference</span>
+        </div>
+        <p>Understand maintenance risk.<br>Keep uncertainty visible.</p>
+      </div>
+      <div class="sidebar-foot">
+        <span>REPOSITORY INTELLIGENCE</span>
+        <small>Research demo · v0.1</small>
+      </div>
+    </div>
   </aside>
+
   <main id="workspace">
-    <header class="topbar"><span>Workspace <b>/</b> Repository analysis</span><span class="connection" id="connection">Connecting to API…</span></header>
+    <header class="topbar">
+      <div class="topbar-breadcrumb">
+        <span>Workspace</span>
+        <svg class="crumb-sep" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        <span class="current" id="breadcrumb-current">Repository analysis</span>
+      </div>
+      <div class="topbar-actions">
+        <span class="connection" id="connection">Connecting to API…</span>
+        <button id="theme-toggle" class="theme-toggle-btn" type="button" aria-label="Switch color theme" title="Switch theme: Auto → Light → Dark">
+          <span class="theme-icon" id="theme-icon" aria-hidden="true"></span>
+          <span class="theme-text" id="theme-text">Auto</span>
+        </button>
+      </div>
+    </header>
+
     <div class="page">
-      <div class="page-heading"><div><div class="eyebrow">OPEN SOURCE, IN FOCUS</div><h1>Look beyond the last commit.</h1><p>Explore maintenance signals, trace the evidence, and understand what comes next.</p></div><span class="outline-tag">12-month horizon</span></div>
-      <section class="panel analysis-form" aria-labelledby="analyze-heading">
-        <div class="section-heading"><h2 id="analyze-heading">Analyze a repository</h2><span class="muted">PyPI package or verified GitHub mapping</span></div>
-        <form id="analysis-form">
-          <div class="input-line"><label class="search-field"><span aria-hidden="true">⌕</span><input id="identifier" name="identifier" value="synthetic-demo" placeholder="Package name or https://github.com/owner/repo" required aria-label="Package name or GitHub URL"></label><button id="analyze" type="submit" class="primary">Analyze repository</button></div>
-          <div class="options">
-            <label>Analysis mode<select id="mode"><option>CORE</option><option>ENHANCED</option></select></label>
-            <label>Purpose<select id="purpose"><option value="retrospective_analysis">Retrospective analysis</option><option value="current_inference">Current inference</option></select></label>
-            <label>Cutoff (UTC, optional)<input type="datetime-local" id="cutoff" step="1"></label>
-            <label>PyPI mapping (optional)<input id="package" placeholder="Select package for GitHub URL"></label>
+      <section class="hero-header">
+        <div class="hero-copy">
+          <div class="eyebrow">
+            <span class="eyebrow-dot"></span>
+            OPEN SOURCE, IN FOCUS
           </div>
-          <div class="form-footer"><div class="checks"><label><input type="checkbox" id="insights"> External insights</label><label><input type="checkbox" id="agents"> Specialist agents</label><label><input type="checkbox" id="impact"> Dependency impact</label></div><span class="muted">Data access is configured by the API server.</span></div>
+          <h1>Look beyond the <span class="gradient-text">last commit.</span></h1>
+          <p>Explore maintenance signals, trace verifiable evidence, and forecast 12-month continuity with transparent uncertainty.</p>
+        </div>
+        <div class="hero-badges">
+          <span class="outline-tag">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            12-month horizon
+          </span>
+          <span class="badge-tech">T-028 Contract</span>
+        </div>
+      </section>
+
+      <section class="panel spotlight-card analysis-form" aria-labelledby="analyze-heading">
+        <div class="section-heading">
+          <div>
+            <h2 id="analyze-heading">Analyze a repository</h2>
+            <span class="muted">Enter a PyPI package name or verified GitHub repository URL</span>
+          </div>
+          <div class="keyboard-tip" aria-hidden="true">Press <kbd>/</kbd> to focus</div>
+        </div>
+
+        <form id="analysis-form">
+          <div class="input-line">
+            <label class="search-field">
+              <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+              </svg>
+              <input id="identifier" name="identifier" value="synthetic-demo" placeholder="Package name or https://github.com/owner/repo" required aria-label="Package name or GitHub URL" autocomplete="off" spellcheck="false">
+              <button type="button" id="clear-identifier" class="input-clear-btn" aria-label="Clear input" title="Clear">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </label>
+            <button id="analyze" type="submit" class="primary">
+              <svg class="btn-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              <span class="btn-text">Analyze repository</span>
+            </button>
+          </div>
+
+          <div class="quick-presets" aria-label="Orchestrator input suggestions">
+            <span class="preset-label">Orchestrator bundle:</span>
+            <button type="button" class="preset-chip preset-accent" data-fill="synthetic-demo" title="Fill synthetic-demo to run the real orchestrator">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+              synthetic-demo
+            </button>
+          </div>
+
+          <div class="options">
+            <label>
+              <span class="label-text">Analysis mode</span>
+              <select id="mode">
+                <option value="CORE">CORE</option>
+                <option value="ENHANCED">ENHANCED</option>
+              </select>
+            </label>
+            <label>
+              <span class="label-text">Purpose</span>
+              <select id="purpose">
+                <option value="retrospective_analysis">Retrospective analysis</option>
+                <option value="current_inference">Current inference</option>
+              </select>
+            </label>
+            <label>
+              <span class="label-text">Cutoff (UTC, optional)</span>
+              <input type="datetime-local" id="cutoff" step="1">
+            </label>
+            <label>
+              <span class="label-text">PyPI mapping (optional)</span>
+              <input id="package" placeholder="Select package for GitHub URL">
+            </label>
+          </div>
+
+          <div class="form-footer">
+            <div class="checks">
+              <label class="switch-control">
+                <input type="checkbox" id="insights">
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+                <span class="switch-label">External insights</span>
+              </label>
+              <label class="switch-control">
+                <input type="checkbox" id="agents">
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+                <span class="switch-label">Specialist agents</span>
+              </label>
+              <label class="switch-control">
+                <input type="checkbox" id="impact">
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+                <span class="switch-label">Dependency impact</span>
+              </label>
+            </div>
+            <span class="muted footer-note">Data access is configured by the API server.</span>
+          </div>
         </form>
       </section>
-      <div class="demo-bar"><div><span class="demo-label">SYNTHETIC DEMO</span><span>Explore a report state</span></div><div class="demo-actions"><label class="sr-only" for="scenario">Example report</label><select id="scenario" disabled><option>Loading examples…</option></select><button id="load-demo" class="secondary" disabled>Load example</button></div></div>
-      <div id="progress" class="progress" role="status" aria-live="polite">Ready. Analyze a package or load a synthetic example.</div>
+
+      <div class="demo-bar" id="demo-bar">
+        <div class="demo-info">
+          <span class="demo-label">SYNTHETIC FIXTURES</span>
+          <span class="demo-desc">Preview report states on synthetic-demo fixture</span>
+        </div>
+        <div class="demo-pills" id="scenario-pills" role="group" aria-label="Synthetic example reports">
+          <span class="muted">Loading examples…</span>
+        </div>
+      </div>
+
+      <div class="pipeline-bar" id="pipeline-bar" data-state="idle">
+        <div class="pipeline-steps" aria-hidden="true">
+          <span class="pipe-node" data-step="submit"><span class="pipe-dot"></span>Submit</span>
+          <span class="pipe-line"></span>
+          <span class="pipe-node" data-step="queued"><span class="pipe-dot"></span>Queue</span>
+          <span class="pipe-line"></span>
+          <span class="pipe-node" data-step="running"><span class="pipe-dot"></span>Evaluate</span>
+          <span class="pipe-line"></span>
+          <span class="pipe-node" data-step="complete"><span class="pipe-dot"></span>Report</span>
+        </div>
+        <div class="pipeline-meta">
+          <div id="progress" class="progress" role="status" aria-live="polite">
+            Ready. Analyze a package or load a synthetic example.
+          </div>
+          <span id="elapsed-timer" class="elapsed-timer" hidden>0.0s</span>
+        </div>
+      </div>
+
       <section id="report" aria-label="Analysis report" hidden>
-        <div class="report-heading"><div><div class="eyebrow" id="report-context"></div><h2 id="report-package"></h2><p id="report-subtitle"></p></div><button id="download" class="secondary">Export JSON</button></div>
-        <div id="synthetic-notice" class="notice" hidden>Synthetic fixture · For interface demonstration only. These values are not estimates for a real package.</div>
-        <div class="summary-grid"><section class="panel outcome" id="outcome"></section><section class="panel metadata" id="metadata"></section><section class="panel impact" id="impact-card"></section></div>
-        <div class="tabs" role="tablist" aria-label="Report details"><button role="tab" id="tab-evidence" aria-selected="true" aria-controls="details" data-tab="evidence">Evidence <span id="evidence-count"></span></button><button role="tab" id="tab-coverage" aria-selected="false" aria-controls="details" data-tab="coverage" tabindex="-1">Coverage</button><button role="tab" id="tab-sources" aria-selected="false" aria-controls="details" data-tab="sources" tabindex="-1">Sources & cutoff</button><button role="tab" id="tab-model" aria-selected="false" aria-controls="details" data-tab="model" tabindex="-1">Model & limitations</button></div>
+        <div class="report-heading">
+          <div class="report-title-meta">
+            <div class="eyebrow" id="report-context"></div>
+            <div class="report-pkg-row">
+              <h2 id="report-package"></h2>
+              <span class="pill accent" id="report-scenario-badge" hidden></span>
+              <span class="run-id-chip" id="report-run-id" title="Click to copy Analysis Run ID"></span>
+            </div>
+            <p id="report-subtitle"></p>
+          </div>
+          <div class="report-actions">
+            <button id="inspect-json" class="secondary action-btn" type="button" title="Inspect formatted JSON">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+              <span>Inspect JSON</span>
+            </button>
+            <button id="copy-json" class="secondary action-btn" type="button" title="Copy report JSON to clipboard">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span>Copy JSON</span>
+            </button>
+            <button id="download" class="secondary action-btn" type="button" title="Download original FinalReport JSON">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span>Export JSON</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="synthetic-notice" class="notice" hidden>
+          <svg class="notice-svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+          <span><strong>Synthetic fixture</strong> · For interface demonstration only. These values are not estimates for a real package.</span>
+        </div>
+
+        <div class="summary-grid">
+          <section class="panel spotlight-card outcome" id="outcome"></section>
+          <section class="panel spotlight-card metadata" id="metadata"></section>
+          <section class="panel spotlight-card impact" id="impact-card"></section>
+        </div>
+
+        <div class="tabs-container">
+          <div class="tabs" role="tablist" aria-label="Report details">
+            <button role="tab" id="tab-evidence" aria-selected="true" aria-controls="details" data-tab="evidence">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              <span>Evidence</span>
+              <span id="evidence-count" class="counter-badge">0</span>
+            </button>
+            <button role="tab" id="tab-coverage" aria-selected="false" aria-controls="details" data-tab="coverage" tabindex="-1">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+              <span>Coverage</span>
+              <span id="coverage-count" class="counter-badge">0</span>
+            </button>
+            <button role="tab" id="tab-sources" aria-selected="false" aria-controls="details" data-tab="sources" tabindex="-1">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+              <span>Sources & cutoff</span>
+              <span id="sources-count" class="counter-badge">0</span>
+            </button>
+            <button role="tab" id="tab-model" aria-selected="false" aria-controls="details" data-tab="model" tabindex="-1">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+              <span>Model & limitations</span>
+            </button>
+          </div>
+        </div>
+
         <section id="details" class="panel details" role="tabpanel" aria-labelledby="tab-evidence"></section>
       </section>
-      <section id="empty" class="empty"><div class="empty-glyph">◈</div><h2>A clearer view starts with a package.</h2><p>Your report will bring together a result, its evidence,<br>and the limits of what the data can tell us.</p><div class="empty-steps"><span>01 &nbsp; Resolve package</span><span>02 &nbsp; Evaluate evidence</span><span>03 &nbsp; Explore report</span></div></section>
-      <footer>RepoSeer <span>Maintenance risk and ecosystem impact are separate assessments.</span></footer>
+
+      <section id="empty" class="empty">
+        <div class="empty-visual" aria-hidden="true">
+          <svg class="constellation-svg" viewBox="0 0 420 140" fill="none">
+            <defs>
+              <linearGradient id="flow-grad" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stop-color="var(--primary)" stop-opacity="0.15"/>
+                <stop offset="50%" stop-color="var(--accent)" stop-opacity="0.9"/>
+                <stop offset="100%" stop-color="var(--primary)" stop-opacity="0.2"/>
+              </linearGradient>
+            </defs>
+            <path class="flow-path" d="M 62 32 C 135 32, 145 70, 210 70" stroke="url(#flow-grad)" stroke-width="1.8" stroke-dasharray="4 4"/>
+            <path class="flow-path" d="M 62 70 L 210 70" stroke="url(#flow-grad)" stroke-width="1.8" stroke-dasharray="4 4"/>
+            <path class="flow-path" d="M 62 108 C 135 108, 145 70, 210 70" stroke="url(#flow-grad)" stroke-width="1.8" stroke-dasharray="4 4"/>
+            <path class="flow-path flow-out" d="M 210 70 L 358 70" stroke="url(#flow-grad)" stroke-width="2.2" stroke-dasharray="5 4"/>
+
+            <g class="c-node">
+              <circle cx="52" cy="32" r="14" class="c-ring"/>
+              <circle cx="52" cy="32" r="4.5" fill="var(--primary)"/>
+            </g>
+            <g class="c-node">
+              <circle cx="52" cy="70" r="14" class="c-ring"/>
+              <circle cx="52" cy="70" r="4.5" fill="var(--accent)"/>
+            </g>
+            <g class="c-node">
+              <circle cx="52" cy="108" r="14" class="c-ring"/>
+              <circle cx="52" cy="108" r="4.5" fill="var(--risk-low)"/>
+            </g>
+
+            <g class="c-core">
+              <circle cx="210" cy="70" r="28" class="c-pulse"/>
+              <circle cx="210" cy="70" r="20" class="c-core-bg"/>
+              <polygon points="210,59 219.5,64.5 219.5,75.5 210,81 200.5,75.5 200.5,64.5" stroke="var(--primary)" stroke-width="1.8" fill="none"/>
+              <circle cx="210" cy="70" r="3" fill="var(--primary)"/>
+            </g>
+
+            <g class="c-node">
+              <circle cx="368" cy="70" r="16" class="c-ring"/>
+              <path d="M 362 70 L 366.5 74.5 L 375 65.5" stroke="var(--risk-low)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </g>
+          </svg>
+        </div>
+
+        <h2>A clearer view starts with a package.</h2>
+        <p>Your report combines maintenance risk signals, verified citations, temporal cutoff boundaries, and independent ecosystem impact.</p>
+
+        <div class="empty-launch-grid">
+          <button type="button" class="launch-card spotlight-card" data-scenario="enhanced">
+            <div class="launch-card-top">
+              <span class="pill">ENHANCED</span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
+            </div>
+            <strong>Full prediction + agents</strong>
+            <span>Radial risk gauge, CORE delta comparison, citations & dependency orbit.</span>
+          </button>
+          <button type="button" class="launch-card spotlight-card" data-scenario="scheduled">
+            <div class="launch-card-top">
+              <span class="pill warning">SCHEDULED</span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
+            </div>
+            <strong>Scheduled cessation</strong>
+            <span>Official status precedence with verified ledger timeline & horizon check.</span>
+          </button>
+          <button type="button" class="launch-card spotlight-card" data-scenario="fallback">
+            <div class="launch-card-top">
+              <span class="pill neutral">FALLBACK</span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
+            </div>
+            <strong>Explicit CORE fallback</strong>
+            <span>Transparent fallback reason, report-only evidence & partial census coverage.</span>
+          </button>
+        </div>
+      </section>
+
+      <footer>
+        <div class="footer-brand">RepoSeer <span>Repository Intelligence</span></div>
+        <span class="footer-disclaimer">Maintenance risk and ecosystem impact are separate assessments.</span>
+      </footer>
     </div>
   </main>
+
+  <div id="json-drawer-backdrop" class="drawer-backdrop" hidden></div>
+  <aside id="json-drawer" class="json-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden>
+    <div class="drawer-header">
+      <div>
+        <h3 id="drawer-title">FinalReport JSON Inspector</h3>
+        <span class="muted" id="drawer-subtitle">Original unmodified API payload</span>
+      </div>
+      <div class="drawer-actions">
+        <button type="button" id="drawer-copy" class="secondary action-btn">Copy</button>
+        <button type="button" id="drawer-close" class="icon-close-btn" aria-label="Close JSON inspector">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="drawer-body">
+      <pre id="json-viewer" class="json-viewer"></pre>
+    </div>
+  </aside>
 </body>
 </html>
