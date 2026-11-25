@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+.pytest_cache
+.ruff_cache
+.env
+.env.*
+.agents
+.aws
+.codex
+data
+notebooks
+tests
+**/__pycache__
+**/*.pyc
