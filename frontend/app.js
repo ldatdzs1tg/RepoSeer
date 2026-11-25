@@ -87,6 +87,8 @@ initParticles();
 // Spotlight Mouse Glow (Global Cursor Aura + Card Spotlight)
 // ============================================================================
 const cursorGlow = $('cursor-glow');
+const hideCursorGlow = () => cursorGlow?.classList.remove('visible');
+
 document.addEventListener('pointermove', (event) => {
   if (cursorGlow && event.pointerType !== 'touch') {
     cursorGlow.style.transform = `translate3d(${event.clientX}px, ${event.clientY}px, 0)`;
@@ -99,9 +101,17 @@ document.addEventListener('pointermove', (event) => {
   card.style.setProperty('--my', `${event.clientY - rect.top}px`);
 });
 
-document.addEventListener('pointerleave', () => {
-  cursorGlow?.classList.remove('visible');
+// Native <select> / date pickers capture pointer events outside the DOM; fade aura cleanly while open.
+document.addEventListener('pointerdown', (event) => {
+  if (event.target.closest('select, input[type="datetime-local"]')) {
+    hideCursorGlow();
+  }
 });
+
+document.addEventListener('mouseout', (event) => {
+  if (!event.relatedTarget) hideCursorGlow();
+});
+window.addEventListener('blur', hideCursorGlow);
 
 // ============================================================================
 // Theme Management (OS Auto on first load, Sun <-> Moon slide switch)
